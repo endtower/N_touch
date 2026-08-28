@@ -1,0 +1,27 @@
+{
+  "name": "abyss-web-test",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "@tanstack/vue-virtual": "^3.13.36",
+    "@types/cytoscape": "^3.21.9",
+    "axios": "^1.7.7",
+    "cytoscape": "^3.34.0",
+    "element-plus": "^2.8.4",
+    "vue": "^3.5.10"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@vitejs/plugin-vue": "^5.1.4",
+    "typescript": "~5.6.2",
+    "vite": "^5.4.8",
+    "vue-tsc": "^2.1.6"
+  }
+}

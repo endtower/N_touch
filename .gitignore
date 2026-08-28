@@ -1,0 +1,140 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.venv/
+env/
+
+# Testing
+pytest_cache/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Editor directories and files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+
+# OS generated files
+Thumbs.db
+.DS_Store
+
+# Local config files
+config.json
+config.yaml
+config.yml
+
+# Temporary files
+*.tmp
+*.temp
+.temp/
+.tmp/
+
+# Documentation build files
+docs/_build/
+docs/build/
+
+# CI/CD
+gitlab-ci.yml
+.travis.yml
+Jenkinsfile
+.github/
+
+# ==================================================
+# Sanitized-project additions: exclude personal data
+# ==================================================
+
+# Frontend deps / build
+web_frontend/node_modules/
+web_frontend/dist/
+web_frontend/.env
+web_frontend/.env.local
+
+# Memory / chat history (private)
+memory/
+memory/chat/
+memory/chat_history/
+memory/backups/
+memory/event_history/
+
+# Neo4j runtime data
+brain/hc/database/neo4j-chs-community-5.10.0-windows/data/
+brain/hc/database/neo4j-chs-community-5.10.0-windows/run/
+brain/hc/database/neo4j-chs-community-5.10.0-windows/logs/
+brain/hc/database/neo4j-chs-community-5.10.0-windows/*.log
+brain/hc/database/neo4j-chs-community-5.10.0-windows/__pycache__/
+
+# SnowLuma (private DB + logs)
+SnowLuma/data/
+SnowLuma/logs/
+SnowLuma/
+
+# Neo4j (entire directory excluded)
+brain/hc/database/neo4j-chs-community-5.10.0-windows/
+
+# None_Tooth dev configs
+None_Tooth/.env
+None_Tooth/.env.local
+None_Tooth/__pycache__/
+None_Tooth/none_tooth/plugins/message_storage/
+
+# Amy persistence (private state)
+brain/amy/persistence/*.json
+brain/amy/__pycache__/
+
+# Linter / formatter caches
+.ruff_cache/
+.pytest_cache/
+
+# Test fixtures (private chat payloads)
+adapt/onebot/tests/fixtures/private_*.json
+
+# Runtime state (token stats, traces)
+token_stats.json
+token_trace.json
+
+# Adapt web runtime identity data (contains private user IDs/names)
+adapt/web/data/
+# ===== 本地敏感文件（永不入库）=====
+config/settings.py
+config/role_settings.py
+config/adapt_settings.py
+config/truck_settings.py
+brain/hc/database/default_initializer.py
+/tests/
+_tmp_*
