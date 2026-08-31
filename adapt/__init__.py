@@ -9,7 +9,7 @@ adapt
 
 职责：
     1. 把不同平台（QQ / 微信 / ...）的事件归一化为统一数据形状（NormalizedEvent）
-    2. 把归一化事件发布到 core.message_bus
+    2. 把归一化事件交给消息处理器（memory.message_handler）落库
     3. 提供 OutboundRouter，把出站消息按 platform 路由到对应 Channel
     4. 通过 ChannelManager 统一管理所有 Channel 的生命周期
 
@@ -26,6 +26,10 @@ adapt
     - Channel
     - OutboundRouter, get_outbound_router
     - ChannelManager, get_channel_manager
+
+API 文档：协议类型见 docs/api/infrastructure.md；出站路由/频道管理见
+docs/api/onebot_api.md；web 子包接口见 docs/api/web_api.md。
+修改对外接口后必须同步更新对应文档（校验：python scripts/check_api_docs.py）。
 """
 
 from .protocol import (

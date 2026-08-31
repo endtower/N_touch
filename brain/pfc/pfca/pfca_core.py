@@ -75,7 +75,11 @@ class PFCACore:
         Returns:
             Dict[str, Any]: LLM处理的最终结果
         """
-        get_pfca_input_manager().prepare_first_message(
+        input_manager = get_pfca_input_manager()
+        # 新一轮 PFCA：先复位单例状态（_first_activation / 残留队列请求），再缓存首条。
+        # 单例跨运行共享，不复位会导致下一次运行的首条消息走增量路径而静默丢失。
+        input_manager.reset()
+        input_manager.prepare_first_message(
             FirstMessageType.NORMAL_STARTUP,
             current_session,
             message=purpose,

@@ -86,8 +86,8 @@ class OneBotChannel:
         self._send_futures: Dict[str, asyncio.Future] = {}
         self._send_lock = asyncio.Lock()
 
-        # 接收：MessageBus（外部注入）
-        self._message_bus: Optional[Any] = None   # 避免 import 循环
+        # 接收：消息处理器（外部注入，入站消息直达 message_handler）
+        self._message_processor: Optional[Any] = None   # 避免 import 循环
 
         # 原始事件录制器（可选）
         self._recorder: Optional[RawEventRecorder] = None
@@ -121,9 +121,9 @@ class OneBotChannel:
     # 注入
     # --------------------------------------------------------
 
-    def bind_message_bus(self, message_bus: Any) -> None:
-        """由 ChannelManager 在 start 前注入 message_bus。"""
-        self._message_bus = message_bus
+    def bind_message_processor(self, message_processor: Any) -> None:
+        """由 ChannelManager 在 start 前注入消息处理器。"""
+        self._message_processor = message_processor
 
     # --------------------------------------------------------
     # 状态查询（供调用方在 send 之前检查）
@@ -347,7 +347,7 @@ class OneBotChannel:
                 )
             if ev is None:
                 return
-            await self._dispatch_to_bus(ev)
+            await self._dispatch_inbound(ev)
             return
 
         # 其它类型（notice / request）：当前忽略
@@ -363,19 +363,19 @@ class OneBotChannel:
                 },
             )
 
-    async def _dispatch_to_bus(self, ev: NormalizedEvent) -> None:
-        if self._message_bus is None:
-            logger.error("[OneBot] message_bus 未绑定，事件将被丢弃")
+    async def _dispatch_inbound(self, ev: NormalizedEvent) -> None:
+        if self._message_processor is None:
+            logger.error("[OneBot] message_processor 未绑定，事件将被丢弃")
             return
         try:
             payload = ev.to_system_message_dict()
-            await self._message_bus.publish("user_message", payload)
+            await self._message_processor.process_message(payload)
             logger.debug(
-                f"[OneBot] published: {ev.platform.value} "
+                f"[OneBot] dispatched: {ev.platform.value} "
                 f"{ev.scope.value} user={ev.user_id} text={ev.content_text[:60]!r}"
             )
         except Exception:
-            logger.exception("[OneBot] publish 到 message_bus 失败")
+            logger.exception("[OneBot] 入站消息处理失败")
 
     # --------------------------------------------------------
     # 出站

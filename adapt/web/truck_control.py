@@ -26,11 +26,6 @@ _TRUCK_META: Dict[str, Dict[str, Any]] = {
         "description": "监控 LLM 当前正在处理的任务进度",
         "category": "监控",
     },
-    "crash_truck": {
-        "label": "amy 崩溃监控",
-        "description": "检测 amy 模块崩溃态，触发时投递到 proactive",
-        "category": "监控",
-    },
     "special_attention_truck": {
         "label": "特别关注用户",
         "description": "高优先级用户会话的特殊轮询",
@@ -49,13 +44,11 @@ def _apply_to_config(truck_id: str, enabled: bool) -> None:
     try:
         from config.truck_settings import (
             private_truck_config, ongoing_truck_config,
-            crash_truck_config, special_attention_truck_config,
-            scheduled_proactive_truck_config,
+            special_attention_truck_config, scheduled_proactive_truck_config,
         )
         mapping = {
             "private_truck": private_truck_config,
             "ongoing_truck": ongoing_truck_config,
-            "crash_truck": crash_truck_config,
             "special_attention_truck": special_attention_truck_config,
             "scheduled_proactive_truck": scheduled_proactive_truck_config,
         }

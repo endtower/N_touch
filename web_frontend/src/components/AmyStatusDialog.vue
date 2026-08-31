@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
-import { MagicStick, Refresh, Aim, ChatLineSquare, Sunny, Lightning, Warning, Clock } from '@element-plus/icons-vue'
+import { MagicStick, Refresh, ChatLineSquare, Sunny, Lightning, Clock } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { AmyState, AmyThought, AmyActEntry, AmyDescriptionBand } from '../types'
 
@@ -88,12 +88,6 @@ function moodTone(v: number) {
   return { color: 'var(--text-3)', bg: 'var(--bg-subtle)', label: '平静' }
 }
 
-function systemStateMeta(value: string) {
-  if (value === 'crashed') return { label: 'CRASHED', color: 'var(--danger)', bg: 'rgba(239, 68, 68, 0.18)', icon: Warning, desc: '崩溃中 - 覆盖 prompt 输出' }
-  if (value === 'not_crashed') return { label: 'NOT_CRASHED', color: 'var(--warn)', bg: 'rgba(245, 158, 11, 0.18)', icon: Lightning, desc: '安抚窗口 - 最后一根稻草' }
-  return { label: 'NORMAL', color: 'var(--accent-2)', bg: 'rgba(52, 211, 153, 0.18)', icon: Sunny, desc: '正常态' }
-}
-
 function actCategoryLabel(c: AmyThought['category']) {
   switch (c) {
     case 'external':    return { label: '外部互动', color: 'var(--accent-2)' }
@@ -136,12 +130,6 @@ function thoughtContribution(t: AmyThought): { ne: number; da: number } {
 const MOOD_RANGE = 100
 function gaugeWidth(v: number) {
   return Math.min(Math.abs(v), MOOD_RANGE) / MOOD_RANGE * 100
-}
-
-function stateBadgeClass(s: string) {
-  if (s === 'crashed') return 'danger'
-  if (s === 'not_crashed') return 'warning'
-  return 'success'
 }
 
 function showAct(name: string) {
@@ -245,40 +233,6 @@ function showAct(name: string) {
           </div>
         </div>
 
-        <!-- 系统状态卡片 -->
-        <div class="amy-gauge-card">
-          <div class="amy-gauge-head">
-            <span class="amy-gauge-label">
-              <el-icon :size="13"><Aim /></el-icon>
-              系统状态
-            </span>
-            <span class="amy-gauge-value" :style="{ color: systemStateMeta(data.system_state.value).color }">
-              {{ data.system_state.value }}
-            </span>
-          </div>
-          <div class="amy-state-banner" :style="{ background: systemStateMeta(data.system_state.value).bg, color: systemStateMeta(data.system_state.value).color }">
-            <el-icon :size="14"><component :is="systemStateMeta(data.system_state.value).icon" /></el-icon>
-            <span>{{ systemStateMeta(data.system_state.value).desc }}</span>
-          </div>
-          <div class="amy-state-grid">
-            <div>
-              <span>崩溃指数</span>
-              <strong :class="['amy-ci', stateBadgeClass(data.system_state.value)]">{{ data.system_state.crash_index.toFixed(1) }}</strong>
-              <em>/ 阈值 {{ data.amy_descriptions?.crash_threshold ?? '?' }}</em>
-            </div>
-            <div>
-              <span>覆盖中</span>
-              <strong>{{ data.system_state.is_covered ? '是' : '否' }}</strong>
-            </div>
-            <div v-if="data.system_state.active_info">
-              <span>剩余</span>
-              <strong>{{ durationShort(data.system_state.active_info.remaining_seconds) }}</strong>
-            </div>
-          </div>
-          <div v-if="data.system_state.active_info?.last_straw_desc" class="amy-straw">
-            最后一根稻草: {{ data.system_state.active_info.last_straw_desc }}
-          </div>
-        </div>
       </section>
 
       <!-- LLM 实际看到的描述 -->

@@ -412,7 +412,7 @@ class PFCA_tool_manager(ToolManager):
         # 直接委托 ConversationCore / SocialChatCore（不再经过 social_agent 模块）：
         # 1) 先用 ConversationCore 与主人商讨社交计划并获取审批；
         # 2) 再用 SocialChatCore 把主人确认后的方案发送到工作会话。
-        from brain.chat.conversation.conversation_core import ConversationCore
+        from brain.chat.conversation.conversation_core import get_conversation_core
         from brain.chat.social_chat.social_chat_core import SocialChatCore
         from config.settings import chat_config
 
@@ -423,7 +423,7 @@ class PFCA_tool_manager(ToolManager):
             f"任务目标：{task_info.strip()}\n"
             "请与主人商讨社交计划并获取审批。"
         )
-        conversation_core = ConversationCore()
+        conversation_core = get_conversation_core()
         plan = await conversation_core.start_session(
             session_id=master_private,
             purpose=combined_purpose,

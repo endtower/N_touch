@@ -203,7 +203,7 @@ class NormalizedEvent:
         return self.session_id
 
     def to_system_message_dict(self) -> Dict[str, Any]:
-        """转成 core.system_core.add_message 期望的格式。
+        """转成 memory.message_handler.process_message 期望的格式。
 
         目标格式（参见 api/routes.py:130-135 与 memory/message_handler.py）：
             {
@@ -294,7 +294,7 @@ class Channel(Protocol):
     def subscribe(self) -> AsyncIterator[NormalizedEvent]:
         """可选：供需要"原始平台事件流"的订阅者使用。
 
-        大多数情况下 Channel 内部直接 publish 到 MessageBus，
+        大多数情况下 Channel 内部直接调用注入的消息处理器（message_handler），
         不需要外部订阅。保留这个方法是为了将来能透传平台特有事件。
         """
         raise NotImplementedError

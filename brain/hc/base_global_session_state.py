@@ -66,13 +66,7 @@ def _extract_session_type(session_id: str) -> str:
 class BaseGlobalSessionState:
     """全局会话状态主要基类 - 提供公共基础设施"""
 
-    _instance = None
     _lock = asyncio.Lock()
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(BaseGlobalSessionState, cls).__new__(cls)
-        return cls._instance
 
     def __init__(self):
         if not hasattr(self, '_initialized'):

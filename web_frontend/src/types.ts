@@ -508,26 +508,6 @@ export interface ContextFileContent {
 // Amy 情绪状态
 // ============================================================
 
-export interface AmyActiveInfo {
-  mode: 'none' | 'crashed' | 'not_crashed'
-  description: string
-  last_straw_desc: string
-  crash_subtype: string
-  start_time: number
-  end_time: number
-  remaining_seconds: number
-}
-
-export interface AmySystemState {
-  value: 'none' | 'crashed' | 'not_crashed'
-  is_crashed: boolean
-  is_not_crashed: boolean
-  is_covered: boolean
-  crash_index: number
-  active_info: AmyActiveInfo | null
-  cover_description: string | null
-}
-
 export interface AmyThought {
   id: string
   act: string
@@ -564,14 +544,12 @@ export interface AmyDescriptions {
   dopamine: AmyDescriptionBand[]
   norepinephrine: AmyDescriptionBand[]
   range: { min: number; max: number }
-  crash_threshold: number
 }
 
 export interface AmyState {
   initialized: boolean
   fetched_at?: number
   mood: AmyMood
-  system_state: AmySystemState
   amy_description: string
   thoughts: {
     all_active_count: number

@@ -7,19 +7,17 @@ Amy 情绪系统核心接口
 提供两个核心方法：
 - build_thought: 根方法，不约束 act 输入，调用方全责（唯一写入入口）
 - build_conversation_thought: 适配层（薄），用于 conversation tool 路径，内部调 build_thought
-- get_amy_description: 统一出站出口（覆盖态/正常态），所有消费者都走这里
+- get_amy_description: 统一出站出口，所有消费者都走这里
 - get_mood_snapshot: 统一快照出口，供需要数值快照的消费者（reorganize/strategy_check/amy_api）使用
-
-崩溃机制接入：
-- get_amy_description() 内部早退分支，崩溃/未崩期返回覆盖描述
-- build_thought() 末尾顺带缩短崩溃时间（正向情绪机制）
 
 情绪消费者游标：
 - 用"事件日志 + 消费者游标"替代"记录上次情绪值"去重逻辑
 - get_unread_events(consumer_id) / advance_cursor(consumer_id, seq)
+
+注：崩溃/覆盖机制已于 2026-08-30 移除（拍板记录见 docs/amy情绪系统设计思路.md），
+get_amy_description / build_thought 不再包含覆盖态分支与崩溃到期检查。
 """
 
-import asyncio
 import time
 from pathlib import Path
 from typing import Optional, Tuple, List
@@ -27,11 +25,10 @@ from typing import Optional, Tuple, List
 from brain.amy.constants import (
     ACT_EFFECTS, ACTEffects,
     SystemBuiltInAct,
-    Thought, MoodSnapshot, generate_timestamp_id, THOUGHT_DURATION, SystemState,
+    Thought, MoodSnapshot, generate_timestamp_id, THOUGHT_DURATION,
 )
 from brain.amy.thought_cache import ThoughtCache, calculate_duration
 from brain.amy.affinity import AffinityStore
-from brain.amy.crash import CrashSystem
 from brain.amy.event_log import EventLog
 from brain.amy.prompt_engine import get_amy_description
 from utils.logger import get_logger
@@ -40,38 +37,16 @@ logger = get_logger('amy_interface', 'INFO')
 
 
 class EmotionalInterface:
-    _instance = None
-
-    def __new__(cls, persistence_dir: Optional[Path] = None):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
+    """情绪系统对外接口（普通类，单例由模块级 get_emotional_interface 持有）。"""
 
     def __init__(self, persistence_dir: Optional[Path] = None):
-        if self._initialized:
-            return
         if persistence_dir is None:
             persistence_dir = Path(__file__).resolve().parent / "persistence"
         persistence_dir.mkdir(exist_ok=True)
-        # 情绪事件日志（内存实现），先创建并注入给 thought_cache / crash_system
+        # 情绪事件日志（内存实现），注入给 thought_cache 写事件
         self.event_log = EventLog()
         self.thought_cache = ThoughtCache(persistence_dir, event_log=self.event_log)
         self.affinity_store = AffinityStore(persistence_dir)
-        self.crash_system = CrashSystem(persistence_dir)
-        self.crash_system.bind_thought_cache(self.thought_cache)
-        self.crash_system.bind_event_log(self.event_log)
-        self._initialized = True
-        # 启动 1Hz 崩溃自检（与 get_amy_description 调用频率解耦）
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self.crash_system.start_monitor(tick_seconds=1.0))
-            else:
-                # 无 event loop 时（如单元测试），跳过 monitor
-                logger.debug("No running event loop, skip crash monitor start")
-        except RuntimeError:
-            logger.debug("No event loop, skip crash monitor start")
         logger.info("EmotionalInterface initialized")
 
     async def _bootstrap_system_acts(self) -> None:
@@ -135,9 +110,6 @@ class EmotionalInterface:
             if dopamine_delta is None:
                 dopamine_delta = da_delta
 
-        # 顺带检查崩溃是否到期（覆盖态到期 -> NONE）
-        await self.crash_system.check_and_end_crash()
-
         now = int(time.time())
         ts = create_time if create_time is not None else now
         # duration 优先使用外部传入；缺省时按 act 表中 duration 字段查，再缺省回退 THOUGHT_DURATION
@@ -162,11 +134,6 @@ class EmotionalInterface:
             dynamic_prompt_manager.set('amy_effect', prompt)
         except Exception as e:
             logger.warning(f"推送 amy_effect 失败: {e}")
-
-        # 崩溃期间正向情绪缩短
-        if self.crash_system.is_crashed():
-            await self.crash_system.maybe_shorten_crash(snapshot)
-            await self.crash_system.maybe_shorten_crash_relaxed(snapshot)
 
         return True, "Thought built successfully", prompt
 
@@ -202,32 +169,13 @@ class EmotionalInterface:
 
     async def get_amy_description(self) -> str:
         """统一出口（所有消费者都走这里）：
-        1. 检查崩溃是否到期
-        2. 覆盖态 -> 返回覆盖描述
-        3. 正常态 -> 生成描述并推 amy_effect 到 dynamic_prompt
-        （崩溃概率判定由 1Hz monitor 异步处理，不在这里同步阻塞）
-        （增量消息由 chat/pfca 各自的 input_manager 负责，这里不推）
+        取快照生成描述并推 amy_effect 到 dynamic_prompt
+        （增量消息由 chat/pfca 各自的 input_manager 负责，这里不推）。
         """
-        # 1. 到期检查
-        await self.crash_system.check_and_end_crash()
-
-        # 2. 覆盖态早退
-        if self.crash_system.is_covered():
-            cover_desc = self.crash_system.get_cover_description()
-            if cover_desc:
-                # 覆盖态也推 amy_effect 槽位（避免 system prompt 滞后）
-                try:
-                    from utils.dynamic_prompt_manager import dynamic_prompt_manager
-                    dynamic_prompt_manager.set('amy_effect', cover_desc)
-                except Exception as e:
-                    logger.warning(f"推送 amy_effect (覆盖态) 失败: {e}")
-                return cover_desc
-
-        # 3. 正常态：取快照 + 生成描述
         snapshot = await self.thought_cache.calculate_mood_snapshot()
         description = get_amy_description(snapshot)
 
-        # 4. 推 amy_effect 到 dynamic_prompt_manager（chat/pfca 在 system prompt 读它）
+        # 推 amy_effect 到 dynamic_prompt_manager（chat/pfca 在 system prompt 读它）
         try:
             from utils.dynamic_prompt_manager import dynamic_prompt_manager
             dynamic_prompt_manager.set('amy_effect', description)
@@ -237,10 +185,7 @@ class EmotionalInterface:
         return description
 
     async def get_mood_snapshot(self) -> MoodSnapshot:
-        """统一快照出口：供需要数值快照的消费者（reorganize/strategy_check/amy_api）使用。
-        内部同样检查崩溃覆盖态（到期切回 NONE）。
-        """
-        await self.crash_system.check_and_end_crash()
+        """统一快照出口：供需要数值快照的消费者（reorganize/strategy_check/amy_api）使用。"""
         return await self.thought_cache.calculate_mood_snapshot()
 
     async def get_active_thought_ids(self) -> set:
@@ -261,36 +206,28 @@ class EmotionalInterface:
 
     # ===== 辅助方法 =====
 
-    async def get_final_moods(self) -> MoodSnapshot:
-        return await self.get_mood_snapshot()
-
     async def get_affinity(self, user_id: str) -> float:
         """获取好感度（async，返回 float）。"""
         return await self.affinity_store.get_affinity(user_id)
-
-    async def get_crash_index(self) -> float:
-        snapshot = await self.thought_cache.calculate_mood_snapshot()
-        return self.crash_system.get_crash_index(snapshot)
-
-    def is_crashed(self) -> bool:
-        return self.crash_system.is_crashed()
-
-    def is_not_crashed(self) -> bool:
-        return self.crash_system.is_not_crashed()
-
-    def is_stressed(self) -> bool:
-        return False
-
-    def check_crash_trigger(self) -> bool:
-        return False
 
 
 _emotional_interface: Optional[EmotionalInterface] = None
 
 
 async def get_emotional_interface(persistence_dir: Optional[Path] = None) -> EmotionalInterface:
+    """获取 amy 单例。首次创建时完成系统 act 引导。
+
+    注意：persistence_dir 仅在首次创建时生效；换目录走 reset_emotional_interface()
+    后重建（web 预设 / 测试隔离流程依赖该语义）。
+    """
     global _emotional_interface
     if _emotional_interface is None:
         _emotional_interface = EmotionalInterface(persistence_dir)
         await _emotional_interface._bootstrap_system_acts()
     return _emotional_interface
+
+
+async def reset_emotional_interface() -> None:
+    """清除单例（测试/预设环境用）。下次 get_emotional_interface 重建。"""
+    global _emotional_interface
+    _emotional_interface = None

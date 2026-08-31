@@ -274,7 +274,7 @@ const headerSubtitle = computed(() => {
           </button>
           <button
             class="truck-toggle-btn"
-            title="LLM 当前情绪状态 (Amy: NE/DA, crash state, 活跃 thought, ACT 表)"
+            title="LLM 当前情绪状态 (Amy: NE/DA, 活跃 thought, ACT 表)"
             @click="amyOpen = true"
           >
             <el-icon :size="14"><MagicStick /></el-icon>

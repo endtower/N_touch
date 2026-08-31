@@ -16,10 +16,10 @@ WebChannel：浏览器前端作为消息通道，替代 NapCat/QQ。
     |
     |  保存图片到 <MEDIA_BASE_DIR>/images/<date>/web_<uuid>.<ext>
     |  构造 NormalizedEvent (platform=WEB, scope=PRIVATE, session_id="private_web_user")
-    |  publish 到 message_bus 主题 "user_message"
+    |  直达消息处理器 message_handler.process_message 落库
     |  echo 用户消息回 WS（让前端立刻看到自己的消息）
     v
-  message_bus -> SystemCore -> attention -> brain -> LLM -> tool
+  message_handler -> chat_history.db -> attention/trucks 轮询 -> brain -> LLM -> tool
     |
     |  OutboundRouter.send(platform="web", target, payload)
     v
@@ -34,6 +34,9 @@ WebChannel：浏览器前端作为消息通道，替代 NapCat/QQ。
 - adapt/web/__init__.py
 - adapt/web/config.py   - WebChannelConfig
 - adapt/web/channel.py  - WebChannel 实现
+
+API 文档：docs/api/web_api.md —— 修改本包对外接口（HTTP 路由 / WS action / 推送）
+后必须同步更新该文档（校验：python scripts/check_api_docs.py）。
 """
 
 from .config import WebChannelConfig

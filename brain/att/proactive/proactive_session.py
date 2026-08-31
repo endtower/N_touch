@@ -182,7 +182,7 @@ class ProactiveSession(HeavySession):
 
         # 当 truck 传入了触发事件时, 在首条 user 消息底部追加一句「本次主动唤醒原因」
         # 唤醒原因文本由 truck 在 task_draft.wakeup_reason 中显式给出
-        # (目前由 crash_truck / scheduled_proactive_truck / ongoing_truck 三个推给 proactive 的 truck 强制填入);
+        # (目前由 scheduled_proactive_truck / ongoing_truck 两个推给 proactive 的 truck 强制填入);
         # 未提供则温柔兜底 (有 triggered_event 时用事件型文案, 否则省略避免空话)。
         wakeup_reason = self.task_draft.get("wakeup_reason")
         if not wakeup_reason and triggered_event:

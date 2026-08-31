@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """重型 Session 基类：有状态、多轮循环、持久化上下文的会话执行单元。
 
-设计文档：docs/heavyweight_session_base_design.md
+设计文档：docs/archive/heavyweight_session_base_design.md
 
 本基类抽象出 4 个重型 Session（PFCASession / ConversationSession /
 SocialChatSession / ProactiveSession）的公共骨架：

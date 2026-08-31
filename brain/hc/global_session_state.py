@@ -18,6 +18,7 @@ from brain.hc.base_global_session_state import (
     register_state_change_callback,
     unregister_state_change_callback,
 )
+from typing import Optional
 from brain.hc.session_data import SessionDataMixin
 from brain.hc.processing_record import ProcessingRecordMixin
 from brain.hc.event_chain import EventChainMixin
@@ -31,9 +32,15 @@ class GlobalSessionState(
     EventChainMixin,
     FrontendBroadcastMixin,
 ):
-    """全局会话状态聚合主类（单例）"""
+    """全局会话状态聚合主类（单例由模块级工厂持有）"""
+
+
+_global_session_state_instance: Optional[GlobalSessionState] = None
 
 
 def get_global_session_state() -> GlobalSessionState:
     """获取全局会话状态单例"""
-    return GlobalSessionState()
+    global _global_session_state_instance
+    if _global_session_state_instance is None:
+        _global_session_state_instance = GlobalSessionState()
+    return _global_session_state_instance

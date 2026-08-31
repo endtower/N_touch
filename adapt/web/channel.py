@@ -290,8 +290,8 @@ class WebChannel:
         self._clients: Set[web.WebSocketResponse] = set()
         self._clients_lock = asyncio.Lock()
 
-        # message_bus
-        self._message_bus: Optional[Any] = None
+        # 消息处理器（外部注入，入站消息直达 message_handler）
+        self._message_processor: Optional[Any] = None
 
         # 会话存储（SQLite chat_history.db = 与主系统同一数据源）
         self._store = DBStore()
@@ -312,8 +312,8 @@ class WebChannel:
     # 注入
     # --------------------------------------------------------
 
-    def bind_message_bus(self, message_bus: Any) -> None:
-        self._message_bus = message_bus
+    def bind_message_processor(self, message_processor: Any) -> None:
+        self._message_processor = message_processor
 
     def is_connected(self) -> bool:
         return len(self._clients) > 0
@@ -971,20 +971,20 @@ class WebChannel:
             "role": None,
         })
 
-        # 5) publish
-        if self._message_bus is None:
-            await self._send_error(ws, "message_bus not bound")
+        # 5) 入站直达消息处理器
+        if self._message_processor is None:
+            await self._send_error(ws, "message_processor not bound")
             return
         try:
             payload = ev.to_system_message_dict()
-            await self._message_bus.publish("user_message", payload)
+            await self._message_processor.process_message(payload)
             logger.debug(
-                f"[Web] published: session={sid} user={sess.user_id} "
+                f"[Web] dispatched: session={sid} user={sess.user_id} "
                 f"role={sess.role!r} text={content_text[:60]!r} images={len(file_segs)}"
             )
         except Exception:
-            logger.exception("[Web] publish 失败")
-            await self._send_error(ws, "publish failed")
+            logger.exception("[Web] 入站消息处理失败")
+            await self._send_error(ws, "dispatch failed")
 
     async def _send_error(self, ws: web.WebSocketResponse, msg: str) -> None:
         try:
@@ -1008,46 +1008,12 @@ class WebChannel:
             "runtime": runtime.to_dict(),
         })
 
-    async def broadcast_llm_status(
-        self,
-        tool_name: str,
-        args: Dict[str, Any],
-        args_summary: str,
-        source: str = "pfca",
-        parent_tool_name: Optional[str] = None,
-    ) -> None:
-        """把 LLM 当前动作广播给所有 web 客户端 (取代 global_session_state.current_activity).
-
-        状态会一直保持到事件链关闭. 工具调用之间不再主动 idle, 前端会一直显示
-        最近一次工具调用直到 event_chain_active=false.
-
-        Args:
-            tool_name: LLM 当前调用的工具名
-            args: 工具参数原始 dict (留给前端做扩展展示, 当前版本不使用)
-            args_summary: 格式化后的简短描述 (前端直接显示, 如 "query_history session_id=...")
-            source: 工具调用来源 ("pfca" | "proactive" | "social_agent"); 前端根据它显示不同前缀.
-            parent_tool_name: 父级工具名 (层级链场景, 如 social_agent 广播时带上
-                "social_agent", 前端据此显示 "pfca → social_agent" 简化层级,
-                避免内层广播完全覆盖外层上下文).
-        """
-        out = {
-            "type": "llm_status",
-            "status": "tool_call",
-            "tool_name": tool_name,
-            "tool_args": args,
-            "args_summary": args_summary,
-            "source": source,
-            "parent_tool_name": parent_tool_name,
-            "timestamp": int(time.time()),
-        }
-        await self._broadcast(out)
-
     async def broadcast_activity(self, activity: Optional[Dict[str, Any]]) -> None:
         """广播后端维护的单一活动状态给所有 web 客户端（前端只渲染）。
 
         设计：后端（GlobalSessionState.FrontendBroadcastMixin）维护单一 activity 值，
         前端收到 activity 就渲染，收到 None（idle）就清空显示。
-        取代原先多类广播（llm_status / proactive_status）的前端自行维护方案。
+        取代早期的多类广播方案（前端自行维护状态）。
 
         Args:
             activity: 活动状态 dict（source / status / tool_name / args_summary /
@@ -1058,31 +1024,6 @@ class WebChannel:
             "activity": activity,
             "timestamp": int(time.time()),
         }
-        await self._broadcast(out)
-
-    async def broadcast_proactive_status(
-        self,
-        status: str,
-        extra: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """把 proactive session 的生命周期状态广播给所有 web 客户端.
-
-        前端 IdentityBar 根据 status 决定左下角显示 "proactive处理中" 还是
-        回退到 "事件链未激活". 与 llm_status 正交: proactive 启动时 (status=started)
-        该 hint 占据最高优先级; proactive 退出时 (status=ended) 清空该 hint,
-        让其他来源 (event_chain / llm_activity) 重新可见.
-
-        Args:
-            status: "started" | "ended".
-            extra: 可选附带的描述信息 (例如结束时可以携带 reason), 前端暂时不消费.
-        """
-        out: Dict[str, Any] = {
-            "type": "proactive_status",
-            "status": status,
-            "timestamp": int(time.time()),
-        }
-        if extra:
-            out.update(extra)
         await self._broadcast(out)
 
     # --------------------------------------------------------
@@ -1259,24 +1200,15 @@ class WebChannel:
 
     @staticmethod
     async def _redirect_amy(persistence_dir) -> None:
-        """收敛 amy monitor 并清空 EmotionalInterface 双单例，重指向指定目录。
+        """重指向 amy 持久化目录（走模块公有 reset 入口，不触碰内部全局）。
 
-        persistence_dir: 传入隔离目录则测试 amy；None 则重建真实 amy。
-        EmotionalInterface 单例不支持原地重指向（__init__ 早退），故清空重建。
-        测试环境内 amy 访问经 get_emotional_interface(隔离目录) 指向测试持久化。
+        persistence_dir: 传入隔离目录则测试 amy；None 则下次访问重建真实 amy。
         """
-        import importlib
-        from brain.amy.emotional_interface import EmotionalInterface, get_emotional_interface
+        from brain.amy.emotional_interface import reset_emotional_interface, get_emotional_interface
 
-        ei_mod = importlib.import_module("brain.amy.emotional_interface")
-        # 收敛 monitor（双持有任一）
-        for ei in (ei_mod._emotional_interface, EmotionalInterface._instance):
-            if ei is not None:
-                await ei.crash_system.stop_monitor()
-        ei_mod._emotional_interface = None
-        EmotionalInterface._instance = None
+        await reset_emotional_interface()
         if persistence_dir is not None:
-            # 重建指向测试目录的 amy（bootstrap 系统 act）
+            # 重建指向测试目录的 amy（bootstrap 系统 act + monitor）
             await get_emotional_interface(Path(persistence_dir))
 
     async def _handle_list_presets(self, ws: web.WebSocketResponse) -> None:

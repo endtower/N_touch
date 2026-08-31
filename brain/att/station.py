@@ -1,21 +1,19 @@
 import asyncio
 from typing import Dict
 from utils.logger import get_logger
+from utils.error_handling import async_handle_errors
 from config.truck_settings import is_truck_enabled
 from .trucks.private_truck import PrivateTruck
 from .trucks.special_attention_truck import SpecialAttentionTruck
 
 logger = get_logger(__name__, 'WARNING')
 
-# 全局station实例引用
-_current_station = None
 
 class AttentionStation:
     def __init__(self):
         self.running = False
         self.private_truck = None  # 先初始化为None，避免循环引用
         self.ongoing_truck = None  # 先初始化为None，避免循环引用
-        self.crash_truck = None  # amy 崩溃监控 truck
         self.special_attention_truck = None  # 先初始化为None，避免循环引用
         self.scheduled_proactive_truck = None  # 定时主动任务 truck
         # 任务队列 - 存储需要处理的truck请求
@@ -27,12 +25,10 @@ class AttentionStation:
         # 处理任务的主任务
         self._process_task = None
 
-    from utils.error_handling import async_handle_errors
-
     def _all_running_trucks(self):
         """返回所有处于 running 状态的 truck 实例 (跳过 None)"""
         trucks = []
-        for t in (self.private_truck, self.ongoing_truck, self.crash_truck,
+        for t in (self.private_truck, self.ongoing_truck,
                   self.special_attention_truck, self.scheduled_proactive_truck):
             if t is None:
                 continue
@@ -197,10 +193,7 @@ class AttentionStation:
         logger.debug("启动station")
         if not self.running:
             self.running = True
-            # 设置全局station实例引用
-            global _current_station
-            _current_station = self
-            
+
             # 初始化truck实例
             if self.private_truck is None:
                 self.private_truck = PrivateTruck()
@@ -215,13 +208,6 @@ class AttentionStation:
                     self.ongoing_truck.start()
                 else:
                     logger.info("ongoing_truck 已禁用，不启动线程")
-            if self.crash_truck is None:
-                from .trucks.crash_truck import CrashTruck
-                self.crash_truck = CrashTruck()
-                if is_truck_enabled('crash_truck'):
-                    self.crash_truck.start()
-                else:
-                    logger.info("crash_truck 已禁用，不启动线程")
             if self.special_attention_truck is None:
                 self.special_attention_truck = SpecialAttentionTruck()
                 if is_truck_enabled('special_attention_truck'):
@@ -260,8 +246,6 @@ class AttentionStation:
             self.private_truck.stop()
         if self.ongoing_truck:
             self.ongoing_truck.stop()
-        if self.crash_truck:
-            self.crash_truck.stop()
         if self.special_attention_truck:
             self.special_attention_truck.stop()
         if self.scheduled_proactive_truck:
@@ -280,7 +264,6 @@ class AttentionStation:
         mapping = {
             'private_truck': self.private_truck,
             'ongoing_truck': self.ongoing_truck,
-            'crash_truck': self.crash_truck,
             'special_attention_truck': self.special_attention_truck,
             'scheduled_proactive_truck': self.scheduled_proactive_truck,
         }
@@ -291,7 +274,7 @@ class AttentionStation:
 
         Args:
             truck_id: 'private_truck' / 'ongoing_truck' /
-                      'crash_truck' / 'special_attention_truck'
+                      'special_attention_truck'
             enabled: True 启动, False 停止
 
         Returns:
@@ -323,12 +306,24 @@ class AttentionStation:
             return "unknown"
         return truck.state
 
+def _get_station() -> "AttentionStation | None":
+    """获取当前运行的 station 实例（未启动返回 None）。
+
+    station 单例由 get_attention_core() 持有；延迟 import 避免与 att_core 循环。
+    """
+    from brain.att.att_core import get_attention_core
+    return get_attention_core().station
+
+
 # 模块级别的station_input函数
 async def station_input(message: Dict[str, any]):
     """模块级别的消息输入函数，可以直接从其他模块导入使用
     """
-    global _current_station
-    return await _current_station.station_input(message)
+    station = _get_station()
+    if station is None:
+        logger.warning("station 未启动，station_input 消息被丢弃")
+        return
+    return await station.station_input(message)
 
 # 模块级别的获取任务队列大小函数
 async def get_queue_size():
@@ -337,8 +332,10 @@ async def get_queue_size():
     Returns:
         int: 任务队列中的任务数量
     """
-    global _current_station
-    return _current_station.get_queue_size()
+    station = _get_station()
+    if station is None:
+        return 0
+    return station.get_queue_size()
 
 # 模块级别的运行时切换 truck
 def set_truck_enabled(truck_id: str, enabled: bool) -> bool:
@@ -347,14 +344,14 @@ def set_truck_enabled(truck_id: str, enabled: bool) -> bool:
     如果 station 尚未启动, 调用无效 (返回 False), truck 会按 config 默认值在
     station 启动时被处理.
     """
-    global _current_station
-    if _current_station is None:
+    station = _get_station()
+    if station is None:
         return False
-    return _current_station.set_truck_enabled(truck_id, enabled)
+    return station.set_truck_enabled(truck_id, enabled)
 
 def get_truck_state(truck_id: str) -> str:
     """模块级别: 获取 truck 实际运行状态"""
-    global _current_station
-    if _current_station is None:
+    station = _get_station()
+    if station is None:
         return "unknown"
-    return _current_station.get_truck_state(truck_id)
+    return station.get_truck_state(truck_id)

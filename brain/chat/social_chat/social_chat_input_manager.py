@@ -58,14 +58,6 @@ class SocialChatInputManager:
     2. 增量：主人会话新消息 +（L3 时）双会话最新未读 + 未调工具警告
     """
 
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
     def __init__(self):
         if getattr(self, "_initialized", False):
             return

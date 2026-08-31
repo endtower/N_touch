@@ -20,32 +20,23 @@ from typing import Optional
 import aiosqlite
 
 from utils.logger import get_logger
-from utils.error_handling import StorageError
+from utils.error_handling import StorageError, ConfigurationError
 
 logger = get_logger(__name__, "INFO")
 
 
 class MemoryDatabase:
-    """记忆数据库核心类（单例，全异步）"""
-
-    _instance = None
-
-    def __new__(cls, db_path: str = None):
-        if cls._instance is None:
-            cls._instance = super(MemoryDatabase, cls).__new__(cls)
-        return cls._instance
+    """记忆数据库核心类（全异步；单例由模块级 get_memory_db 持有）"""
 
     def __init__(self, db_path: str = None):
-        if not hasattr(self, "_initialized"):
-            if db_path is None:
-                # 默认存储在项目根目录的 memory 目录下，与 chat_history.db 同级
-                project_root = Path(__file__).resolve().parent.parent.parent.parent
-                self._db_path = project_root / "memory" / "memory.db"
-            else:
-                self._db_path = Path(db_path)
-            os.makedirs(self._db_path.parent, exist_ok=True)
-            self._conn: Optional[aiosqlite.Connection] = None
-            self._initialized = True
+        if db_path is None:
+            # 默认存储在项目根目录的 memory 目录下，与 chat_history.db 同级
+            project_root = Path(__file__).resolve().parent.parent.parent.parent
+            self._db_path = project_root / "memory" / "memory.db"
+        else:
+            self._db_path = Path(db_path)
+        os.makedirs(self._db_path.parent, exist_ok=True)
+        self._conn: Optional[aiosqlite.Connection] = None
 
     @property
     def db_path(self) -> Path:
@@ -157,30 +148,48 @@ class MemoryDatabase:
             await self._conn.close()
             self._conn = None
 
+    async def reconfigure(self, db_path: str | None = None) -> None:
+        """原地重指向数据库文件（测试切库 / 恢复真实库）。
+
+        先关闭当前连接再换路径；持有同一实例的模块自动跟随，无需重置依赖单例。
+        任何失败（如旧连接无法关闭）直接抛异常阻断，不 try-ex 兜底继续。
+        """
+        await self.close()
+        if db_path is None:
+            # 恢复真实库：默认 memory/memory.db
+            project_root = Path(__file__).resolve().parent.parent.parent.parent
+            self._db_path = project_root / "memory" / "memory.db"
+        else:
+            self._db_path = Path(db_path)
+
+
+# ============================================================
+# 全局单例
+# ============================================================
+
+_memory_db_instance: Optional[MemoryDatabase] = None
+
 
 def get_memory_db(db_path: str = None) -> MemoryDatabase:
-    """获取记忆数据库单例实例。"""
-    return MemoryDatabase(db_path)
+    """获取记忆数据库单例实例。
+
+    db_path 仅首次创建时生效；单例已存在时再传不同路径直接报错
+    （切换库走 switch_memory_db / 实例 reconfigure，禁止静默换目标）。
+    """
+    global _memory_db_instance
+    if _memory_db_instance is None:
+        _memory_db_instance = MemoryDatabase(db_path)
+    elif db_path is not None and Path(db_path) != _memory_db_instance.db_path:
+        raise ConfigurationError(
+            f"MemoryDatabase 单例已创建（{_memory_db_instance.db_path}），"
+            f"拒绝以不同路径 {db_path!r} 重复初始化；切换库请用 switch_memory_db()"
+        )
+    return _memory_db_instance
 
 
 async def switch_memory_db(db_path: str | None = None) -> MemoryDatabase:
-    """原地重指向记忆数据库单例（测试模式切库 / 恢复真实库）。
-
-    关闭当前连接 → 把**同一实例**的 _db_path 指向新库路径。
-    因为改的是持有者手上的同一实例，所有持有者自动跟随，无需重置任何依赖单例。
-
-    任何失败（如旧连接无法关闭）直接抛异常阻断，不 try-ex 兜底继续。
-    """
-    inst = MemoryDatabase._instance
-    if inst is not None:
-        await inst.close()
-    if db_path is None:
-        # 恢复真实库：默认 memory/memory.db
-        project_root = Path(__file__).resolve().parent.parent.parent.parent
-        inst._db_path = project_root / "memory" / "memory.db"
-    else:
-        inst._db_path = Path(db_path)
-    return inst
+    """原地重指向记忆数据库单例（测试模式切库 / 恢复真实库）。"""
+    return await get_memory_db().reconfigure(db_path)
 
 
 # ============================================================

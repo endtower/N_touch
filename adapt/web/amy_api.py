@@ -8,10 +8,10 @@ Amy 情绪系统状态查看接口 (只读).
 对前端暴露 LLM 当前情绪的完整快照:
   - 去甲肾上腺素 (NE) / 多巴胺 (DA) 当前值 (clamp 后)
   - 所有 active thought (含 act / intensity / expire_time / desc)
-  - 崩溃状态 (SystemState + CrashInfo + cover description)
-  - 崩溃指数 (crash_index)
   - 触发当前 prompt 的统一描述 (get_amy_description 输出)
   - 全部 ACT 表 (按分类组织, 给前端展示)
+
+注：崩溃/覆盖机制已于 2026-08-30 移除，响应中的 system_state 块已删除。
 
 端点:
   GET /amy/state          -> 一次性返回上面所有信息
@@ -102,7 +102,6 @@ def _serialize_amy_descriptions() -> Dict[str, Any]:
     from brain.amy.constants import (
         DOPAMINE_DESCRIPTIONS,
         NOREPINEPHRINE_DESCRIPTIONS,
-        CRASH_INDEX_THRESHOLD,
         MIN_VALUE, MAX_VALUE,
     )
     return {
@@ -115,7 +114,6 @@ def _serialize_amy_descriptions() -> Dict[str, Any]:
             for (lo, hi, text) in NOREPINEPHRINE_DESCRIPTIONS
         ],
         "range": {"min": MIN_VALUE, "max": MAX_VALUE},
-        "crash_threshold": CRASH_INDEX_THRESHOLD,
     }
 
 
@@ -132,47 +130,21 @@ async def handle_get_amy_state(request: web.Request) -> web.Response:
         }, status=503)
 
     try:
-        from brain.amy.constants import SystemState
-
-        # 1. 统一快照出口（内部含崩溃到期检查）
+        # 1. 统一快照出口
         snapshot = await ei.get_mood_snapshot()
 
-        # 2. 当前覆盖态
-        is_crashed = ei.crash_system.is_crashed()
-        is_not_crashed = ei.crash_system.is_not_crashed()
-        is_covered = ei.crash_system.is_covered()
-        cover_desc = ei.crash_system.get_cover_description() if is_covered else None
-
-        # 3. system_state 详情
-        state_value = ei.crash_system.get_state().value  # none / crashed / not_crashed
-        crash_index = ei.crash_system.get_crash_index(snapshot)
-
-        active_info = None
-        if ei.crash_system.state.active_info:
-            ai = ei.crash_system.state.active_info
-            now = time.time()
-            active_info = {
-                "mode": ai.mode.value,
-                "description": ai.description,
-                "last_straw_desc": ai.last_straw_desc,
-                "crash_subtype": ai.crash_subtype,
-                "start_time": int(ai.start_time),
-                "end_time": int(ai.end_time),
-                "remaining_seconds": max(0, int(ai.end_time - now)),
-            }
-
-        # 4. amy 统一描述 (LLM 实际看到的)
+        # 2. amy 统一描述 (LLM 实际看到的)
         try:
             amy_desc = await ei.get_amy_description()
         except Exception as e:
             logger.warning(f"get_amy_description 失败: {e}")
             amy_desc = ""
 
-        # 5. top thoughts (从 snapshot 取) + 全部 active
+        # 3. top thoughts (从 snapshot 取) + 全部 active
         top_thoughts = _serialize_thoughts(snapshot.top_thoughts or [])
         all_active = _serialize_thoughts(await ei.thought_cache.get_active_thoughts())
 
-        # 6. thought_cache 统计
+        # 4. thought_cache 统计
         ts = ei.thought_cache.timestamp
 
         return web.json_response({
@@ -181,15 +153,6 @@ async def handle_get_amy_state(request: web.Request) -> web.Response:
             "mood": {
                 "norepinephrine": round(snapshot.norepinephrine, 2),
                 "dopamine": round(snapshot.dopamine, 2),
-            },
-            "system_state": {
-                "value": state_value,                # none / crashed / not_crashed
-                "is_crashed": is_crashed,
-                "is_not_crashed": is_not_crashed,
-                "is_covered": is_covered,
-                "crash_index": round(crash_index, 2),
-                "active_info": active_info,
-                "cover_description": cover_desc,
             },
             "amy_description": amy_desc,
             "thoughts": {

@@ -192,11 +192,8 @@ class LLMClient:
 
 
 class LLMBridge:
-    """LLM调用桥接器"""
-    
-    _instance = None
-    _client = None
-    
+    """LLM调用桥接器（单例由模块级 llm_bridge 持有）"""
+
     MODES = {
         'advanced-reason': {
             'model': 'deepseek-v4-pro',
@@ -215,13 +212,10 @@ class LLMBridge:
             'thinking': False
         }
     }
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._client = LLMClient()
-        return cls._instance
-    
+
+    def __init__(self):
+        self._client = LLMClient()
+
     async def call_llm(
         self,
         mode: str,

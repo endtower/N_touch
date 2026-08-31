@@ -1,16 +1,14 @@
 from .private_truck import PrivateTruck
 from .ongoing_truck import OngoingTruck
-from .crash_truck import CrashTruck
 from .special_attention_truck import SpecialAttentionTruck
 from .scheduled_proactive_truck import ScheduledProactiveTruck
 
-__all__ = ['PrivateTruck', 'OngoingTruck', 'CrashTruck', 'SpecialAttentionTruck', 'ScheduledProactiveTruck']
+__all__ = ['PrivateTruck', 'OngoingTruck', 'SpecialAttentionTruck', 'ScheduledProactiveTruck']
 
 # 注册所有truck
 truck_registry = {
     'private_truck': PrivateTruck,
     'ongoing_truck': OngoingTruck,
-    'crash_truck': CrashTruck,
     'special_attention_truck': SpecialAttentionTruck,
     'scheduled_proactive_truck': ScheduledProactiveTruck
 }

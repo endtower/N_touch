@@ -8,14 +8,6 @@ logger = get_logger('PFCABequest', "DEBUG")
 class PFCABequest:
     """PFCA 模块经验缓存管理（仅决策阶段经验）"""
 
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
     def __init__(self):
         if not getattr(self, '_initialized', False):
             self._activated_ids: List[str] = []

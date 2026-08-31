@@ -4,7 +4,7 @@
 注意力核心模块
 
 极简版：只负责启动station.py
-跑在主 event loop（与 FastAPI / adapt / MessageBus 共享），
+跑在主 event loop（与 FastAPI / adapt / message_handler 共享），
 不再开独立线程/loop。
 """
 

@@ -55,7 +55,7 @@ def _notify_dynamic_prompt(limit: int = DEFAULT_DISPLAY_LIMIT) -> None:
 
 
 class TemporaryMemory:
-    _instance = None
+    """临时记忆（单例由模块级 _temporary_memory 持有）。"""
 
     def __init__(self):
         if not hasattr(self, '_initialized'):
@@ -63,12 +63,6 @@ class TemporaryMemory:
             # 格式: {"identifier": "特殊标识", "content": "内容", "metadata": {}, "timestamp": float}
             self._messages: List[Dict[str, Any]] = []
             self._initialized = True
-
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
 
     def add(self, content: Any, identifier: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> None:
         """

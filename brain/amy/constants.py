@@ -8,25 +8,13 @@ Amy 情绪系统常量与数据结构
 
 ACT 表设计：
 - ConversationAct: 暴露给 conversation tool / LLM 的 act 集合
-- InternalAct: amy 内部专用 act 集合（崩溃补偿 agent 使用）
+- InternalAct: amy 内部专用 act 集合
 - ACTEffects: 上述两个的合并视图，提供 amy 内部的统一查询入口
 """
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import List, Optional
 import time
-
-
-class SystemState(Enum):
-    """Amy 覆盖输出状态：三态单槽位
-    - NONE: 正常，不覆盖
-    - CRASHED: 崩溃态，覆盖较长时段
-    - NOT_CRASHED: 最后一根稻草 agent 判定"再忍一下"的安抚窗口，覆盖较短时段
-    """
-    NONE = "none"
-    CRASHED = "crashed"
-    NOT_CRASHED = "not_crashed"
 
 
 # === ExternalInteractionAct：外部互动类（他人行为直接刺激） ===
@@ -363,78 +351,6 @@ class RelationEvent:
 
 
 @dataclass
-class CrashInfo:
-    """崩溃/未崩的统一信息载体"""
-    mode: SystemState
-    description: str
-    start_time: int
-    end_time: int
-    last_straw_desc: str = ""
-    # 崩溃子类型：ne_high / ne_low / da_high / da_low / ""（未崩时为空）
-    crash_subtype: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "mode": self.mode.value,
-            "description": self.description,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "last_straw_desc": self.last_straw_desc,
-            "crash_subtype": self.crash_subtype,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> 'CrashInfo':
-        return cls(
-            mode=SystemState(d["mode"]),
-            description=d["description"],
-            start_time=d["start_time"],
-            end_time=d["end_time"],
-            last_straw_desc=d.get("last_straw_desc", ""),
-            crash_subtype=d.get("crash_subtype", ""),
-        )
-
-
-@dataclass
-class SystemStateData:
-    """系统状态持久化容器"""
-    state: SystemState = SystemState.NONE
-    active_info: Optional[CrashInfo] = None
-
-    def to_dict(self) -> dict:
-        return {
-            "state": self.state.value,
-            "active_info": self.active_info.to_dict() if self.active_info else None,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> 'SystemStateData':
-        # 兼容旧 schema
-        raw_state = d.get("state", "none")
-        if raw_state == "normal":
-            state = SystemState.NONE
-        else:
-            try:
-                state = SystemState(raw_state)
-            except ValueError:
-                state = SystemState.NONE
-
-        active_info = None
-        if d.get("active_info"):
-            active_info = CrashInfo.from_dict(d["active_info"])
-        elif d.get("crash_info") and state == SystemState.CRASHED:
-            old = d["crash_info"]
-            active_info = CrashInfo(
-                mode=SystemState.CRASHED,
-                description=old.get("last_straw_desc", ""),
-                start_time=old["start_time"],
-                end_time=old["end_time"],
-                last_straw_desc=old.get("last_straw_desc", ""),
-            )
-        return cls(state=state, active_info=active_info)
-
-
-@dataclass
 class MoodSnapshot:
     norepinephrine: float
     dopamine: float
@@ -470,34 +386,6 @@ CAP_SCALE = 2.0
 
 AFFINITY_ALPHA = 0.3
 AFFINITY_BASE_DURATION = 3 * 24 * 3600
-
-
-# === 崩溃参数 ===
-
-CRASH_LONG_DURATION = 60        # 1 分钟
-NOT_CRASHED_SHORT_DURATION = 60 # 1 分钟
-CRASH_POST_PROTECT_DURATION = 45  # 崩溃后保护期（崩溃结束 → 保护期开始 → 期间内即使 ci 高也不重新触发）
-# 崩溃判定阈值：仅由 NE 触发
-# 临时禁用：设为 200（超出 NE 上限 100，永远不触发）
-# 恢复崩溃：改回 80.0
-CRASH_INDEX_THRESHOLD = 200.0   # 崩溃判定阈值：临时禁用（远超 NE ±100 上限）
-
-# 临时：手动预设的崩溃/未崩描述（agent 暂不参与）
-# 崩溃只剩一类：NE_HIGH。DA 不再触发崩溃。
-# 统一三行框架：首句宣告 + 中段命令式宣泄指令 + 末段标注最后一根稻草。
-
-DEFAULT_CRASH_DESCRIPTION_NE_HIGH = (
-    "你的情绪崩溃了！你必须立刻宣泄情绪！\n"
-    "你处在极端暴怒状态，你必须向外输出攻击类型言论以进行宣泄！\n"
-    "最后一根稻草：{last_straw_desc}"
-)
-
-# 兜底（兼容旧字段；正常路径下不会用到）
-DEFAULT_CRASH_DESCRIPTION = DEFAULT_CRASH_DESCRIPTION_NE_HIGH
-
-DEFAULT_NOT_CRASHED_DESCRIPTION = (
-    "你深吸一口气，指节攥得发白——还在硬撑，但已经快到极限了。"
-)
 
 
 # === 描述表 ===

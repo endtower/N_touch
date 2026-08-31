@@ -11,14 +11,16 @@ PFCA user 消息的两条构造路径：
 1. 首条 (_build_first_input)：由外部 prepare_first_message 触发，
    把 message_base / amy_effect / recent_memory / ongoing_events / decision_context
    等槽位拼成一条 user 消息。会话消息不再在此拉取（消息由 PFCA 侧
-   query_history 等工具自行读取），故不再处理/推进 pfca 游标。
-2. 增量 (_build_incremental_input)：每轮检测 amy description 变化，
-   变化时输出一条 "amy_effect" 形式的 user 消息。
+   query_history 等工具自行读取），故不再处理/推进 pfca 消息游标。
+2. 增量 (_build_incremental_input)：每轮经情绪消费者游标
+   （get_unread_events("pfca")）检测 amy 情绪事件，有未消费事件才输出
+   一条 "amy_effect" 形式的 user 消息。
 
 amy_effect 段的语义（与增量共用）：
-- 核心是 amy description，来自 get_amy_description()。
+- 核心是 amy description，来自无参 get_amy_description()（新门面，见 docs/api/amy.md）。
 - description 内部已含【当前情绪】+ thoughts 摘要（build_mood_prompt(with_reason=True)），
   因此只直接引用，不再额外追加 thought 列表，避免同一想法被渲染两次。
+- 游标推进在成功取到描述之后执行：取描述失败时不推进，事件留给下一轮，不丢。
 """
 
 from typing import Dict, Any, Optional
@@ -49,14 +51,6 @@ class FirstMessageType:
 
 class PFCAInputManager:
     """PFCA 输入管理器（单例）。"""
-
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
 
     def __init__(self):
         if getattr(self, '_initialized', False):
@@ -93,8 +87,12 @@ class PFCAInputManager:
         logger.debug(f"已缓存首条请求: {message_type}")
 
     async def get_user_input(self) -> Optional[str]:
-        """获取用户输入：首条（_first_activation）或增量（amy 情绪变化）。"""
-        if self._first_activation:
+        """获取用户输入：首条（_first_activation 或存在缓存请求）或增量（amy 情绪事件）。
+
+        存在 _queued_request 时优先消费它：支持会话中途的 CONTEXT_REBUILD
+        （advanced_decision_agent clear_mind 路径 prepare 后，由下一轮注入）。
+        """
+        if self._first_activation or self._queued_request is not None:
             self._first_activation = False
             return await self._build_first_input()
         return await self._build_incremental_input()
@@ -133,34 +131,31 @@ class PFCAInputManager:
     # ===== 增量消息构建 =====
 
     async def _build_incremental_input(self) -> Optional[str]:
-        """检测 amy 情绪变化，构造增量 content。
+        """检测 amy 情绪事件，构造增量 content。
 
-        新规则（情绪消费者游标）：
-        - 每轮调用 has_unread_amy("pfca") 判断是否有未取的新一轮描述。
-        - 无未取描述 → 返回 None。
-        - 有崩溃/未崩事件 → 整段输出覆盖描述（不切首句、不挑 thought）。
-        - 有 thought 事件 → 输出"你的心情变为：{description}" + 当前全部 thoughts 列表。
-        - 取描述后 get_amy_description("pfca") 标记已取。
+        情绪消费者游标（新契约，写法参照 proactive_input_manager._collect_amy_effect）：
+        - get_unread_events("pfca") 判断是否有未消费的情绪事件，无则返回 None。
+        - 有事件：先取当前描述（无参 get_amy_description，内部已含当前情绪 + thoughts
+          摘要），取到后再 advance_cursor 推进游标
+          （取描述失败/为空时不推进，事件留给下一轮，不丢）。
+        - 输出"你的心情变为：{description}"。
 
         Returns:
-            Optional[str]: 无未取描述时返回 None。
+            Optional[str]: 无未消费事件时返回 None。
         """
         from brain.amy.emotional_interface import get_emotional_interface
 
         ei = await get_emotional_interface()
-        if not ei.has_unread_amy("pfca"):
+        events = await ei.get_unread_events("pfca")
+        if not events:
             return None
 
-        current_amy = await ei.get_amy_description("pfca")
+        current_amy = await ei.get_amy_description()
         if not current_amy:
             return None
+        await ei.advance_cursor("pfca", max(e["seq"] for e in events))
 
-        # 覆盖态（崩溃/未崩）：整段作为增量输出，不切首句、不挑 thought
-        if ei.crash_system.is_covered():
-            logger.info(f"增量 - 覆盖态变化: '{current_amy[:60]}'")
-            return current_amy
-
-        # 正常态：输出情绪（description 已含 thoughts，见 _format_amy_segment）
+        # 输出情绪（description 已含 thoughts，见 _format_amy_segment）
         logger.info(f"增量 - 情绪变化 (无原因): '{current_amy[:60]}'")
         return await self._format_amy_segment(current_amy, prefix="你的心情变为：")
 
@@ -214,19 +209,25 @@ class PFCAInputManager:
         )
 
     async def _collect_amy_effect(self) -> None:
-        """首条专用的情绪槽收集。
+        """首条专用的情绪槽收集（情绪消费者游标）。
 
         策略：
-        - 只要 amy 有描述就写槽；AMY 不存在才早退。
-        - 取描述（get_amy_description 已含 thoughts），并标记 pfca 已取当前轮。
-        - 收集后无需再推进游标（轮次游标由 get_amy_description 标记）。
+        - 无条件取当前描述（无参 get_amy_description，已含 thoughts；覆盖态返回覆盖描述）；
+          只要 amy 有描述就写槽。
+        - 首条消费掉当前全部未读事件并推进游标，避免这些事件在后续增量轮
+          把同样的情绪内容重复注入一遍。
+        - 描述取不到时早退且不推进游标（事件留给增量轮恢复）。
         """
         from brain.amy.emotional_interface import get_emotional_interface
 
         ei = await get_emotional_interface()
-        current = await ei.get_amy_description("pfca")
+        current = await ei.get_amy_description()
         if not current:
             return
+
+        events = await ei.get_unread_events("pfca")
+        if events:
+            await ei.advance_cursor("pfca", max(e["seq"] for e in events))
 
         self._blocks["amy_effect"] = current
 
@@ -267,5 +268,19 @@ class PFCAInputManager:
         logger.debug("PFCA经验缓存已清空")
 
 
+_pfca_input_manager_instance: Optional[PFCAInputManager] = None
+
+
 def get_pfca_input_manager() -> PFCAInputManager:
-    return PFCAInputManager()
+    """获取 PFCAInputManager 模块级单例。
+
+    prepare_first_message（pfca_core 启动 / advanced_decision_agent 的 CONTEXT_REBUILD）
+    与 get_user_input（PFCASession 消费）必须落在**同一个实例**上，否则首条消息
+    会缓存进一个被丢弃的实例而静默丢失（历史 bug，见 KNOWN_ISSUES #3）。
+    新一轮 PFCA 由 PFCACore.start 先调 reset() 复位状态再 prepare。
+    __init__ 的 _initialized 守卫即为此模式设计：单例被重复构造时不重置状态。
+    """
+    global _pfca_input_manager_instance
+    if _pfca_input_manager_instance is None:
+        _pfca_input_manager_instance = PFCAInputManager()
+    return _pfca_input_manager_instance

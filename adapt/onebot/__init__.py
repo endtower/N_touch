@@ -13,6 +13,9 @@ OneBot v11 平台实现（通过 NapCat / go-cqhttp 等客户端连接）。
     - parse_onebot_event    OneBot 事件 → NormalizedEvent（纯函数）
     - serialize_to_onebot   通用段 → OneBot 段（纯函数）
     - OB_* 常量
+
+API 文档：docs/api/onebot_api.md —— 修改本包对外接口后必须同步更新该文档
+（校验：python scripts/check_api_docs.py）。
 """
 
 from .config import OneBotChannelConfig

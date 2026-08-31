@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """轻型 Agent 基类：无状态、单次任务、不持久化上下文的原子执行单元。
 
-设计文档：docs/lightweight_agent_base_design.md
+设计文档：docs/archive/lightweight_agent_base_design.md
 
 本基类抽象出轻型 agent 的五个核心段落：
   1. 前处理 `_preprocess`   —— LLM 进入正式循环之前，对输入信息进行初次处理。

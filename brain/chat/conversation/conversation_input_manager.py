@@ -24,14 +24,6 @@ logger = setup_logging(__name__, log_level="INFO")
 class ConversationInputManager:
     """Conversation 输入管理器"""
 
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
     def __init__(self):
         if not getattr(self, '_initialized', False):
             self._first_activation = True
@@ -87,7 +79,8 @@ class ConversationInputManager:
 
         from brain.amy.emotional_interface import get_emotional_interface
         ei = await get_emotional_interface()
-        amy_effect = await ei.get_amy_description(consumer_id="conversation")
+        # 新门面：无参 get_amy_description（描述内部已含覆盖态与 thoughts 处理，见 docs/api/amy.md）
+        amy_effect = await ei.get_amy_description()
 
         # 按实际消息拼接顺序组装：聊天记录 -> 会话环境 -> 任务 -> 情绪
         _parts = [f"{message_str}"]

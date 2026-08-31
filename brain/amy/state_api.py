@@ -2,8 +2,9 @@
 """
 Amy 模块状态契约（stable public API）
 
-供预设测试环境使用：把 amy 的 thought / crash 持久化状态导出/还原为可读 JSON。
-- 载体：JSON（可肉眼编辑、可版本化），见 docs/preset_test_env_design.md
+供预设测试环境使用：把 amy 的 thought 持久化状态导出/还原为可读 JSON
+（崩溃/覆盖机制已移除，system_state 载荷随之取消）。
+- 载体：JSON（可肉眼编辑、可版本化），见 docs/archive/preset_test_env_design.md
 - 归属：本契约归 Amy 模块暴露；tests 只做隔离运行时的组装与应用。
 - 全异步；任何获取失败直接抛异常阻断，不用 try-ex 兜底继续。
 - 注：`_consumers` 为实例级、EmotionalInterface 重建即空，不纳入快照。
@@ -34,20 +35,17 @@ class AmyState:
 
     属性：
         thoughts:     thought_cache.json 内容（thoughts + timestamp）
-        system_state: system_state.json 内容（crash 状态）
     """
 
-    def __init__(self, thoughts: Dict[str, Any], system_state: Dict[str, Any]) -> None:
+    def __init__(self, thoughts: Dict[str, Any]) -> None:
         self.thoughts = thoughts
-        self.system_state = system_state
 
     @classmethod
     async def capture(cls) -> "AmyState":
         """从当前实例（单例指向的 persistence 目录）导出状态。"""
         ei = await get_emotional_interface()
         thoughts = _read_json(ei.thought_cache.persistence_file)
-        system_state = _read_json(ei.crash_system.persistence_file)
-        return cls(thoughts=thoughts, system_state=system_state)
+        return cls(thoughts=thoughts)
 
     @classmethod
     async def capture_from(cls, persistence_dir) -> "AmyState":
@@ -58,7 +56,6 @@ class AmyState:
         persistence_dir = Path(persistence_dir)
         return cls(
             thoughts=_read_json(persistence_dir / "thought_cache.json"),
-            system_state=_read_json(persistence_dir / "system_state.json"),
         )
 
     async def restore(self, persistence_dir: Path) -> None:
@@ -70,7 +67,6 @@ class AmyState:
         """
         persistence_dir = Path(persistence_dir)
         _write_json(persistence_dir / "thought_cache.json", self.thoughts)
-        _write_json(persistence_dir / "system_state.json", self.system_state)
         await get_emotional_interface(persistence_dir)
 
     # ---- 情景文档（JSON 文件）存/取 ----
@@ -83,7 +79,6 @@ class AmyState:
             "module": "amy",
             "state": {
                 "thoughts": self.thoughts,
-                "system_state": self.system_state,
             },
         }
         _write_json(path, payload)
@@ -98,5 +93,4 @@ class AmyState:
         state = data["state"]
         return cls(
             thoughts=state.get("thoughts", {}),
-            system_state=state.get("system_state", {}),
         )
