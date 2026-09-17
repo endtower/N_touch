@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """重型 Session 基类：有状态、多轮循环、持久化上下文的会话执行单元。
 
-设计文档：docs/archive/heavyweight_session_base_design.md
+设计记录：docs/已完成.md（HeavySession 框架基类）
 
 本基类抽象出 4 个重型 Session（PFCASession / ConversationSession /
 SocialChatSession / ProactiveSession）的公共骨架：
@@ -16,16 +16,30 @@ SocialChatSession / ProactiveSession）的公共骨架：
 """
 
 from abc import ABC, abstractmethod
+import json
+from collections import deque
 from typing import Dict, List, Any, Optional
 
 from utils.logger import get_logger
 from utils.error_handling import AbyssCoreError
+from utils.llm_client_manager import TokenBudget, TokenBudgetExceededError, token_budget_scope
 
 logger = get_logger('HeavySession', "DEBUG")
 
 
 class HeavySession(ABC):
     """重型 Session 基类：有状态、多轮循环、持久化上下文的会话执行单元"""
+
+    # ============ 熔断/行为阀配置（子类可覆盖） ============
+
+    # 单会话累计 token 预算（含工具内部经 light_agent 等发起的次级调用）。
+    # None = 不限制。校准参照根目录 token_stats.json 的单次均值。
+    TOKEN_BUDGET: Optional[int] = None
+    # 连续相同 (工具, 参数) 调用的判定阈值（防"成功但无进展"的轮询空转）。
+    # None = 不启用该检测。
+    repeat_threshold: Optional[int] = 3
+    # 豁免重复检测的工具名（参数相同是合法语义的，如等待观察类）
+    repeat_exempt_tools: frozenset = frozenset()
 
     # ============ 子类必须实现的抽象方法 ============
 
@@ -52,8 +66,8 @@ class HeavySession(ABC):
     # ============ 可重写的钩子（默认实现） ============
 
     async def should_continue(self) -> bool:
-        """判断是否继续循环。默认：running 且未达 max_rounds。"""
-        return self.running and self._rounds < self.max_rounds
+        """判断是否继续循环。默认：running 且未达 max_rounds（None = 不限轮数）。"""
+        return self.running and (self.max_rounds is None or self._rounds < self.max_rounds)
 
     def _inject_no_tool_call_warning(self) -> None:
         """无工具调用时注入警告 user 消息（持久化上下文，与正常上下文注入逻辑一致）。
@@ -81,14 +95,31 @@ class HeavySession(ABC):
         self.no_tool_call_count = 0
         self.tool_error_count = 0
         self._rounds = 0
+        self._recent_tool_sigs = deque(maxlen=self.repeat_threshold)
+        self._tool_repeat_strikes = 0
+        self._last_repeat_tool = ""
 
         self.history_manager.archive_context()   # 归档上一轮
 
-        while self.running:
-            if not await self.should_continue():
-                logger.info("会话结束条件满足，退出循环")
-                break
-            await self.process_cycle()
+        budget = TokenBudget(self.TOKEN_BUDGET) if self.TOKEN_BUDGET else None
+        self.token_budget = budget
+        with token_budget_scope(budget):
+            while self.running:
+                # 累计 token 预算熔断（预算在 LLM 网关记账，这里负责优雅退出）
+                if budget is not None and budget.exceeded:
+                    self._exit_reason = f"token 预算耗尽 ({budget.used}/{budget.max_tokens})"
+                    logger.warning(f"{self.__class__.__name__} {self._exit_reason}")
+                    break
+                if not await self.should_continue():
+                    logger.info("会话结束条件满足，退出循环")
+                    break
+                try:
+                    await self.process_cycle()
+                except TokenBudgetExceededError as e:
+                    # 预算在 process_cycle 内部（如无工具重试循环）被网关拒绝
+                    self._exit_reason = str(e)
+                    logger.warning(f"{self.__class__.__name__} 会话因 token 预算退出: {e}")
+                    break
 
         return self._build_result()
 
@@ -131,12 +162,28 @@ class HeavySession(ABC):
             # 4. 处理响应
             if assistant_message.tool_calls:
                 self.no_tool_call_count = 0
+                repeat_warned = False
                 for tool_call in assistant_message.tool_calls:
+                    # 连续重复调用检测：同参数空转的熔断（如反复 query_history 等新消息）
+                    verdict = self._register_tool_call(tool_call)
+                    if verdict != "ok":
+                        # 不执行该调用，但必须回灌合成 tool 消息保持消息配对合法
+                        # （assistant(tool_calls) 之后的每个 tool_call 都要有对应 tool 响应）
+                        self.history_manager.append(self._skipped_tool_response(tool_call))
+                        if verdict == "stop":
+                            self.running = False
+                            self._exit_reason = "连续重复调用同一工具且无进展（再次命中）"
+                            logger.error(f"{self.__class__.__name__} {self._exit_reason}")
+                            continue  # 剩余 tool_calls 仍需回灌，外层 while 随后退出
+                        repeat_warned = True
+                        continue
                     tool_response = await self._handle_tool_call(tool_call)
                     if isinstance(tool_response, str) and tool_response.startswith("[错误]"):
                         self.tool_error_count += 1
                     if self._should_append_tool_response(tool_response):
                         self.history_manager.append(tool_response)
+                if repeat_warned and self.running:
+                    self._inject_repeat_warning()
                 break  # 使用工具，正式进入下一轮循环
             else:
                 # 5. 无工具调用：注入警告 user 消息，继续下一轮 LLM 输出
@@ -173,6 +220,72 @@ class HeavySession(ABC):
                 for tool_call in assistant_message.tool_calls
             ]
         self.history_manager.append(assistant_dict)
+
+    def _register_tool_call(self, tool_call) -> str:
+        """记录工具调用签名并判定"成功但无进展"的空转。
+
+        签名 = 工具名 + 规范化参数（dict 排序键后序列化，防字段顺序抖动）。
+
+        Returns:
+            "ok"   — 正常执行
+            "warn" — 连续 repeat_threshold 次相同调用，第一次命中（注入自纠提示）
+            "stop" — 命中后仍重复（第二次满额），应强制结束会话
+        """
+        function = getattr(tool_call, "function", None)
+        name = getattr(function, "name", "") or ""
+        raw_args = getattr(function, "arguments", "") or ""
+
+        if self.repeat_threshold is None:
+            return "ok"   # 检测未启用
+
+        try:
+            normalized = json.dumps(json.loads(raw_args), sort_keys=True, ensure_ascii=False)
+        except Exception:
+            normalized = str(raw_args)
+        sig = f"{name}:{normalized}"
+
+        if name in self.repeat_exempt_tools:
+            self._recent_tool_sigs.clear()
+            return "ok"
+
+        sigs = self._recent_tool_sigs
+        sigs.append(sig)
+        if len(sigs) < self.repeat_threshold or any(s != sig for s in sigs):
+            return "ok"
+
+        # 满额命中：清空窗口重新计数，strike 记一次
+        self._recent_tool_sigs.clear()
+        self._last_repeat_tool = name
+        self._tool_repeat_strikes += 1
+        return "warn" if self._tool_repeat_strikes == 1 else "stop"
+
+    def _skipped_tool_response(self, tool_call) -> Dict[str, Any]:
+        """构造"已跳过"的合成 tool 响应（保持 assistant(tool_calls) 的消息配对合法）。"""
+        return {
+            "role": "tool",
+            "tool_call_id": getattr(tool_call, "id", None),
+            "name": getattr(getattr(tool_call, "function", None), "name", ""),
+            "content": (
+                "[已跳过-重复调用] 连续多次以相同参数调用同一工具且结果无变化，"
+                "本次调用未执行。若在等待外部消息，请调用 terminate 结束本轮会话，"
+                "新消息到达会自动唤醒新一轮。"
+            ),
+        }
+
+    def _inject_repeat_warning(self) -> None:
+        """注入点名式自纠提示（user 消息，进持久化上下文）。"""
+        self.history_manager.append({
+            "role": "user",
+            "content": (
+                f"【系统提示】检测到你连续 {self.repeat_threshold} 次以相同参数调用 "
+                f"{self._last_repeat_tool} 且结果无变化。等待外部回复不是本会话的职责："
+                f"请基于当前信息行动，或调用 terminate 结束本轮——新消息到达会自动唤醒新一轮。"
+            ),
+        })
+        logger.warning(
+            f"{self.__class__.__name__} 检测到重复调用空转 (tool={self._last_repeat_tool})，"
+            f"已注入自纠提示 (strike {self._tool_repeat_strikes})"
+        )
 
     async def stop(self, exit_reason: Optional[str] = None) -> None:
         """停止会话（固定骨架）"""

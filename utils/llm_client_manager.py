@@ -2,28 +2,91 @@
 """
 LLM客户端管理器
 
-提供统一的LLM调用接口，支持4种模式：
-- advanced-reason: Pro模型 + 思考模式
-- advanced: Pro模型 + 非思考模式
-- basic-reason: 普通模型 + 思考模式
-- basic: 普通模型 + 非思考模式
+提供统一的LLM调用接口，按模型等级（level）调用：
+- flash: 主力模型（ModelConfig.FLASH，当前统一使用）
+- pro: 高阶模型（ModelConfig.PRO）
+- vision / embedding: 视觉 / 嵌入等级（由各自专用链路消费 ModelConfig）
+
+模型名与思考开关统一从 config.settings.ModelConfig 注册表解析。
 """
 
 import inspect
 import json
+import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from pickle import TRUE
 import openai
 from typing import Dict, Any, List, Optional
 from utils.logger import get_logger
-from config.settings import LLMConfig
+from config.settings import LLMConfig, ModelConfig
 
 logger = get_logger('LLMClientManager', log_level='INFO')
+
+
+class TokenBudgetExceededError(RuntimeError):
+    """会话累计 token 预算耗尽。
+
+    注意：故意不继承 AbyssCoreError——预算耗尽是正常运营熔断（优雅停止会话），
+    不能触发 @async_handle_errors 的 os._exit 崩溃语义。
+    """
+    pass
+
+
+class TokenBudget:
+    """单个会话的累计 token 预算（每次调用 usage.total_tokens 的累加）。
+
+    背景（docs/待办.md「空转治本」）：API 无状态，历史每次调用都整段重发计费，
+    轮询式死循环的累计消耗随轮数线性上涨——累计预算是对"总花费"的熔断，
+    与单次输入窗口上限（管单次大小）和 max_rounds（管轮数）正交互补。
+    """
+
+    def __init__(self, max_tokens: int):
+        self.max_tokens = int(max_tokens)
+        self.used = 0
+        self.calls = 0
+
+    def record(self, total_tokens: Optional[int]) -> None:
+        """记账一次调用的 total_tokens（None/异常值静默忽略）。"""
+        if total_tokens is None or total_tokens < 0:
+            return
+        self.used += int(total_tokens)
+        self.calls += 1
+
+    @property
+    def exceeded(self) -> bool:
+        return self.used >= self.max_tokens
+
+    def __repr__(self) -> str:
+        return f"TokenBudget(used={self.used}/{self.max_tokens}, calls={self.calls})"
+
+
+# 会话级预算（ContextVar：同一会话 task 内的所有 LLM 调用共享，含工具内部
+# 经由 light_agent 等发起的次级调用；asyncio.create_task 会拷贝引用，
+# TokenBudget 是可变对象，记账仍落到同一实例）
+_TOKEN_BUDGET: ContextVar[Optional[TokenBudget]] = ContextVar("llm_token_budget", default=None)
+
+
+@contextmanager
+def token_budget_scope(budget: Optional[TokenBudget]):
+    """在作用域内启用会话 token 预算（嵌套时恢复外层值）。None = 仅透传不启用。"""
+    token = _TOKEN_BUDGET.set(budget)
+    try:
+        yield budget
+    finally:
+        _TOKEN_BUDGET.reset(token)
+
 
 TOKEN_STATS_FILE = Path(__file__).parent.parent / "token_stats.json"
 TOKEN_TRACE_FILE = Path(__file__).parent.parent / "token_trace.json"
 
 TOKEN_PRICING = {
+    "deepseek-flash": {
+        "input_per_million": 1,
+        "output_per_million": 2,
+        "cached_per_million": 0.02
+    },
     "deepseek-v4-flash": {
         "input_per_million": 1,
         "output_per_million": 2,
@@ -36,33 +99,67 @@ TOKEN_PRICING = {
     }
 }
 
+# 合法模型等级白名单（ModelConfig 上的等级注册名，大写）
+MODEL_LEVELS = ('FLASH', 'CONVERSATION', 'PRO', 'VISION', 'EMBEDDING')
+
 
 class LLMClient:
     """LLM客户端类"""
-    
-    def __init__(self):
+
+    def __init__(self, api_key: str = None, base_url: str = None, use_session_header: Optional[bool] = None,
+                 extra_headers: Dict[str, str] = None):
+        # 接入点参数化：未显式传入时使用 opencode 统一接入点（ModelConfig）
+        api_key = api_key or ModelConfig.API_KEY
+        base_url = base_url or ModelConfig.BASE_URL
+        # opencode Go 网关强制要求会话头（MissingSessionID 400），仅用于网关路由
+        # 优化，不进模型上下文。进程级固定 id：路由最稳定，prompt 前缀缓存命中最有保障。
+        # 第三方接入点（无该网关约束）不发送；未显式指定时按接入点自动判断。
+        self.is_opencode = "opencode" in base_url
+        if use_session_header is None:
+            use_session_header = self.is_opencode
+        self._session_id = uuid.uuid4().hex
+        headers: Dict[str, str] = {"x-opencode-session": self._session_id} if use_session_header else {}
+        # extra_headers 用于覆盖 SDK 默认头（如 User-Agent，部分第三方 WAF 拦截 OpenAI SDK UA）
+        if extra_headers:
+            headers.update(extra_headers)
         self._client = openai.AsyncOpenAI(
-            api_key=LLMConfig.API_KEY,
-            base_url=LLMConfig.BASE_URL
+            api_key=api_key,
+            base_url=base_url,
+            default_headers=headers or None,
         )
     
-    async def chat(self, model: str, messages: List[Dict], extra_body: Dict = None, 
+    async def chat(self, model: str, messages: List[Dict], extra_body: Dict = None,
                   caller_file: str = None, caller_name: str = None, caller_line: int = None, **kwargs):
         """内部聊天方法"""
+        # 会话级 token 预算熔断：超限直接拒绝本次调用（拦的是下一轮）
+        budget = _TOKEN_BUDGET.get()
+        if budget is not None and budget.exceeded:
+            raise TokenBudgetExceededError(
+                f"会话 token 预算已耗尽: 已用 {budget.used}/{budget.max_tokens} tokens"
+            )
+
         request_params = {
             "model": model,
             "messages": messages,
         }
-        
+
         if extra_body:
             request_params["extra_body"] = extra_body
-        
+
         request_params.update(kwargs)
-        
+
         response = await self._client.chat.completions.create(**request_params)
-        
+
+        if budget is not None and response.usage is not None:
+            budget.record(response.usage.total_tokens)
+            if budget.exceeded:
+                logger.warning(
+                    f"会话 token 预算触顶: {budget.used}/{budget.max_tokens} tokens, "
+                    f"下一次调用将被拒绝"
+                )
+
         self._log_usage(response, model, caller_file, caller_name, caller_line)
-        
+
         return response
     
     def _log_usage(self, response, model: str, caller_file: str, caller_name: str, caller_line: int):
@@ -192,33 +289,49 @@ class LLMClient:
 
 
 class LLMBridge:
-    """LLM调用桥接器（单例由模块级 llm_bridge 持有）"""
+    """LLM调用桥接器（单例由模块级 llm_bridge 持有）
 
-    MODES = {
-        'advanced-reason': {
-            'model': 'deepseek-v4-pro',
-            'thinking': True
-        },
-        'advanced': {
-            'model': 'deepseek-v4-pro',
-            'thinking': False
-        },
-        'basic-reason': {
-            'model': 'deepseek-v4-flash',
-            'thinking': True
-        },
-        'basic': {
-            'model': 'deepseek-v4-flash',
-            'thinking': False
-        }
-    }
+    模型等级统一从 ModelConfig 注册表解析（flash / conversation / pro / vision /
+    embedding），等级同时决定接入点：flash 走主力专属接入点（未配置时回退
+    opencode 统一接入点），conversation 走专属接入点（未配置时回退 opencode
+    统一接入点），其余等级走 opencode 统一接入点。
+    思考开关由 ModelConfig.THINKING 全局控制（仅 opencode 接入点注入 thinking
+    extra_body，第三方接入点不注入）。
+    """
 
     def __init__(self):
-        self._client = LLMClient()
+        # 主 client 服务 flash 等级：优先走主力专属接入点（DeepSeek 官方 API），
+        # 未配置时 LLMClient 内部回退 opencode 统一接入点
+        self._client = LLMClient(
+            api_key=ModelConfig.FLASH_API_KEY or None,
+            base_url=ModelConfig.FLASH_BASE_URL or None,
+        )
+        # conversation 专属 client（接入点配置为空时与主 client 等价，共享实例）
+        self._conversation_client = None
+
+    def _resolve_conversation_client(self) -> LLMClient:
+        """解析 conversation 等级的 client（专属接入点，懒初始化）。
+
+        专用接入点为空时回退 opencode 统一接入点（直接复用主 client）。
+        """
+        conv_key = ModelConfig.CONVERSATION_API_KEY
+        conv_url = ModelConfig.CONVERSATION_BASE_URL
+        if not conv_key and not conv_url:
+            return self._client
+        if self._conversation_client is None:
+            self._conversation_client = LLMClient(
+                api_key=conv_key or ModelConfig.API_KEY,
+                base_url=conv_url or ModelConfig.BASE_URL,
+                use_session_header=False,
+                # 部分第三方中转 WAF 拦截 OpenAI SDK 默认 UA（403 Your request was blocked），
+                # 覆盖为应用自有 UA
+                extra_headers={"User-Agent": "N-Touch/1.0"},
+            )
+        return self._conversation_client
 
     async def call_llm(
         self,
-        mode: str,
+        level: str,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         caller_file: str = None,
@@ -228,69 +341,72 @@ class LLMBridge:
     ) -> Any:
         """
         调用LLM的统一接口
-        
+
         Args:
-            mode: 调用模式，可选值：
-                - advanced-reason: Pro模型 + 思考模式
-                - advanced: Pro模型 + 非思考模式
-                - basic-reason: 普通模型 + 思考模式
-                - basic: 普通模型 + 非思考模式
+            level: 模型等级，可选值：
+                - flash: 主力模型（ModelConfig.FLASH）
+                - conversation: conversation 会话模型（ModelConfig.CONVERSATION，专属接入点）
+                - pro: 高阶模型（ModelConfig.PRO，未设置时直接报错阻断）
+                - vision / embedding: 视觉 / 嵌入等级
             messages: 消息列表 (必需)
             tools: 工具列表 (可选)
             **kwargs: 其他传递给API的参数
-        
+
         Returns:
             LLM响应对象
         """
-        if mode not in self.MODES:
-            raise ValueError(f"未知的调用模式: {mode}，支持的模式: {list(self.MODES.keys())}")
-        
-        mode_config = self.MODES[mode]
+        level_attr = level.upper()
+        if level_attr not in MODEL_LEVELS:
+            raise ValueError(
+                f"未知的模型等级: {level}，支持的等级: flash / conversation / pro / vision / embedding"
+            )
+        model = getattr(ModelConfig, level_attr)
+        if not model:
+            raise ValueError(f"模型等级 {level} 尚未在 ModelConfig 中设置模型，禁止降级调用")
+
+        # conversation 等级路由到专属接入点；其余走主接入点（flash 专属 DeepSeek / opencode 统一）
+        client = self._resolve_conversation_client() if level_attr == 'CONVERSATION' else self._client
+        is_opencode = client.is_opencode
+
+        # thinking extra_body 为 opencode 接入点思考开关格式，第三方接入点不注入
         extra_body = None
-        
-        if mode_config['thinking']:
-            extra_body = {"thinking": {"type": "enabled"}}
-        else:
-            extra_body = {"thinking": {"type": "disabled"}}
-        
+        if is_opencode:
+            extra_body = {"thinking": {"type": "enabled" if ModelConfig.THINKING else "disabled"}}
+
         request_params = {
-            "model": mode_config['model'],
+            "model": model,
             "messages": messages,
         }
-        
+
         if tools is not None:
             request_params["tools"] = tools
-        
+
         request_params.update(kwargs)
-        
-        logger.debug(f"LLM调用 - 模式: {mode}, 模型: {mode_config['model']}, 思考: {mode_config['thinking']}")
-        
-        return await self._client.chat(**request_params, extra_body=extra_body,
-                                       caller_file=caller_file, caller_name=caller_name, caller_line=caller_line)
+
+        logger.debug(f"LLM调用 - 等级: {level}, 模型: {model}, 思考: {ModelConfig.THINKING if is_opencode else '由接入点默认'}")
+
+        return await client.chat(**request_params, extra_body=extra_body,
+                                 caller_file=caller_file, caller_name=caller_name, caller_line=caller_line)
 
 
 llm_bridge = LLMBridge()
 
 
 async def call_llm(
-    mode: str,
-    messages: List[Dict[str, Any]],
+    level: str = "flash",
+    messages: List[Dict[str, Any]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
     **kwargs
 ) -> Any:
     """
     调用LLM的统一接口
-    
+
     Args:
-        mode: 调用模式，可选值：
-            - advanced-reason: Pro模型 + 思考模式
-            - advanced: Pro模型 + 非思考模式
-            - basic-reason: 普通模型 + 思考模式
-            - basic: 普通模型 + 非思考模式
+        level: 模型等级（flash / pro / vision / embedding），默认 flash
         messages: 消息列表 (必需)
         tools: 工具列表 (可选)
         **kwargs: 其他传递给API的参数
-    
+
     Returns:
         LLM响应对象
     """
@@ -299,5 +415,5 @@ async def call_llm(
     caller_file = caller_info.co_filename
     caller_name = caller_info.co_name
     caller_line = caller_frame.f_lineno
-    
-    return await llm_bridge.call_llm(mode, messages, tools, caller_file=caller_file, caller_name=caller_name, caller_line=caller_line, **kwargs)
+
+    return await llm_bridge.call_llm(level, messages, tools, caller_file=caller_file, caller_name=caller_name, caller_line=caller_line, **kwargs)

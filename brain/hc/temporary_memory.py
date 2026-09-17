@@ -29,33 +29,12 @@ def _format_message_line(idx: int, msg: Dict[str, Any]) -> str:
     return f"{idx}. {content}"
 
 
-def _notify_dynamic_prompt(limit: int = DEFAULT_DISPLAY_LIMIT) -> None:
-    """将当前临时记忆（最近 N 条）推送到 dynamic_prompt_manager.hc_temporary_memory
-
-    Args:
-        limit: 推送最近 N 条，默认 3。设置 <= 0 表示全部。
-    """
-    try:
-        from utils.dynamic_prompt_manager import dynamic_prompt_manager
-        # 按时间倒序取最近 N 条，再按原顺序（时间正序）格式化
-        if limit is None or limit <= 0 or limit >= len(_temporary_memory._messages):
-            recent = _temporary_memory._messages
-        else:
-            recent = _temporary_memory._messages[-limit:]
-        if recent:
-            value = "".join(
-                _format_message_line(i, msg) + "\n"
-                for i, msg in enumerate(recent, 1)
-            )
-        else:
-            value = ""
-        dynamic_prompt_manager.set('hc_temporary_memory', value)
-    except Exception as e:
-        logger.warning(f"推送 hc_temporary_memory 失败: {e}")
-
-
 class TemporaryMemory:
-    """临时记忆（单例由模块级 _temporary_memory 持有）。"""
+    """临时记忆（单例由模块级 _temporary_memory 持有）。
+
+    模块任务：串联下一个 LLM 循环——本循环写入关键事实，PFCA / proactive 下一轮
+    组装首条输入时经 get_recent_experience 取用。详见 docs/api/temporary_memory.md。
+    """
 
     def __init__(self):
         if not hasattr(self, '_initialized'):
@@ -104,56 +83,10 @@ class TemporaryMemory:
             removed_message = self._messages.pop(0)
             logger.warning(f"临时内存超过上限 ({MAX_MESSAGES}), 删除最旧消息: {removed_message['content']}")
 
-        # 推送到 dynamic_prompt_manager.hc_temporary_memory（默认显示最新 3 条）
-        _notify_dynamic_prompt(limit=DEFAULT_DISPLAY_LIMIT)
-
     def _get_timestamp(self) -> float:
         """获取当前时间戳"""
         import time
         return time.time()
-
-    def clear(self) -> None:
-        self._messages.clear()
-        # 推送到 dynamic_prompt_manager.hc_temporary_memory（此时为空字符串）
-        _notify_dynamic_prompt(limit=DEFAULT_DISPLAY_LIMIT)
-
-    def get_messages(self, limit: Optional[int] = DEFAULT_DISPLAY_LIMIT) -> List[Any]:
-        """
-        获取临时消息的内容（按时间正序）
-
-        Args:
-            limit: 最多返回多少条
-                - None 或 <= 0：全部
-                - 正整数：最新的 N 条
-                - 默认 DEFAULT_DISPLAY_LIMIT (3)
-
-        Returns:
-            List[Any]: 消息内容列表
-        """
-        if limit is None or limit <= 0 or limit >= len(self._messages):
-            msgs = [msg["content"] for msg in self._messages]
-        else:
-            msgs = [msg["content"] for msg in self._messages[-limit:]]
-        logger.debug(f"获取临时内存内容 (limit={limit}): {msgs}")
-        return msgs
-
-    def get_last_message(self) -> Any:
-        """
-        获取最后一条临时消息的内容
-
-        Returns:
-            Any: 最后一条临时消息的内容，如果没有则返回None
-        """
-        return self._messages[-1]["content"] if self._messages else None
-
-    def get_raw_messages(self) -> List[Dict[str, Any]]:
-        """
-        获取原始消息对象（包含所有信息）
-
-        Returns:
-            List[Dict[str, Any]]: 原始消息对象列表
-        """
-        return self._messages
 
     def get_formatted(self, limit: Optional[int] = DEFAULT_DISPLAY_LIMIT) -> str:
         """
@@ -169,34 +102,6 @@ class TemporaryMemory:
             recent = self._messages
         else:
             recent = self._messages[-limit:]
-        if not recent:
-            return ""
-        return "".join(
-            _format_message_line(i, msg) + "\n"
-            for i, msg in enumerate(recent, 1)
-        )
-
-    def get_formatted_without_identifier(self, limit: Optional[int] = DEFAULT_DISPLAY_LIMIT) -> str:
-        """获取仅含 identifier 为 None 的短期记忆文本（含时间戳）。
-
-        设计动机：
-            - 带 identifier 的消息通常与"按角色去重"的强语义记忆绑定，
-              不适合混入面向 LLM 的"短期上下文"展示。
-            - 一些调用方（如 social_agent 首条 user 消息）只想拿到
-              普通的临时事件 / 上下文片段，因此提供本过滤接口。
-
-        Args:
-            limit: 最多返回多少条（默认 DEFAULT_DISPLAY_LIMIT）。
-                None / <=0 表示全部；正整数表示"过滤后"的最新 N 条。
-
-        Returns:
-            str: 多行文本，每行形如 "1. [2026-07-01 22:30:00] xxx"
-        """
-        filtered = [m for m in self._messages if m.get("identifier") is None]
-        if limit is None or limit <= 0 or limit >= len(filtered):
-            recent = filtered
-        else:
-            recent = filtered[-limit:]
         if not recent:
             return ""
         return "".join(
@@ -242,19 +147,3 @@ def get_recent_experience(
         from datetime import datetime
         header += f"(当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"
     return f"{header}\n{body}"
-
-
-def get_recent_temporary_memory(limit: int = DEFAULT_DISPLAY_LIMIT, formatted: bool = True) -> Any:
-    """便捷获取最近 N 条短期记忆
-
-    Args:
-        limit: 最多返回多少条，默认 DEFAULT_DISPLAY_LIMIT (3)
-        formatted: True 返回格式化字符串（含时间戳），
-                   False 返回 list[原始 message dict]
-
-    Returns:
-        str 或 list[dict]
-    """
-    if formatted:
-        return _temporary_memory.get_formatted(limit=limit)
-    return _temporary_memory.get_raw_messages()[-limit:] if limit and limit > 0 else _temporary_memory.get_raw_messages()

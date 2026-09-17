@@ -2,15 +2,17 @@ from .private_truck import PrivateTruck
 from .ongoing_truck import OngoingTruck
 from .special_attention_truck import SpecialAttentionTruck
 from .scheduled_proactive_truck import ScheduledProactiveTruck
+from .reflection_truck import ReflectionTruck
 
-__all__ = ['PrivateTruck', 'OngoingTruck', 'SpecialAttentionTruck', 'ScheduledProactiveTruck']
+__all__ = ['PrivateTruck', 'OngoingTruck', 'SpecialAttentionTruck', 'ScheduledProactiveTruck', 'ReflectionTruck']
 
 # 注册所有truck
 truck_registry = {
     'private_truck': PrivateTruck,
     'ongoing_truck': OngoingTruck,
     'special_attention_truck': SpecialAttentionTruck,
-    'scheduled_proactive_truck': ScheduledProactiveTruck
+    'scheduled_proactive_truck': ScheduledProactiveTruck,
+    'reflection_truck': ReflectionTruck
 }
 
 # 获取truck实例的工厂函数

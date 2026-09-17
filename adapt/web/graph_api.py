@@ -3,13 +3,15 @@
 adapt.web.graph_api
 ===================
 
-长期事件列表的后端接口（SQLite 版）。
+任务列表的后端接口（SQLite 版）。
 
-端点:
-  /events/list      — 长期事件列表 (page + 类型筛选)
+端点（URL 路由暂沿用 /events/*，待数据结构稳定后再迁移）:
+  /events/list      — 任务列表 (page + status 筛选)
   /events/set_type  — 状态快改
   /events           — 创建
   /events/{id}      — PATCH / DELETE
+
+内部已全部切到 tasks 表（brain.hc.database.task.TaskOperations）。
 
 所有方法都是 async，基于 SQLite 记忆数据库（brain.hc.database）。
 
@@ -25,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from aiohttp import web
 
 from brain.hc.database.core import get_memory_db
-from brain.hc.database.event import EventOperations
+from brain.hc.database.task import TaskOperations, TASK_STATUS_ACTIVE, TASK_STATUS_COMPLETED
 from brain.hc.database.vector_store import get_vector_store
 from utils.logger import get_logger
 
@@ -40,21 +42,21 @@ def _safe_int(s: Optional[str], default: int) -> int:
 
 
 # ============================================================
-# /events/list — 长期事件列表
+# /events/list — 任务列表
 # ============================================================
 
-_EVENT_FIELDS = (
-    "event_id", "title", "summary", "event_type",
+_TASK_FIELDS = (
+    "task_id", "title", "status", "summary",
     "next_occurrence", "is_vectorized",
     "start_time", "end_time", "updated_at",
 )
 
-_EVENT_TYPE_ALLOW = {"ongoing", "completed", "failed", "aborted", "planned"}
+_TASK_STATUS_ALLOW = {TASK_STATUS_ACTIVE, TASK_STATUS_COMPLETED}
 
 
-async def handle_list_events(request: web.Request) -> web.Response:
-    """GET /events/list?status=ongoing&limit=200&offset=0"""
-    status = (request.query.get("status") or "ongoing").strip().lower()
+async def handle_list_tasks(request: web.Request) -> web.Response:
+    """GET /events/list?status=active&limit=200&offset=0"""
+    status = (request.query.get("status") or TASK_STATUS_ACTIVE).strip().lower()
     limit = _safe_int(request.query.get("limit"), 200)
     offset = _safe_int(request.query.get("offset"), 0)
     if limit > 1000:
@@ -62,9 +64,9 @@ async def handle_list_events(request: web.Request) -> web.Response:
     if limit <= 0:
         limit = 200
 
-    if status != "all" and status not in _EVENT_TYPE_ALLOW:
+    if status != "all" and status not in _TASK_STATUS_ALLOW:
         return web.json_response(
-            {"error": f"status 必须是 {sorted(_EVENT_TYPE_ALLOW | {'all'})}"},
+            {"error": f"status 必须是 {sorted(_TASK_STATUS_ALLOW | {'all'})}"},
             status=400,
         )
 
@@ -78,14 +80,14 @@ async def handle_list_events(request: web.Request) -> web.Response:
         where = ""
         params: List[Any] = []
         if status != "all":
-            where = "WHERE event_type=?"
+            where = "WHERE status=?"
             params.append(status)
 
-        cur = await conn.execute(f"SELECT COUNT(*) AS c FROM events {where}", params)
+        cur = await conn.execute(f"SELECT COUNT(*) AS c FROM tasks {where}", params)
         total = (await cur.fetchone())["c"]
 
         cur = await conn.execute(
-            f"SELECT * FROM events {where} ORDER BY coalesce(updated_at, start_time) DESC LIMIT ? OFFSET ?",
+            f"SELECT * FROM tasks {where} ORDER BY coalesce(updated_at, start_time) DESC LIMIT ? OFFSET ?",
             params + [limit, offset],
         )
         rows = await cur.fetchall()
@@ -93,16 +95,16 @@ async def handle_list_events(request: web.Request) -> web.Response:
         nodes = []
         for rec in rows:
             d: Dict[str, Any] = {}
-            for f in _EVENT_FIELDS:
+            for f in _TASK_FIELDS:
                 d[f] = rec[f]
-            d["id"] = rec["event_id"]
+            d["id"] = rec["task_id"]
             nodes.append(d)
     except Exception as e:
         logger.exception("[/events/list] 拉取失败")
         return web.json_response({"error": f"读取失败: {e}"}, status=500)
 
     return web.json_response({
-        "events": nodes,
+        "tasks": nodes,
         "total": total,
         "status": status,
         "limit": limit,
@@ -110,55 +112,55 @@ async def handle_list_events(request: web.Request) -> web.Response:
     })
 
 
-async def handle_set_event_type(request: web.Request) -> web.Response:
-    """POST /events/set_type  body: {event_id, event_type}"""
+async def handle_set_task_status(request: web.Request) -> web.Response:
+    """POST /events/set_type  body: {task_id, status}"""
     try:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "body 必须是 JSON"}, status=400)
 
-    event_id = (data.get("event_id") or "").strip()
-    event_type = (data.get("event_type") or "").strip().lower()
-    if not event_id:
-        return web.json_response({"error": "event_id 必填"}, status=400)
-    if event_type not in _EVENT_TYPE_ALLOW:
+    task_id = (data.get("task_id") or "").strip()
+    status = (data.get("status") or "").strip().lower()
+    if not task_id:
+        return web.json_response({"error": "task_id 必填"}, status=400)
+    if status not in _TASK_STATUS_ALLOW:
         return web.json_response(
-            {"error": f"event_type ∈ {sorted(_EVENT_TYPE_ALLOW)}"},
+            {"error": f"status ∈ {sorted(_TASK_STATUS_ALLOW)}"},
             status=400,
         )
 
     try:
-        ops = EventOperations()
+        ops = TaskOperations()
         db = get_memory_db()
         conn = await db._ensure_connection()
-        cur = await conn.execute("SELECT title FROM events WHERE event_id=?", (event_id,))
+        cur = await conn.execute("SELECT title FROM tasks WHERE task_id=?", (task_id,))
         rec = await cur.fetchone()
         if rec is None:
-            return web.json_response({"error": f"Event {event_id} 不存在"}, status=404)
+            return web.json_response({"error": f"Task {task_id} 不存在"}, status=404)
         current_title = rec["title"] or ""
 
-        ok = await ops.update_event(current_title, event_type=event_type)
+        ok = await ops.update_task(current_title, status=status)
         if not ok:
-            return web.json_response({"error": "update_event 返回 False"}, status=500)
+            return web.json_response({"error": "update_task 返回 False"}, status=500)
 
-        cur = await conn.execute("SELECT * FROM events WHERE event_id=?", (event_id,))
+        cur = await conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,))
         rec = await cur.fetchone()
         if rec is None:
             return web.json_response({"error": "更新后无法回读"}, status=500)
         d: Dict[str, Any] = {}
-        for f in _EVENT_FIELDS:
+        for f in _TASK_FIELDS:
             d[f] = rec[f]
-        d["id"] = event_id
-        return web.json_response({"event": d, "updated": True})
+        d["id"] = task_id
+        return web.json_response({"task": d, "updated": True})
     except Exception as e:
         logger.exception("[/events/set_type] 失败")
         return web.json_response({"error": f"更新失败: {e}"}, status=500)
 
 
-_EVENT_EDITABLE = {"title", "event_type", "summary", "next_occurrence",
-                   "start_time", "updated_at"}
+_TASK_EDITABLE = {"title", "status", "summary", "next_occurrence",
+                  "start_time", "updated_at"}
 
-_EVENT_TIME_FIELDS = {"start_time", "updated_at", "next_occurrence"}
+_TASK_TIME_FIELDS = {"start_time", "updated_at", "next_occurrence"}
 
 
 def _validate_iso_datetime(value: Any, field_name: str) -> Tuple[bool, str]:
@@ -177,11 +179,11 @@ def _validate_iso_datetime(value: Any, field_name: str) -> Tuple[bool, str]:
     return True, ""
 
 
-async def handle_update_event(request: web.Request) -> web.Response:
+async def handle_update_task(request: web.Request) -> web.Response:
     """PATCH /events/{event_id}"""
-    event_id = request.match_info.get("event_id", "")
-    if not event_id:
-        return web.json_response({"error": "event_id 必填"}, status=400)
+    task_id = request.match_info.get("event_id", "")
+    if not task_id:
+        return web.json_response({"error": "task_id 必填"}, status=400)
 
     try:
         data = await request.json()
@@ -189,7 +191,7 @@ async def handle_update_event(request: web.Request) -> web.Response:
         return web.json_response({"error": "body 必须是 JSON"}, status=400)
 
     kwargs: Dict[str, Any] = {}
-    for k in _EVENT_EDITABLE:
+    for k in _TASK_EDITABLE:
         if k in data and data[k] is not None:
             v = data[k]
             if isinstance(v, str):
@@ -198,31 +200,31 @@ async def handle_update_event(request: web.Request) -> web.Response:
 
     if not kwargs:
         return web.json_response(
-            {"error": f"没有可改字段 (允许: {sorted(_EVENT_EDITABLE)})"},
+            {"error": f"没有可改字段 (允许: {sorted(_TASK_EDITABLE)})"},
             status=400,
         )
 
-    for f in _EVENT_TIME_FIELDS:
+    for f in _TASK_TIME_FIELDS:
         if f in kwargs:
             ok, err = _validate_iso_datetime(kwargs[f], f)
             if not ok:
                 return web.json_response({"error": err}, status=400)
 
-    if kwargs.get("event_type") and kwargs["event_type"] not in _EVENT_TYPE_ALLOW:
+    if kwargs.get("status") and kwargs["status"] not in _TASK_STATUS_ALLOW:
         return web.json_response(
-            {"error": f"event_type ∈ {sorted(_EVENT_TYPE_ALLOW)}"},
+            {"error": f"status ∈ {sorted(_TASK_STATUS_ALLOW)}"},
             status=400,
         )
 
     try:
-        ops = EventOperations()
+        ops = TaskOperations()
         db = get_memory_db()
         conn = await db._ensure_connection()
 
-        cur = await conn.execute("SELECT title, summary FROM events WHERE event_id=?", (event_id,))
+        cur = await conn.execute("SELECT title, summary FROM tasks WHERE task_id=?", (task_id,))
         rec = await cur.fetchone()
         if rec is None:
-            return web.json_response({"error": f"Event {event_id} 不存在"}, status=404)
+            return web.json_response({"error": f"Task {task_id} 不存在"}, status=404)
         current_title = rec["title"] or ""
         current_summary = rec["summary"] or ""
 
@@ -232,20 +234,20 @@ async def handle_update_event(request: web.Request) -> web.Response:
         user_set_updated_at = "updated_at" in kwargs and kwargs["updated_at"] is not None
 
         if non_title_kwargs:
-            ok = await ops.update_event(
+            ok = await ops.update_task(
                 current_title,
                 preserve_updated_at=user_set_updated_at,
                 **non_title_kwargs,
             )
             if not ok:
-                return web.json_response({"error": "update_event 返回 False"}, status=500)
+                return web.json_response({"error": "update_task 返回 False"}, status=500)
 
         if title_changed:
             if user_set_updated_at:
-                await conn.execute("UPDATE events SET title=? WHERE event_id=?", (new_title, event_id))
+                await conn.execute("UPDATE tasks SET title=? WHERE task_id=?", (new_title, task_id))
             else:
                 now = datetime.now().isoformat()
-                await conn.execute("UPDATE events SET title=?, updated_at=? WHERE event_id=?", (new_title, now, event_id))
+                await conn.execute("UPDATE tasks SET title=?, updated_at=? WHERE task_id=?", (new_title, now, task_id))
             await conn.commit()
 
         new_summary = kwargs.get("summary")
@@ -259,36 +261,33 @@ async def handle_update_event(request: web.Request) -> web.Response:
             from brain.hc.database.core import serialize_vector
             if vector_to_set:
                 if user_set_updated_at:
-                    await conn.execute("UPDATE events SET summary_vector=?, is_vectorized=1 WHERE event_id=?", (serialize_vector(vector_to_set), event_id))
+                    await conn.execute("UPDATE tasks SET summary_vector=?, is_vectorized=1 WHERE task_id=?", (serialize_vector(vector_to_set), task_id))
                 else:
                     now = datetime.now().isoformat()
-                    await conn.execute("UPDATE events SET summary_vector=?, is_vectorized=1, updated_at=? WHERE event_id=?", (serialize_vector(vector_to_set), now, event_id))
+                    await conn.execute("UPDATE tasks SET summary_vector=?, is_vectorized=1, updated_at=? WHERE task_id=?", (serialize_vector(vector_to_set), now, task_id))
             else:
                 if user_set_updated_at:
-                    await conn.execute("UPDATE events SET summary_vector=NULL, is_vectorized=0 WHERE event_id=?", (event_id,))
+                    await conn.execute("UPDATE tasks SET summary_vector=NULL, is_vectorized=0 WHERE task_id=?", (task_id,))
                 else:
                     now = datetime.now().isoformat()
-                    await conn.execute("UPDATE events SET summary_vector=NULL, is_vectorized=0, updated_at=? WHERE event_id=?", (now, event_id))
+                    await conn.execute("UPDATE tasks SET summary_vector=NULL, is_vectorized=0, updated_at=? WHERE task_id=?", (now, task_id))
             await conn.commit()
 
-        cur = await conn.execute("SELECT * FROM events WHERE event_id=?", (event_id,))
+        cur = await conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,))
         rec = await cur.fetchone()
         if rec is None:
             return web.json_response({"error": "更新后无法回读"}, status=500)
         d: Dict[str, Any] = {}
-        for f in _EVENT_FIELDS:
+        for f in _TASK_FIELDS:
             d[f] = rec[f]
-        d["id"] = event_id
-        return web.json_response({"event": d, "updated": True})
+        d["id"] = task_id
+        return web.json_response({"task": d, "updated": True})
     except Exception as e:
         logger.exception("[/events PATCH] 失败")
         return web.json_response({"error": f"更新失败: {e}"}, status=500)
 
 
-_EVENT_CREATABLE = {"title", "event_type", "summary", "next_occurrence", "start_time"}
-
-
-async def handle_create_event(request: web.Request) -> web.Response:
+async def handle_create_task(request: web.Request) -> web.Response:
     """POST /events"""
     try:
         try:
@@ -302,10 +301,10 @@ async def handle_create_event(request: web.Request) -> web.Response:
         if not title:
             return web.json_response({"error": "title 必填且非空"}, status=400)
 
-        event_type = data.get("event_type") or "ongoing"
-        if event_type not in _EVENT_TYPE_ALLOW:
+        status = data.get("status") or TASK_STATUS_ACTIVE
+        if status not in _TASK_STATUS_ALLOW:
             return web.json_response(
-                {"error": f"event_type ∈ {sorted(_EVENT_TYPE_ALLOW)}"},
+                {"error": f"status ∈ {sorted(_TASK_STATUS_ALLOW)}"},
                 status=400,
             )
 
@@ -321,56 +320,50 @@ async def handle_create_event(request: web.Request) -> web.Response:
             if not ok:
                 return web.json_response({"error": err}, status=400)
 
-        clean: Dict[str, Any] = {"title": title, "event_type": event_type, "summary": summary}
-        if next_occurrence not in (None, ""):
-            clean["next_occurrence"] = next_occurrence
-        if start_time_user not in (None, ""):
-            clean["start_time"] = start_time_user
-
-        ops = EventOperations()
-        event_id = await ops.create_event(
-            title=clean["title"],
-            event_type=clean["event_type"],
-            summary=clean["summary"],
-            next_occurrence=clean.get("next_occurrence"),
+        ops = TaskOperations()
+        task_id = await ops.create_task(
+            title=title,
+            summary=summary,
+            next_occurrence=next_occurrence,
+            status=status,
         )
 
-        if "start_time" in clean:
+        if start_time_user not in (None, ""):
             db = get_memory_db()
             conn = await db._ensure_connection()
-            await conn.execute("UPDATE events SET start_time=? WHERE event_id=?", (clean["start_time"], event_id))
+            await conn.execute("UPDATE tasks SET start_time=? WHERE task_id=?", (start_time_user, task_id))
             await conn.commit()
 
         db = get_memory_db()
         conn = await db._ensure_connection()
-        cur = await conn.execute("SELECT * FROM events WHERE event_id=?", (event_id,))
+        cur = await conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,))
         rec = await cur.fetchone()
         if rec is None:
             return web.json_response({"error": "创建后无法回读"}, status=500)
         d: Dict[str, Any] = {}
-        for f in _EVENT_FIELDS:
+        for f in _TASK_FIELDS:
             d[f] = rec[f]
-        d["id"] = event_id
-        return web.json_response({"event": d, "created": True, "event_id": event_id})
+        d["id"] = task_id
+        return web.json_response({"task": d, "created": True, "task_id": task_id})
     except Exception as e:
         logger.exception("[/events POST] 失败")
         return web.json_response({"error": f"创建失败: {e}"}, status=500)
 
 
-async def handle_delete_event(request: web.Request) -> web.Response:
+async def handle_delete_task(request: web.Request) -> web.Response:
     """DELETE /events/{event_id}"""
-    event_id = request.match_info.get("event_id", "")
-    if not event_id:
-        return web.json_response({"error": "event_id 必填"}, status=400)
+    task_id = request.match_info.get("event_id", "")
+    if not task_id:
+        return web.json_response({"error": "task_id 必填"}, status=400)
     try:
         db = get_memory_db()
         conn = await db._ensure_connection()
-        cur = await conn.execute("DELETE FROM events WHERE event_id=? RETURNING event_id", (event_id,))
+        cur = await conn.execute("DELETE FROM tasks WHERE task_id=? RETURNING task_id", (task_id,))
         rec = await cur.fetchone()
         await conn.commit()
         if rec is None:
-            return web.json_response({"error": f"Event {event_id} 不存在"}, status=404)
-        return web.json_response({"deleted": True, "event_id": rec["event_id"]})
+            return web.json_response({"error": f"Task {task_id} 不存在"}, status=404)
+        return web.json_response({"deleted": True, "task_id": rec["task_id"]})
     except Exception as e:
         logger.exception("[/events DELETE] 失败")
         return web.json_response({"error": f"删除失败: {e}"}, status=500)

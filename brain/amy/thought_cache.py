@@ -35,7 +35,8 @@ from utils.error_handling import handle_errors
 from brain.amy.constants import (
     Thought, MoodSnapshot, ACTEffects,
     BASE_VALUE, MIN_VALUE, MAX_VALUE,
-    clamp, THOUGHT_DURATION,
+    clamp, THOUGHT_DURATION, SC_DEFAULT,
+    generate_timestamp_id,
 )
 
 logger = get_logger('amy_thought', 'INFO')
@@ -51,6 +52,8 @@ class ThoughtCache:
         self.timestamp: int = int(time.time())
         # 情绪事件日志引用（由 EmotionalInterface 注入）
         self._event_log = event_log
+        # SC 状态引用（由 EmotionalInterface 注入，可空；未绑定时快照 sc 用 SC_DEFAULT 兜底）
+        self._sc_state = None
         # 并发锁：保护 thoughts 列表与持久化的读写
         self._lock = asyncio.Lock()
         self.load_from_file()
@@ -58,6 +61,16 @@ class ThoughtCache:
     def bind_event_log(self, event_log):
         """由 EmotionalInterface 在初始化时调用，注入事件日志引用。"""
         self._event_log = event_log
+
+    def bind_sc_state(self, sc_state):
+        """由 EmotionalInterface 在初始化时调用，注入 SC 状态实例引用。"""
+        self._sc_state = sc_state
+
+    def _read_sc_value(self) -> float:
+        """读取当前 SC 值：绑定 ScState 时走 read_value()（含惰性时间衰减），未绑定回退 SC_DEFAULT。"""
+        if self._sc_state is None:
+            return float(SC_DEFAULT)
+        return self._sc_state.read_value()
 
     async def _emit(self, event_type: str, thought: Optional[Thought] = None, **kwargs) -> None:
         """写一条情绪事件日志（无 event_log 时静默跳过）。"""
@@ -220,6 +233,75 @@ class ThoughtCache:
             logger.info(f"注入系统内置 thought: act='{act_name}', id='{thought_id}'")
             return True
 
+    async def create_thought_debug(
+        self,
+        act: str,
+        desc: str,
+        intensity: float = 1.0,
+        duration: Optional[int] = None,
+        create_time: Optional[int] = None,
+    ) -> Thought:
+        """（调试/测试专用）直接在想法池新建一条 thought，绕过 add() 的 stacking/强度推导。
+
+        供 web 端想法池编辑器使用。system 类 act 拒绝直建（由 ensure_system_thought 管理）。
+        """
+        if ACTEffects.category_of(act) == "system":
+            raise ValueError(f"act '{act}' 属于系统内置类，禁止直接创建（由 ensure_system_thought 管理）")
+        async with self._lock:
+            await self._cleanup_expired()
+            now = int(time.time())
+            thought = Thought(
+                id=generate_timestamp_id(),
+                create_time=create_time if create_time is not None else now,
+                desc=desc,
+                act=act,
+                expire_time=now + (duration if duration is not None else THOUGHT_DURATION),
+                intensity=clamp(float(intensity), 0.0, 10.0),
+            )
+            self.thoughts.append(thought)
+            await self._emit("thought_added", thought)
+            return thought
+
+    async def update_thought_debug(
+        self,
+        thought_id: str,
+        *,
+        desc: Optional[str] = None,
+        act: Optional[str] = None,
+        intensity: Optional[float] = None,
+        expire_time: Optional[int] = None,
+    ) -> Thought:
+        """（调试/测试专用）修改想法池中一条 thought 的字段；id 不存在抛 ValueError。
+
+        仅允许编辑非 system 类 thought：system 类由 bootstrap 管理，
+        改 act 会破坏其唯一语义，故禁止改 act（desc/强度/时长可改）。
+        """
+        async with self._lock:
+            target = next((t for t in self.thoughts if t.id == thought_id), None)
+            if target is None:
+                raise ValueError(f"thought '{thought_id}' 不存在")
+            if act is not None:
+                if ACTEffects.category_of(act) == "system":
+                    raise ValueError(f"act '{act}' 属于系统内置类，禁止改为系统 act")
+                target.act = act
+            if desc is not None:
+                target.desc = desc
+            if intensity is not None:
+                target.intensity = clamp(float(intensity), 0.0, 10.0)
+            if expire_time is not None:
+                target.expire_time = int(expire_time)
+            await self._emit("thought_updated", target)
+            return target
+
+    async def delete_thought(self, thought_id: str) -> None:
+        """（调试/测试专用）从想法池中删除一条 thought；id 不存在抛 ValueError。"""
+        async with self._lock:
+            target = next((t for t in self.thoughts if t.id == thought_id), None)
+            if target is None:
+                raise ValueError(f"thought '{thought_id}' 不存在")
+            self.thoughts.remove(target)
+            await self._emit("thought_removed", target)
+
     async def get_active_thoughts(self) -> List[Thought]:
         async with self._lock:
             await self._cleanup_expired()
@@ -250,7 +332,8 @@ class ThoughtCache:
                 return MoodSnapshot(
                     norepinephrine=BASE_VALUE,
                     dopamine=BASE_VALUE,
-                    top_thoughts=[]
+                    top_thoughts=[],
+                    sc=self._read_sc_value()
                 )
 
             total_norepinephrine = 0.0
@@ -273,7 +356,8 @@ class ThoughtCache:
             return MoodSnapshot(
                 norepinephrine=norepinephrine,
                 dopamine=dopamine,
-                top_thoughts=selected_thoughts
+                top_thoughts=selected_thoughts,
+                sc=self._read_sc_value()
             )
 
 

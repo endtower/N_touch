@@ -20,6 +20,7 @@ WebChannel：用浏览器 WebSocket 替代 NapCat/QQ 作为消息通道。
         {"type": "delete_session", "session_id": "..."}
         {"type": "get_messages", "session_id": "..."}
         {"type": "delete_message", "session_id": "...", "message_id": "..."}
+        {"type": "delete_messages", "session_id": "...", "message_ids": ["...", ...]}
         {"type": "message", "session_id": "...", "text": "...", "images": [data:...]}
 
     服务端 -> 浏览器:
@@ -357,16 +358,22 @@ class WebChannel:
             handle_update_experience,
         )
         from .graph_api import (
-            handle_list_events,
-            handle_set_event_type,
-            handle_update_event,
-            handle_create_event,
-            handle_delete_event,
+            handle_list_tasks,
+            handle_set_task_status,
+            handle_update_task,
+            handle_create_task,
+            handle_delete_task,
         )
         # 上下文查看 (只读, 不改 memory/)
-        from .context_api import handle_list_files, handle_read_file
-        # Amy 情绪系统状态 (只读)
-        from .amy_api import handle_get_amy_state
+        from .context_api import handle_chains, handle_read_file
+        # Amy 情绪系统状态 (只读) + 想法池调试编辑 (增/删/改)
+        from .amy_api import (
+            handle_get_amy_state,
+            handle_create_amy_thought,
+            handle_apply_amy_final_evaluation,
+            handle_update_amy_thought,
+            handle_delete_amy_thought,
+        )
         # LLM 自存表情包管理 (list/update/delete)
         from .sticker_api import (
             handle_list_stickers,
@@ -380,26 +387,31 @@ class WebChannel:
         # 记忆经验/嘱托: bequests 表 (只读 + 内联编辑)
         self._app.router.add_get("/memory/experiences", handle_get_experiences)
         self._app.router.add_patch("/memory/experiences/{bequest_id}", handle_update_experience)
-        # 长期事件列表 (只读 + 状态快改 + 字段编辑 + 创建 + 删除)
-        self._app.router.add_get("/events/list", handle_list_events)
-        self._app.router.add_post("/events/set_type", handle_set_event_type)
-        self._app.router.add_post("/events", handle_create_event)
-        self._app.router.add_patch("/events/{event_id}", handle_update_event)
-        self._app.router.add_delete("/events/{event_id}", handle_delete_event)
+        # 任务列表 (只读 + 状态快改 + 字段编辑 + 创建 + 删除；URL 暂沿用 /events/*)
+        self._app.router.add_get("/events/list", handle_list_tasks)
+        self._app.router.add_post("/events/set_type", handle_set_task_status)
+        self._app.router.add_post("/events", handle_create_task)
+        self._app.router.add_patch("/events/{event_id}", handle_update_task)
+        self._app.router.add_delete("/events/{event_id}", handle_delete_task)
 
         # 上下文查看 (只读, 不改 memory/)
-        self._app.router.add_get("/context/files", handle_list_files)
+        self._app.router.add_get("/context/chains", handle_chains)
         self._app.router.add_get("/context/file", handle_read_file)
 
-        # Amy 情绪系统状态 (只读)
+        # Amy 情绪系统状态 (只读) + 想法池调试编辑 (增/删/改)
         self._app.router.add_get("/amy/state", handle_get_amy_state)
+        self._app.router.add_post("/amy/thoughts", handle_create_amy_thought)
+        self._app.router.add_post("/amy/final-evaluation", handle_apply_amy_final_evaluation)
+        self._app.router.add_patch("/amy/thoughts/{thought_id}", handle_update_amy_thought)
+        self._app.router.add_delete("/amy/thoughts/{thought_id}", handle_delete_amy_thought)
 
         # LLM 自存表情包管理 (list/update/delete)
         self._app.router.add_get("/stickers/list", handle_list_stickers)
         self._app.router.add_patch("/stickers/{filename}", handle_update_sticker)
         self._app.router.add_delete("/stickers/{filename}", handle_delete_sticker)
 
-        self._runner = web.AppRunner(self._app)
+        # access_log=None: 关闭 aiohttp 访问日志, 避免高频轮询请求刷屏干扰终端
+        self._runner = web.AppRunner(self._app, access_log=None)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.config.host, self.config.port)
         await self._site.start()
@@ -657,6 +669,8 @@ class WebChannel:
                 await self._handle_get_messages(data, ws)
             elif kind == "delete_message":
                 await self._handle_delete_message(data, ws)
+            elif kind == "delete_messages":
+                await self._handle_delete_messages(data, ws)
             elif kind == "message":
                 await self._handle_message(data, ws)
             elif kind == "create_identity":
@@ -869,6 +883,40 @@ class WebChannel:
             "message_id": message_id,
         })
         logger.info(f"[Web] 删除消息: session={sid} message_id={message_id}")
+
+    async def _handle_delete_messages(self, data: Dict, ws: web.WebSocketResponse) -> None:
+        """从前端批量删除消息（多选/框选）, 同步广播给所有 web 客户端."""
+        sid = (data.get("session_id") or "").strip()
+        if not sid:
+            await self._send_error(ws, "session_id 必填")
+            return
+        raw_ids = data.get("message_ids")
+        if (
+            not isinstance(raw_ids, list)
+            or not raw_ids
+            or not all(isinstance(x, str) and x.strip() for x in raw_ids)
+        ):
+            await self._send_error(ws, "message_ids 必须为非空字符串数组")
+            return
+        ids = [x.strip() for x in raw_ids]
+
+        sess = await self._get_session(sid)
+        if sess is None:
+            await self._send_error(ws, f"会话 {sid} 不存在")
+            return
+
+        deleted = await self._store.delete_messages(sess.scope, sess.session_id, ids)
+        if not deleted:
+            await self._send_error(ws, "所选消息均未找到")
+            return
+
+        # 广播给所有连接的客户端, 同步删除 UI (只广播实际删除的 id)
+        await self._broadcast({
+            "type": "messages_deleted",
+            "session_id": sid,
+            "message_ids": deleted,
+        })
+        logger.info(f"[Web] 批量删除消息: session={sid} count={len(deleted)}/{len(ids)}")
 
     async def _handle_message(self, data: Dict, ws: web.WebSocketResponse) -> None:
         sid = (data.get("session_id") or "").strip()
@@ -1380,3 +1428,21 @@ class WebChannel:
             async with self._clients_lock:
                 for ws in dead:
                     self._clients.discard(ws)
+
+    async def broadcast_context_updated(self, kind: str, event: str, chain_id: Optional[str]) -> None:
+        """广播 LLM 上下文落盘/归档事件（前端上下文查看器即时刷新用）。
+
+        Args:
+            kind: 前端 kind（chat | pfca | proactive | social_chat ...）
+            event: 'append'（active 文件追加一条）| 'archive'（归档清空）
+            chain_id: 归属任务链 ID（链外写入为 None）
+        """
+        if self._site is None:
+            return
+        await self._broadcast({
+            "type": "context_updated",
+            "kind": kind,
+            "event": event,
+            "chain_id": chain_id,
+            "timestamp": int(time.time()),
+        })

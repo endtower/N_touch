@@ -8,7 +8,7 @@
 存储引擎：SQLite（aiosqlite，全异步，WAL）。
 - 角色表 / 群组表：00000000 指向的其他角色 / 群组，含多值字段（别名、联系方式，JSON 数组）
   与单值字段（印象、熟悉度、群组成员印象）。
-- 事件表 / 经验表 / 模糊角色表：独立。
+- 任务表 / 经验表 / 模糊角色表：独立。
 - 向量以 BLOB 存 JSON 序列化，Python 侧算余弦相似度。
 """
 
@@ -48,9 +48,21 @@ class MemoryDatabase:
             try:
                 self._conn = await aiosqlite.connect(self._db_path)
                 self._conn.row_factory = aiosqlite.Row
-                await self._conn.execute("PRAGMA journal_mode=WAL")
+                # PRAGMA 光标必须消费完毕（fetchall 复位语句）：
+                # 悬空的 active 语句会让同连接后续 DDL（如 DROP TABLE）报
+                # SQLITE_LOCKED "database table is locked"
+                cur = await self._conn.execute("PRAGMA journal_mode=WAL")
+                await cur.fetchall()
                 await self._create_tables()
             except Exception as e:
+                # 失败时关闭并清空连接，防止半初始化连接残留
+                # （aiosqlite 工作线程会挂住进程退出，且下次调用会误跳过建表）
+                if self._conn is not None:
+                    try:
+                        await self._conn.close()
+                    except Exception:
+                        pass
+                    self._conn = None
                 raise StorageError(f"SQLite 连接失败: {str(e)}")
         return self._conn
 
@@ -95,36 +107,37 @@ class MemoryDatabase:
                 vector_updated_at TEXT DEFAULT ''
             );
 
-            -- 事件表（独立）
-            CREATE TABLE IF NOT EXISTS events (
-                event_id TEXT PRIMARY KEY,
+            -- 旧事件表（已废弃，任务系统替代；启动时彻底删除旧数据）
+            DROP TABLE IF EXISTS events;
+
+            -- 任务表（独立）
+            CREATE TABLE IF NOT EXISTS tasks (
+                task_id TEXT PRIMARY KEY,
                 title TEXT DEFAULT '',
-                event_type TEXT DEFAULT 'ongoing',
+                status TEXT DEFAULT 'active',
                 summary TEXT DEFAULT '',
-                evaluations TEXT DEFAULT '',
                 next_occurrence TEXT DEFAULT '',
-                amy_states TEXT DEFAULT '{}',
                 summary_vector BLOB,
                 is_vectorized INTEGER DEFAULT 0,
                 start_time TEXT DEFAULT '',
                 end_time TEXT DEFAULT '',
                 updated_at TEXT DEFAULT ''
             );
-            CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+            CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 
-            -- 经验表（独立）
+            -- 经验表（独立，话术专用：category 固定 'speech'）
             CREATE TABLE IF NOT EXISTS bequests (
                 bequest_id TEXT PRIMARY KEY,
                 title TEXT DEFAULT '',
                 summary TEXT DEFAULT '',
-                apply_scenario TEXT DEFAULT '',
+                category TEXT DEFAULT 'speech',
                 title_vector BLOB,
                 is_vectorized INTEGER DEFAULT 0,
                 start_time TEXT DEFAULT '',
                 end_time TEXT DEFAULT '',
                 updated_at TEXT DEFAULT ''
             );
-            CREATE INDEX IF NOT EXISTS idx_bequests_scenario ON bequests(apply_scenario);
+            CREATE INDEX IF NOT EXISTS idx_bequests_category ON bequests(category);
 
             -- 模糊角色表（独立，唯一单独建表的依附性节点）
             CREATE TABLE IF NOT EXISTS fuzzy_roles (

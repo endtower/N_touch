@@ -1,33 +1,44 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Document, ChatLineRound, MagicStick, Refresh, ArrowDown, Connection, Aim, User, ChatDotRound } from '@element-plus/icons-vue'
+import { Document, Refresh, ArrowDown, Connection, Fold, Expand, Share } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import type { ContextEntry, ContextFileContent, ContextFileList, ContextFileMeta } from '../types'
+import type { ChainFileItem, ChainInfo, ChainsResponse, ContextEntry, ContextFileContent } from '../types'
+import { channel } from '../api/channel'
 
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [v: boolean] }>()
 
-type Kind = 'chat' | 'pfca' | 'proactive' | 'social_agent' | 'social_chat'
-const activeTab = ref<Kind>('chat')
-
-// 每个 kind 各缓存一份文件列表
-const fileLists = ref<Record<Kind, ContextFileMeta[]>>({
-  chat: [],
-  pfca: [],
-  proactive: [],
-  social_agent: [],
-  social_chat: [],
-})
+// ===== 数据: 事件链文件夹树 + 当前查看的文件 =====
+const chainsData = ref<ChainsResponse | null>(null)
 const loadingFiles = ref(false)
 const loadingContent = ref(false)
 const currentFile = ref<ContextFileContent | null>(null)
+// 当前选中文件来源 (链 ID 或 'unlinked') —— 侧栏高亮与轮询 reload 的依据
+const currentSource = ref<{ chain: string; name: string } | null>(null)
 const currentError = ref<string>('')
 
-// ===== 自动轮询 (弹窗打开期间, 每 3s 检测后端 memory/ 目录文件变化) =====
+const chains = computed<ChainInfo[]>(() => chainsData.value?.chains ?? [])
+const unlinkedFiles = computed<ChainFileItem[]>(() => chainsData.value?.unlinked?.files ?? [])
+
+// ===== 自动轮询 (弹窗打开期间, 每 3s 检测后端 event_chains 变化) =====
 const POLL_INTERVAL_MS = 3000
 let pollTimer: number | null = null
 // loadFile token: 用于区分用户主动加载 vs 轮询触发, 防止乱序响应覆盖当前文件
 let loadToken = 0
+
+// ===== WS 即时刷新: context_updated -> 300ms debounce 触发 pollOnce (轮询仅作兜底) =====
+let wsDebounceTimer: number | null = null
+function schedulePollFromWs() {
+  if (!props.visible) return
+  if (wsDebounceTimer !== null) clearTimeout(wsDebounceTimer)
+  wsDebounceTimer = window.setTimeout(() => {
+    wsDebounceTimer = null
+    void pollOnce()
+  }, 300)
+}
+const unsubscribeContextUpdated = channel.onMessage((msg) => {
+  if (msg.type === 'context_updated') schedulePollFromWs()
+})
 
 function startPolling() {
   stopPolling()
@@ -43,81 +54,86 @@ function stopPolling() {
   }
 }
 
-function isSameList(a: ContextFileMeta[], b: ContextFileMeta[]): boolean {
-  if (a.length !== b.length) return false
-  const map = new Map(a.map(f => [f.name, `${f.size}:${f.mtime}`]))
-  for (const f of b) {
-    if (map.get(f.name) !== `${f.size}:${f.mtime}`) return false
+// 链树快照: 判断轮询结果是否有变化 (链增删 / 活跃状态 / 文件增删 / 大小 / mtime)
+function chainsSnapshot(d: ChainsResponse): string {
+  const parts: string[] = []
+  for (const c of d.chains) {
+    parts.push(`${c.chain_id}|${c.is_active ? 1 : 0}|` + c.files.map(f => `${f.name}:${f.size}:${f.mtime}`).join(','))
   }
-  return true
+  parts.push('unlinked|' + (d.unlinked?.files ?? []).map(f => `${f.name}:${f.size}:${f.mtime}`).join(','))
+  return parts.join(';')
+}
+
+// 在链树中定位文件元数据
+function findFileMeta(d: ChainsResponse, chain: string, name: string): ChainFileItem | null {
+  if (chain === 'unlinked') return (d.unlinked?.files ?? []).find(f => f.name === name) ?? null
+  return d.chains.find(c => c.chain_id === chain)?.files.find(f => f.name === name) ?? null
+}
+
+// 自动选中: 第一个链的第一个文件 (进行中的链排在最前), 否则 unlinked 第一个
+function autoSelect() {
+  if (currentSource.value) return
+  const d = chainsData.value
+  if (!d) return
+  const first = d.chains[0]
+  if (first?.files.length) {
+    void loadFile(first.chain_id, first.files[0].name)
+    return
+  }
+  const firstUnlinked = d.unlinked?.files?.[0]
+  if (firstUnlinked) void loadFile('unlinked', firstUnlinked.name)
 }
 
 async function pollOnce() {
   if (!props.visible) return
   // 轮询时不显示 loading spinner, 用户感知不到
-  for (const k of ['chat', 'pfca', 'proactive', 'social_agent', 'social_chat'] as Kind[]) {
-    try {
-      const res = await fetch(`/context/files?kind=${k}`)
-      if (!res.ok) continue
-      const data = (await res.json()) as ContextFileList
-      const newList = data.files || []
-      const oldList = fileLists.value[k]
-      // 1) 文件列表无变化 -> 跳过, 不重读 currentFile
-      if (isSameList(oldList, newList)) continue
-      fileLists.value[k] = newList
-      // 2) 当前正在看的文件变了 (mtime/size 变了), 自动 reload
-      const cur = currentFile.value
-      if (cur && cur.kind === k) {
-        const oldMeta = oldList.find(f => f.name === cur.name)
-        const newMeta = newList.find(f => f.name === cur.name)
-        // 文件被删了 -> 清空 (让 watch(activeTab) 兜底选下一个)
-        if (!newMeta) {
-          currentFile.value = null
-          continue
-        }
-        const changed =
-          !oldMeta ||
-          oldMeta.mtime !== newMeta.mtime ||
-          oldMeta.size !== newMeta.size
-        if (changed) {
-          const myToken = ++loadToken
-          await loadFile(k, cur.name)
-          // 用户在轮询期间主动切了文件, 丢弃这次轮询结果
-          if (myToken !== loadToken) continue
-        }
-      }
-    } catch {
-      // 静默, 避免噪音
+  try {
+    const res = await fetch('/context/chains')
+    if (!res.ok) return
+    const data = (await res.json()) as ChainsResponse
+    const old = chainsData.value
+    // 1) 链树无变化 -> 跳过, 不重读 currentFile
+    if (old && chainsSnapshot(old) === chainsSnapshot(data)) return
+    chainsData.value = data
+    // 2) 当前正在看的文件变了 (mtime/size 变了), 自动 reload
+    const src = currentSource.value
+    if (!src) {
+      autoSelect()
+      return
     }
+    const oldMeta = old ? findFileMeta(old, src.chain, src.name) : null
+    const newMeta = findFileMeta(data, src.chain, src.name)
+    if (!newMeta) {
+      // 文件被清理掉了 -> 清空并自动选下一个
+      currentSource.value = null
+      currentFile.value = null
+      autoSelect()
+      return
+    }
+    if (!oldMeta || oldMeta.mtime !== newMeta.mtime || oldMeta.size !== newMeta.size) {
+      const myToken = ++loadToken
+      await loadFile(src.chain, src.name)
+      // 用户在轮询期间主动切了文件, 丢弃这次轮询结果
+      if (myToken !== loadToken) return
+    }
+  } catch {
+    // 静默, 避免噪音
   }
 }
 
-onBeforeUnmount(stopPolling)
+onBeforeUnmount(() => {
+  stopPolling()
+  unsubscribeContextUpdated()
+  if (wsDebounceTimer !== null) clearTimeout(wsDebounceTimer)
+})
 
 watch(
   () => props.visible,
   async (v) => {
     if (v) {
-      // 只 loadFiles 还空着的 kind (避免重复请求)
-      const pending = (['chat', 'pfca', 'proactive', 'social_agent', 'social_chat'] as Kind[]).filter(
-        k => !fileLists.value[k].length,
-      )
-      if (pending.length) await Promise.all(pending.map(k => loadFiles(k)))
-
-      // 1) 如果上次选中的文件还在, 直接复用 (保持上次打开的状态)
-      if (currentFile.value && fileLists.value[currentFile.value.kind]?.length) {
-        const stillExists = fileLists.value[currentFile.value.kind].some(
-          f => f.name === currentFile.value!.name,
-        )
-        if (stillExists) {
-          activeTab.value = currentFile.value.kind
-          startPolling()
-          return
-        }
-      }
-      // 2) 否则选 activeTab 下的第一个文件
-      const first = fileLists.value[activeTab.value]?.[0]
-      if (first) await loadFile(activeTab.value, first.name)
+      await loadChains()
+      // 没有已选中的文件 -> 自动选第一个链的第一个文件
+      if (!currentSource.value) autoSelect()
       startPolling()
     } else {
       stopPolling()
@@ -125,43 +141,30 @@ watch(
   },
 )
 
-watch(activeTab, async (kind) => {
-  if (!props.visible) return
-  if (!fileLists.value[kind].length) await loadFiles(kind)
-  // 切 tab 时: 如果当前 currentFile 就是这个 kind 且文件还在, 不必重选
-  if (currentFile.value?.kind === kind) {
-    const stillExists = fileLists.value[kind].some(
-      f => f.name === currentFile.value!.name,
-    )
-    if (stillExists) return
-  }
-  const first = fileLists.value[kind][0]
-  if (first) await loadFile(kind, first.name)
-})
-
-async function loadFiles(kind: Kind) {
+async function loadChains(showError = true) {
   loadingFiles.value = true
   try {
-    const res = await fetch(`/context/files?kind=${kind}`)
+    const res = await fetch('/context/chains')
     if (!res.ok) {
       const t = await res.text().catch(() => '')
       throw new Error(`HTTP ${res.status}: ${t || res.statusText}`)
     }
-    const data = (await res.json()) as ContextFileList
-    fileLists.value[kind] = data.files || []
+    chainsData.value = (await res.json()) as ChainsResponse
   } catch (e: any) {
-    ElMessage.error(`列出 ${kind} 文件失败: ${e?.message || e}`)
+    if (showError) ElMessage.error(`列出事件链失败: ${e?.message || e}`)
   } finally {
     loadingFiles.value = false
   }
 }
 
-async function loadFile(kind: Kind, name: string) {
+async function loadFile(chain: string, name: string) {
   const myToken = ++loadToken
+  // 乐观更新来源 -> 侧栏高亮即时
+  currentSource.value = { chain, name }
   loadingContent.value = true
   currentError.value = ''
   try {
-    const res = await fetch(`/context/file?kind=${kind}&name=${encodeURIComponent(name)}`)
+    const res = await fetch(`/context/file?chain=${encodeURIComponent(chain)}&name=${encodeURIComponent(name)}`)
     if (!res.ok) {
       const t = await res.text().catch(() => '')
       throw new Error(`HTTP ${res.status}: ${t || res.statusText}`)
@@ -179,58 +182,60 @@ async function loadFile(kind: Kind, name: string) {
 }
 
 async function refreshAll() {
-  await Promise.all([
-    loadFiles('chat'),
-    loadFiles('pfca'),
-    loadFiles('proactive'),
-    loadFiles('social_agent'),
-    loadFiles('social_chat'),
-  ])
-  if (currentFile.value) {
-    await loadFile(currentFile.value.kind, currentFile.value.name)
+  await loadChains()
+  if (currentSource.value) {
+    await loadFile(currentSource.value.chain, currentSource.value.name)
   }
 }
 
 // ===== 展示辅助 =====
 
-const KIND_META: Record<Kind, { label: string; icon: any; color: string; desc: string }> = {
-  chat: {
-    label: '聊天上下文',
-    icon: ChatLineRound,
-    color: 'var(--accent-2)',
-    desc: 'conversation.json / conversation_archived_*.json — LLM 当前看到的"历史消息"原文',
-  },
-  pfca: {
-    label: 'PFCA 上下文',
-    icon: MagicStick,
-    color: 'var(--accent)',
-    desc: 'active.json / pfca_archived_*.json — PFCA (脑前额) 决策阶段喂给 LLM 的拼接 prompt',
-  },
-  proactive: {
-    label: '主动上下文',
-    icon: Aim,
-    color: 'var(--warn)',
-    desc: 'active.json / proactive_archived_*.json — Proactive (主动发起) 阶段的拼接 prompt + 完整交互',
-  },
-  social_agent: {
-    label: 'Social Agent 上下文',
-    icon: User,
-    color: 'var(--accent-2)',
-    desc: 'social_agent.json / social_agent_archived_*.json — Social Agent (社交策略机) 阶段喂给 LLM 的拼接 prompt',
-  },
-  social_chat: {
-    label: 'Social Chat 上下文',
-    icon: ChatDotRound,
-    color: 'var(--accent)',
-    desc: 'social_chat.json / social_chat_archived_*.json — Social Chat (实际对话) 阶段喂给 LLM 的拼接 prompt + 完整交互',
-  },
+// 各 agent 上下文文件的 kind 标签 (后端从文件名解析; null 时按原始文件名展示)
+type Kind = 'chat' | 'pfca' | 'proactive' | 'social_chat'
+const KIND_META: Record<Kind, { label: string; color: string }> = {
+  chat: { label: '聊天', color: 'var(--accent-2)' },
+  pfca: { label: 'PFCA', color: 'var(--accent)' },
+  proactive: { label: '主动', color: 'var(--warn)' },
+  social_chat: { label: 'Social', color: 'var(--accent)' },
 }
 
-function timeShort(ts?: number | null) {
-  if (!ts) return '—'
-  const d = new Date(ts * 1000)
-  const pad = (n: number) => n.toString().padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+function kindLabel(f: ChainFileItem): string {
+  return f.kind && f.kind in KIND_META ? KIND_META[f.kind as Kind].label : f.name.replace(/\.json$/, '')
+}
+
+function kindColor(f: ChainFileItem): string {
+  return f.kind && f.kind in KIND_META ? KIND_META[f.kind as Kind].color : 'var(--text-3)'
+}
+
+// 链内条目编号: 同 kind 按创建顺序编号（后端已按 mtime 正序），一次唤醒 = 一个条目
+// 返回 null 表示 kind 未知（保留原始文件名展示）
+function chainFileSeq(chain: ChainInfo, f: ChainFileItem): number | null {
+  if (!f.kind) return null
+  let n = 0
+  for (const other of chain.files) {
+    if (other.kind === f.kind) {
+      n++
+      if (other.name === f.name) return n
+    }
+  }
+  return null
+}
+
+// 链头显示: event_chain_20260912_223001_ab12 -> 2026-09-12 22:30:01 · ab12
+function formatChainTitle(cid: string): string {
+  const s = cid.startsWith('event_chain_') ? cid.slice('event_chain_'.length) : cid
+  const m = s.match(/^(\d{8})_(\d{6})(?:_(.+))?$/)
+  if (!m) return s
+  const d = m[1]
+  const t = m[2]
+  const date = `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`
+  const time = `${t.slice(0, 2)}:${t.slice(2, 4)}:${t.slice(4, 6)}`
+  return m[3] ? `${date} ${time} · ${m[3]}` : `${date} ${time}`
+}
+
+function selectChainFile(chain: string, item: ChainFileItem) {
+  if (currentSource.value?.chain === chain && currentSource.value?.name === item.name) return
+  void loadFile(chain, item.name)
 }
 
 function fileSize(n: number) {
@@ -291,8 +296,36 @@ const parsedEntries = computed(() => {
   return out
 })
 
+// ===== 思考链折叠 (全局一键开关 + 单条覆盖) =====
+const REASONING_COLLAPSE_KEY = 'ctx-viewer:reasoning-collapsed'
+const reasoningCollapsed = ref(localStorage.getItem(REASONING_COLLAPSE_KEY) === '1')
+watch(reasoningCollapsed, v => {
+  localStorage.setItem(REASONING_COLLAPSE_KEY, v ? '1' : '0')
+})
+// 单条覆盖: 条目索引 -> 是否折叠; 未设置的条目跟随全局状态
+const reasoningOverride = ref<Record<number, boolean>>({})
+
+function isReasoningCollapsed(idx: number): boolean {
+  return reasoningOverride.value[idx] ?? reasoningCollapsed.value
+}
+
+function toggleReasoning(idx: number) {
+  reasoningOverride.value[idx] = !isReasoningCollapsed(idx)
+}
+
+function toggleAllReasoning() {
+  reasoningCollapsed.value = !reasoningCollapsed.value
+  reasoningOverride.value = {}
+}
+
 function assistantReasoning(e: ContextEntry): string {
   return (e.reasoning_content ?? '').trim()
+}
+
+function reasoningPreview(e: ContextEntry): string {
+  const t = assistantReasoning(e)
+  const firstLine = t.split('\n').find(l => l.trim()) || ''
+  return firstLine.length > 80 ? `${firstLine.slice(0, 80)}…` : firstLine
 }
 
 function assistantHasText(e: ContextEntry): boolean {
@@ -314,11 +347,6 @@ function roleMeta(role: string) {
   if (r === 'assistant') return { label: 'ASSISTANT', bg: 'rgba(52, 211, 153, 0.18)', color: 'var(--accent-2)' }
   if (r === 'user') return { label: 'USER (PROMPT)', bg: 'rgba(245, 158, 11, 0.18)', color: 'var(--warn)' }
   return { label: (role || 'UNKNOWN').toUpperCase(), bg: 'var(--bg-subtle)', color: 'var(--text-3)' }
-}
-
-function selectFile(name: string) {
-  if (!currentFile.value || currentFile.value.name === name) return
-  loadFile(currentFile.value.kind, name)
 }
 
 function close() {
@@ -354,6 +382,11 @@ function scrollToBottom() {
             <span class="ctx-poll-dot" />
             <span>自动刷新</span>
           </span>
+          <el-button
+            size="small"
+            :icon="reasoningCollapsed ? Expand : Fold"
+            @click="toggleAllReasoning"
+          >{{ reasoningCollapsed ? '展开思考链' : '折叠思考链' }}</el-button>
           <el-button :icon="Refresh" size="small" @click="refreshAll">刷新</el-button>
           <el-button :icon="ArrowDown" size="small" @click="scrollToBottom">最新</el-button>
           <el-button size="small" @click="close">关闭</el-button>
@@ -362,56 +395,74 @@ function scrollToBottom() {
     </template>
 
     <div class="ctx-body">
-      <!-- 左侧: tabs + 文件列表 -->
+      <!-- 左侧: 事件链文件夹树 (一个任务链 = 一个文件夹, 内含各 agent 的上下文文件) -->
       <aside class="ctx-sidebar">
-        <div class="ctx-tabs">
-          <div
-            v-for="(meta, kind) in KIND_META"
-            :key="kind"
-            :class="['ctx-tab', { active: activeTab === kind }]"
-            @click="activeTab = kind as Kind"
-          >
-            <el-icon :size="14" :color="activeTab === kind ? meta.color : 'var(--text-3)'">
-              <component :is="meta.icon" />
-            </el-icon>
-            <span>{{ meta.label }}</span>
-            <span class="ctx-tab-count">{{ fileLists[kind as Kind].length }}</span>
-          </div>
+        <div class="ctx-tab-desc">
+          按任务链文件夹查看一个任务涉及的全部 agent 上下文（写入即落位, 归档不重命名）;
+          <span class="ctx-desc-live">进行中</span>的链随 LLM 运行实时刷新; 底部"未关联"为链外写入与历史归档
         </div>
 
-        <div class="ctx-tab-desc">{{ KIND_META[activeTab].desc }}</div>
-
         <div class="ctx-file-list">
+          <!-- 每个任务链一个文件夹组 -->
           <div
-            v-for="f in fileLists[activeTab]"
-            :key="f.name"
-            :class="['ctx-file-item', { active: currentFile?.name === f.name }]"
-            @click="selectFile(f.name)"
+            v-for="c in chains"
+            :key="c.chain_id"
+            :class="['ctx-chain-group', { active: currentSource?.chain === c.chain_id }]"
           >
-            <div class="ctx-file-name">
+            <div class="ctx-chain-head">
+              <el-icon :size="13" :color="c.is_active ? 'var(--accent-2)' : 'var(--text-3)'">
+                <Share />
+              </el-icon>
+              <span class="ctx-chain-title" :title="c.chain_id">{{ formatChainTitle(c.chain_id) }}</span>
               <el-tag
-                v-if="f.is_active"
+                v-if="c.is_active"
                 size="small"
                 type="success"
                 effect="dark"
                 round
-              >ACTIVE</el-tag>
-              <el-tag
-                v-else
-                size="small"
-                effect="plain"
-                round
-              >归档</el-tag>
-              <span class="ctx-file-title">{{ f.name }}</span>
+              >进行中</el-tag>
+              <span class="ctx-chain-count">{{ c.files.length }}</span>
             </div>
-            <div class="ctx-file-meta">
-              <span>{{ fileSize(f.size) }}</span>
-              <span>·</span>
-              <span>{{ timeShort(f.mtime) }}</span>
+            <div
+              v-for="f in c.files"
+              :key="c.chain_id + '/' + f.name"
+              :class="['ctx-chain-file', { active: currentSource?.chain === c.chain_id && currentSource?.name === f.name }]"
+              @click="selectChainFile(c.chain_id, f)"
+            >
+              <span class="ctx-chain-file-kind" :style="{ color: kindColor(f) }">{{ kindLabel(f) }}</span>
+              <span
+                class="ctx-chain-file-name"
+                :title="chainFileSeq(c, f) !== null ? f.name : undefined"
+              >{{ chainFileSeq(c, f) !== null ? `上下文${chainFileSeq(c, f)}` : f.name.replace(/\.json$/, '') }}</span>
+              <span class="ctx-chain-file-size">{{ fileSize(f.size) }}</span>
+            </div>
+            <div v-if="!c.files.length" class="ctx-chain-file-empty">（该链暂无上下文文件）</div>
+          </div>
+
+          <!-- 未关联区: 链外写入 + legacy 迁移, 平铺展示, 不归属任何链 -->
+          <div v-if="unlinkedFiles.length" class="ctx-chain-group">
+            <div class="ctx-chain-head">
+              <el-icon :size="13" color="var(--text-3)">
+                <Document />
+              </el-icon>
+              <span class="ctx-chain-title">未关联</span>
+              <span class="ctx-chain-sub">链外写入 / 历史归档</span>
+              <span class="ctx-chain-count">{{ unlinkedFiles.length }}</span>
+            </div>
+            <div
+              v-for="f in unlinkedFiles"
+              :key="'unlinked/' + f.name"
+              :class="['ctx-chain-file', { active: currentSource?.chain === 'unlinked' && currentSource?.name === f.name }]"
+              @click="selectChainFile('unlinked', f)"
+            >
+              <span class="ctx-chain-file-kind" :style="{ color: kindColor(f) }">{{ kindLabel(f) }}</span>
+              <span class="ctx-chain-file-name">{{ f.name }}</span>
+              <span class="ctx-chain-file-size">{{ fileSize(f.size) }}</span>
             </div>
           </div>
-          <div v-if="!fileLists[activeTab].length && !loadingFiles" class="ctx-file-empty">
-            暂无文件
+
+          <div v-if="!chains.length && !unlinkedFiles.length && !loadingFiles" class="ctx-file-empty">
+            暂无事件链
           </div>
         </div>
       </aside>
@@ -426,13 +477,19 @@ function scrollToBottom() {
             <div>
               <span class="ctx-file-banner-name">{{ currentFile.name }}</span>
               <el-tag
-                v-if="currentFile.is_active"
+                v-if="currentFile.chain_id"
                 size="small"
-                type="success"
-                effect="dark"
+                type="warning"
+                effect="plain"
                 round
-                style="margin-left: 8px;"
-              >ACTIVE</el-tag>
+                class="ctx-banner-chain"
+              >{{ formatChainTitle(currentFile.chain_id) }}</el-tag>
+              <el-tag
+                v-else
+                size="small"
+                effect="plain"
+                round
+              >未关联</el-tag>
             </div>
             <div class="ctx-file-banner-meta">
               <span>{{ currentFile.entries.length }} 条</span>
@@ -490,13 +547,35 @@ function scrollToBottom() {
                     <span class="ctx-side-sub">调了 {{ item.assistant.tool_calls!.length }} 个工具</span>
                   </div>
 
-                  <!-- 思考链 -->
+                  <!-- 思考链 (标签行可点击: 折叠/展开单条; 头部按钮可一键折叠全部) -->
                   <div
                     v-if="assistantReasoning(item.assistant)"
                     class="ctx-reasoning"
                   >
-                    <div class="ctx-reasoning-label">💭 思考链</div>
-                    <div class="ctx-reasoning-body">{{ assistantReasoning(item.assistant) }}</div>
+                    <div
+                      class="ctx-reasoning-label clickable"
+                      :title="isReasoningCollapsed(idx) ? '展开此条思考链' : '折叠此条思考链'"
+                      @click="toggleReasoning(idx)"
+                    >
+                      <el-icon :size="12">
+                        <Expand v-if="isReasoningCollapsed(idx)" />
+                        <Fold v-else />
+                      </el-icon>
+                      <span>💭 思考链</span>
+                      <span class="ctx-reasoning-hint">
+                        {{ isReasoningCollapsed(idx)
+                          ? `已折叠 · ${assistantReasoning(item.assistant).length} 字`
+                          : '点击折叠' }}
+                      </span>
+                    </div>
+                    <div
+                      v-if="isReasoningCollapsed(idx)"
+                      class="ctx-reasoning-preview"
+                    >{{ reasoningPreview(item.assistant) }}</div>
+                    <div
+                      v-show="!isReasoningCollapsed(idx)"
+                      class="ctx-reasoning-body"
+                    >{{ assistantReasoning(item.assistant) }}</div>
                   </div>
 
                   <!-- assistant 输出文本 (有 content 时; 直接 raw 输出) -->
@@ -633,41 +712,6 @@ function scrollToBottom() {
   background: var(--bg-surface);
   min-height: 0;
 }
-.ctx-tabs {
-  display: flex;
-  flex-direction: column;
-  padding: 10px 10px 0 10px;
-  gap: 4px;
-}
-.ctx-tab {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: var(--radius);
-  cursor: pointer;
-  font-size: 12.5px;
-  color: var(--text-2);
-  transition: background 0.12s ease, color 0.12s ease;
-}
-.ctx-tab:hover { background: var(--bg-subtle); color: var(--text-1); }
-.ctx-tab.active {
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: 600;
-}
-.ctx-tab-count {
-  margin-left: auto;
-  font-size: 10.5px;
-  color: var(--text-3);
-  background: var(--bg-subtle);
-  padding: 1px 6px;
-  border-radius: 999px;
-}
-.ctx-tab.active .ctx-tab-count {
-  background: var(--accent);
-  color: var(--bg-surface);
-}
 .ctx-tab-desc {
   margin: 6px 12px 10px 12px;
   padding: 8px 10px;
@@ -678,7 +722,10 @@ function scrollToBottom() {
   color: var(--text-3);
   line-height: 1.5;
 }
-
+.ctx-desc-live {
+  color: var(--accent-2);
+  font-weight: 600;
+}
 .ctx-file-list {
   flex: 1 1 auto;
   overflow-y: auto;
@@ -687,46 +734,112 @@ function scrollToBottom() {
   flex-direction: column;
   gap: 4px;
 }
-.ctx-file-item {
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  border: 1px solid transparent;
-  transition: background 0.1s ease, border 0.1s ease;
-}
-.ctx-file-item:hover { background: var(--bg-subtle); }
-.ctx-file-item.active {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-}
-.ctx-file-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-}
-.ctx-file-title {
-  font-family: var(--font-mono);
-  color: var(--text-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ctx-file-meta {
-  margin-top: 3px;
-  margin-left: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 10.5px;
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-}
 .ctx-file-empty {
   padding: 24px 12px;
   text-align: center;
   font-size: 12px;
   color: var(--text-3);
+}
+
+/* —— 任务链分组 —— */
+.ctx-chain-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  margin-bottom: 4px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+}
+.ctx-chain-group:has(.ctx-chain-file.active) {
+  border-color: var(--accent);
+}
+.ctx-chain-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 4px 4px;
+}
+.ctx-chain-title {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx-chain-sub {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.ctx-chain-count {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-3);
+  background: var(--bg-subtle);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+.ctx-chain-file-size {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ctx-chain-file-empty {
+  padding: 2px 6px 6px 14px;
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-style: italic;
+}
+.ctx-chain-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 10px;
+  margin-left: 8px;
+  border-left: 2px solid var(--border-1);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.ctx-chain-file:hover {
+  background: var(--bg-subtle);
+}
+.ctx-chain-file.active {
+  background: var(--bg-subtle);
+  border-left-color: var(--accent);
+}
+.ctx-chain-file-kind {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-3);
+  background: var(--bg-subtle);
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.ctx-chain-file.active .ctx-chain-file-kind {
+  color: var(--accent);
+  background: transparent;
+}
+.ctx-chain-file-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* —— 右侧主区 —— */
@@ -780,6 +893,7 @@ function scrollToBottom() {
   font-weight: 600;
   color: var(--text-1);
 }
+.ctx-banner-chain { margin-left: 8px; }
 .ctx-file-banner-meta {
   display: flex;
   align-items: center;
@@ -824,12 +938,6 @@ function scrollToBottom() {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
-.ctx-entry-body {
-  /* 旧版用于多 section 容器, 现在不再使用; 留个兜底 reset */
-  margin: 0;
-  padding: 0;
-}
-
 /* —— 单条 entry 的原始正文: 直接渲染, 不分段不染色 —— */
 .ctx-entry-raw {
   margin: 0;
@@ -924,6 +1032,31 @@ function scrollToBottom() {
   color: var(--text-2);
   margin-bottom: 4px;
   letter-spacing: 0.02em;
+}
+.ctx-reasoning-label.clickable {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.12s ease;
+}
+.ctx-reasoning-label.clickable:hover { color: var(--accent); }
+.ctx-reasoning-hint {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+}
+.ctx-reasoning-preview {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ctx-reasoning-body {
   font-size: 12px;

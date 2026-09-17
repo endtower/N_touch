@@ -78,6 +78,12 @@ class ProactiveCore:
             logger.info(f"ProactiveCore 收到一个主动任务草稿: intent={task_draft.get('intent', '?')}")
             # 延迟 import 避免循环依赖
             from .proactive_session import ProactiveSession
+            # 本任务跑在独立任务上，station 的链 contextvar 不会自动传播；
+            # task_draft 显式携带 chain_id，在此重新 set，session 内所有
+            # 上下文写入才能归属正确的任务链。
+            from utils.chain_context import set_chain_context, reset_chain_context
+            chain_id = task_draft.get("chain_id")
+            chain_token = set_chain_context(chain_id) if chain_id else None
             session = ProactiveSession(task_draft)
             self.current_session = session
             try:
@@ -85,6 +91,8 @@ class ProactiveCore:
             except Exception as e:
                 logger.warning(f"ProactiveSession 执行异常: {e}")
             finally:
+                if chain_token is not None:
+                    reset_chain_context(chain_token)
                 self.current_session = None
                 self.task_queue.task_done()
                 # 回传决策结果给等待方（truck / station）

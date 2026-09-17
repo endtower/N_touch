@@ -17,24 +17,28 @@ from .base_truck import BaseTruck
 
 logger = get_logger(__name__, 'INFO')
 
-def _describe_duration(seconds: float) -> str:
-    """把秒数格式化为相对时间描述（x年前/月前/天前/小时前/分钟前/秒前）。"""
+def _format_duration(seconds: float) -> str:
+    """把秒数格式化为时长描述（x年/x个月/x天/x小时/x分钟/x秒）。"""
     seconds = max(0, int(seconds))
     if seconds < 60:
-        return f"{seconds}秒前"
+        return f"{seconds}秒"
     minutes = seconds // 60
     if minutes < 60:
-        return f"{minutes}分钟前"
+        return f"{minutes}分钟"
     hours = minutes // 60
     if hours < 24:
-        return f"{hours}小时前"
+        return f"{hours}小时"
     days = hours // 24
     if days < 30:
-        return f"{days}天前"
+        return f"{days}天"
     months = days // 30
     if months < 12:
-        return f"{months}个月前"
-    return f"{months // 12}年前"
+        return f"{months}个月"
+    return f"{months // 12}年"
+
+def _describe_duration(seconds: float) -> str:
+    """把秒数格式化为相对时间描述（x年前/月前/天前/小时前/分钟前/秒前）。"""
+    return _format_duration(seconds) + "前"
 
 class PrivateTruck(BaseTruck):
     """私聊消息卡车 - 支持station通信，实现私聊消息获取功能"""
@@ -109,6 +113,11 @@ class PrivateTruck(BaseTruck):
         触发后把 pfca 游标推进到会话最新消息，消费闭环由 truck 侧完成，
         避免后续轮询对同一会话重复触发。
 
+        积压时长显式化：LLM 时钟观念不可靠，不能指望它自己从时间戳推出
+        「这是积压的旧事件，并非刚刚收到」（现象观察.md 第五节）。未读消息
+        距今超过阈值（BACKLOG_HINT_THRESHOLD_SECONDS，1 小时）时，把积压
+        时长直接写进开头文案并要求先评估语境是否过时；刚收到的维持现措辞。
+
         Args:
             message: 未读私聊会话对象
 
@@ -145,6 +154,22 @@ class PrivateTruck(BaseTruck):
             unread_raw = await store.get_unread_for(session_id, "pfca", newest=True)
             unread_user = [m for m in unread_raw if m.get("user_id") != "system"]
             show_messages = unread_user[-MAX_SHOW_NEW:]
+
+            # 积压时长：取最新一条未读用户消息的落库时间距现在的时长。
+            # 它是整批未读等待时长的下界（其余消息都不晚于它到达），
+            # 用它描述积压对每条未读都成立，不会夸大。
+            # 超过阈值时把积压时长直接写进开头文案（不要只作独立一行陈列，
+            # 那样与现在时措辞「你收到了新消息」自相矛盾）；刚收到的维持现措辞。
+            from config.truck_settings import private_truck_config
+            unread_timestamps = [m.get("timestamp", 0) for m in unread_user if m.get("timestamp", 0) > 0]
+            if unread_timestamps:
+                backlog_seconds = time.time() - max(unread_timestamps)
+                if backlog_seconds > private_truck_config.BACKLOG_HINT_THRESHOLD_SECONDS:
+                    result_lines[0] = (
+                        f"以下是来自{session_name}的未读消息，已积压{_format_duration(backlog_seconds)}"
+                        f"（并非刚刚收到），请先评估其语境是否已过时；回复时注意交代时序。"
+                    )
+
             history = get_global_session_history()
             show_lines, _ = history.format_messages(
                 show_messages,

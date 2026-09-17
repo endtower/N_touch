@@ -117,6 +117,9 @@ None_Tooth/none_tooth/plugins/message_storage/
 brain/amy/persistence/*.json
 brain/amy/__pycache__/
 
+# Shortlight notepad records (private runtime data)
+brain/hc/shortlight/notes/
+
 # Linter / formatter caches
 .ruff_cache/
 .pytest_cache/
@@ -138,3 +141,7 @@ config/truck_settings.py
 brain/hc/database/default_initializer.py
 /tests/
 _tmp_*
+
+# AI tooling (specs / plans)
+.trae/
+.zcode/

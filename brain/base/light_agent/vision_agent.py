@@ -29,7 +29,7 @@ import openai
 
 from brain.base.light_agent.lightweight_agent import LightweightAgent
 from utils.logger import get_logger
-from config.settings import VisionConfig
+from config.settings import VisionConfig, ModelConfig
 
 logger = get_logger(__name__, "DEBUG")
 
@@ -162,25 +162,23 @@ class VisionAgent(LightweightAgent):
             self._input_hint = None
 
     # ===================== 视觉模型专用 LLM 调用（覆盖父类默认桥接） =====================
-    async def _call_llm(self, messages: list, *, mode: str = "basic-reason",
+    async def _call_llm(self, messages: list, *, level: str = "flash",
                         tool_choice: Optional[str] = None,
                         system_prompt: Optional[str] = None, **kwargs):
-        """识图专用 LLM 调用：使用视觉模型（同步 OpenAI 客户端）。"""
+        """识图专用 LLM 调用：走 ModelConfig.VISION 视觉模型（opencode 接入），思考统一开启。"""
         sp = system_prompt if system_prompt is not None else self.get_system_prompt()
         full_messages = [{"role": "system", "content": sp}] + messages
 
-        model_name = VisionConfig.MODEL_LIST[0] if VisionConfig.MODEL_LIST else "qwen3.5-flash"
-        base_url = VisionConfig.BASE_URL.replace("{WorkspaceId}", VisionConfig.WORKSPACE_ID or "{WorkspaceId}")
-
         sync_client = openai.OpenAI(
-            api_key=VisionConfig.API_KEY,
-            base_url=base_url,
+            api_key=ModelConfig.API_KEY,
+            base_url=ModelConfig.BASE_URL,
         )
         return sync_client.chat.completions.create(
-            model=model_name,
+            model=ModelConfig.VISION,
             messages=full_messages,
             tools=self.get_available_tools(),
             tool_choice="auto",
+            extra_body={"thinking": {"type": "enabled" if ModelConfig.THINKING else "disabled"}},
         )
 
     # ===================== System Prompt =====================

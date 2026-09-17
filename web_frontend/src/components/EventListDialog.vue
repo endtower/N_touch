@@ -481,7 +481,7 @@ async function deleteEvent(ev: LongEvent) {
         <div v-if="error" class="evlist-state error">
           <el-icon :size="20"><Document /></el-icon>
           <div>
-            <div style="font-weight: 600; margin-bottom: 4px;">无法连接 Neo4j</div>
+            <div style="font-weight: 600; margin-bottom: 4px;">事件加载失败</div>
             <div style="font-size: 12px;">{{ error }}</div>
           </div>
           <el-button :icon="Refresh" size="small" @click="refresh">重试</el-button>
@@ -708,7 +708,7 @@ async function deleteEvent(ev: LongEvent) {
           <div class="evlist-title">
             <el-icon :size="16" color="var(--accent)"><Plus /></el-icon>
             <span>新建长期事件</span>
-            <span class="evlist-counts">手动创建节点, 会写入 Neo4j 并生成 summary_vector</span>
+            <span class="evlist-counts">手动创建节点, 会写入记忆库并生成 summary_vector</span>
           </div>
         </div>
       </template>

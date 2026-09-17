@@ -241,26 +241,19 @@ const filteredExperiences = computed(() => {
   if (!kw) return expList.value
   return expList.value.filter(e =>
     (e.title || '').toLowerCase().includes(kw) ||
-    (e.summary || '').toLowerCase().includes(kw) ||
-    (e.apply_scenario || '').toLowerCase().includes(kw),
+    (e.summary || '').toLowerCase().includes(kw),
   )
 })
 
 const EXP_GROUPS = [
-  { key: 'decision', title: '决策阶段', color: '#6366f1' },
-  { key: 'execution', title: '执行阶段', color: '#14b8a6' },
-  { key: 'other', title: '其他', color: '#a855f7' },
+  { key: 'speech', title: '话术经验', color: '#14b8a6' },
 ]
 
 const expGroups = computed<{ def: typeof EXP_GROUPS[number]; items: ExperienceItem[] }[]>(() => {
   return EXP_GROUPS
     .map(def => ({
       def,
-      items: filteredExperiences.value.filter(e =>
-        def.key === 'other'
-          ? !['decision', 'execution'].includes(e.apply_scenario)
-          : e.apply_scenario === def.key,
-      ),
+      items: filteredExperiences.value.filter(e => e.category === def.key),
     }))
     .filter(g => g.items.length > 0)
 })
@@ -282,20 +275,17 @@ function expCollapsedGet(key: string) {
 }
 
 function scenarioName(s: string): string {
-  if (s === 'decision') return '决策阶段'
-  if (s === 'execution') return '执行阶段'
+  if (s === 'speech') return '话术经验'
   return s || '未指定'
 }
 
 function scenarioColor(s: string): string {
-  if (s === 'decision') return '#6366f1'
-  if (s === 'execution') return '#14b8a6'
+  if (s === 'speech') return '#14b8a6'
   return '#a855f7'
 }
 
 function scenarioBadgeClass(s: string): string {
-  if (s === 'decision') return 'decision'
-  if (s === 'execution') return 'execution'
+  if (s === 'speech') return 'speech'
   return 'other'
 }
 
@@ -305,14 +295,13 @@ const expEditText = ref('')
 const expSavingField = ref<string | null>(null)
 const expEditError = ref('')
 
-function expBeginEdit(key: 'title' | 'summary' | 'apply_scenario') {
+function expBeginEdit(key: 'title' | 'summary') {
   const e = selectedExp.value
   if (!e) return
   expEditField.value = key
   expEditError.value = ''
   if (key === 'title') expEditText.value = e.title ?? ''
   else if (key === 'summary') expEditText.value = e.summary ?? ''
-  else if (key === 'apply_scenario') expEditText.value = e.apply_scenario ?? ''
 }
 
 function expCancelEdit() {
@@ -320,7 +309,7 @@ function expCancelEdit() {
   expEditError.value = ''
 }
 
-async function expSave(key: 'title' | 'summary' | 'apply_scenario') {
+async function expSave(key: 'title' | 'summary') {
   const e = selectedExp.value
   if (!e) return
   const p: ExperienceUpdateRequest = {}
@@ -332,7 +321,6 @@ async function expSave(key: 'title' | 'summary' | 'apply_scenario') {
     }
     p.title = v
   } else if (key === 'summary') p.summary = expEditText.value.trim()
-  else if (key === 'apply_scenario') p.apply_scenario = expEditText.value.trim()
 
   expSavingField.value = key
   expEditError.value = ''
@@ -707,7 +695,7 @@ function colorFor(n: SocialNode): string {
                   <div class="memory-item-main">
                     <div class="memory-item-label">
                       <span class="memory-item-name">{{ e.title || '（未命名经验）' }}</span>
-                      <span class="memory-scenario-tag" :class="scenarioBadgeClass(e.apply_scenario)">{{ scenarioName(e.apply_scenario) }}</span>
+                      <span class="memory-scenario-tag" :class="scenarioBadgeClass(e.category)">{{ scenarioName(e.category) }}</span>
                     </div>
                     <div v-if="e.summary" class="memory-item-sub">{{ e.summary }}</div>
                   </div>
@@ -728,7 +716,7 @@ function colorFor(n: SocialNode): string {
           </div>
           <template v-else>
             <div class="memory-detail-head">
-              <span class="memory-type-badge" :class="scenarioBadgeClass(selectedExp.apply_scenario)">{{ scenarioName(selectedExp.apply_scenario) }}</span>
+              <span class="memory-type-badge" :class="scenarioBadgeClass(selectedExp.category)">{{ scenarioName(selectedExp.category) }}</span>
               <span class="memory-detail-name">{{ selectedExp.title || '（未命名经验）' }}</span>
               <span class="memory-edit-tip">点击字段值即可修改</span>
             </div>
@@ -783,29 +771,8 @@ function colorFor(n: SocialNode): string {
                   </template>
                 </dd>
 
-                <dt>应用场景</dt>
-                <dd>
-                  <template v-if="expEditField === 'apply_scenario'">
-                    <el-input
-                      v-model="expEditText"
-                      size="small"
-                      placeholder="decision / execution / 其他"
-                      @keyup.enter="expSave('apply_scenario')"
-                      @keyup.esc="expCancelEdit"
-                    />
-                    <div class="kv-edit-actions">
-                      <el-button size="small" type="primary" :loading="expSavingField === 'apply_scenario'" @click="expSave('apply_scenario')">保存</el-button>
-                      <el-button size="small" @click="expCancelEdit">取消</el-button>
-                    </div>
-                    <div v-if="expEditError" class="kv-edit-error">{{ expEditError }}</div>
-                  </template>
-                  <template v-else>
-                    <span class="kv-value" :class="{ empty: !selectedExp.apply_scenario }" title="点击修改" @click="expBeginEdit('apply_scenario')">
-                      {{ selectedExp.apply_scenario || '—' }}
-                      <el-icon class="kv-edit-icon"><EditPen /></el-icon>
-                    </span>
-                  </template>
-                </dd>
+                <dt>分类</dt>
+                <dd><code>speech（话术）</code></dd>
 
                 <dt>开始时间</dt><dd>{{ timeShort(selectedExp.start_time) }}</dd>
                 <dt>更新时间</dt><dd>{{ timeShort(selectedExp.updated_at) }}</dd>
@@ -1001,8 +968,7 @@ function colorFor(n: SocialNode): string {
   white-space: nowrap;
   flex-shrink: 0;
 }
-.memory-scenario-tag.decision { background: rgba(99, 102, 241, 0.15); color: #6366f1; }
-.memory-scenario-tag.execution { background: rgba(20, 184, 166, 0.15); color: #14b8a6; }
+.memory-scenario-tag.speech { background: rgba(20, 184, 166, 0.15); color: #14b8a6; }
 .memory-scenario-tag.other { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
 .memory-item {
   display: flex;

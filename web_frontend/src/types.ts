@@ -94,12 +94,11 @@ export interface GlobalStateSnapshot {
 // 单一活动状态 (来自 GlobalSessionState.FrontendBroadcastMixin, 后端维护单一值, 前端只渲染)
 // activity 为 null 表示空闲 (事件链结束 / proactive 退出), 前端清空显示.
 export interface ActivityPayload {
-  source: 'pfca' | 'proactive' | 'social_agent'
+  source: 'pfca' | 'proactive'
   status: 'tool_call' | 'active'   // tool_call=正在调工具; active=模块活跃但未调工具
   tool_name: string | null
   args_summary: string | null
-  // parent_tool_name: 父级工具名 (层级链场景). social_agent 广播时带上
-  // 上游 pfca 的工具名 (如 "social_agent"), 前端据此显示简化层级.
+  // parent_tool_name: 父级工具名 (层级链场景, 后端 frontend_broadcast 预留; 当前无广播方)
   parent_tool_name?: string | null
   timestamp: number
 }
@@ -145,6 +144,7 @@ export type ClientMessage =
       before_id?: string
     }
   | { type: 'delete_message'; session_id: string; message_id: string }
+  | { type: 'delete_messages'; session_id: string; message_ids: string[] }
   | {
       type: 'message'
       session_id: string
@@ -208,6 +208,13 @@ export type ServerMessage =
     }
   | { type: 'pong'; ts: number }
   | {
+      type: 'context_updated'
+      kind: string                       // chat | pfca | proactive | social_chat
+      event: 'append' | 'archive'
+      chain_id?: string | null           // 归属任务链 (链外写入为 null)
+      timestamp: number
+    }
+  | {
       type: 'session_created'
       session: WebSession
     }
@@ -265,6 +272,12 @@ export type ServerMessage =
       type: 'message_deleted'
       session_id: string
       message_id: string
+    }
+  // 批量消息删除广播 (后端 -> 所有客户端, 多选/框选删除)
+  | {
+      type: 'messages_deleted'
+      session_id: string
+      message_ids: string[]
     }
   // 身份运行时广播
   | {
@@ -412,7 +425,7 @@ export interface ExperienceItem {
   bequest_id: string
   title: string
   summary: string
-  apply_scenario: string      // decision | execution | 其他
+  category: string            // 固定 'speech'（话术经验，写入侧硬编码）
   start_time?: string | null
   updated_at?: string | null
 }
@@ -426,7 +439,6 @@ export interface ExperienceList {
 export interface ExperienceUpdateRequest {
   title?: string
   summary?: string
-  apply_scenario?: string
 }
 
 export interface ExperienceUpdateResponse {
@@ -463,16 +475,26 @@ export interface LongEventList {
 // Context Viewer
 // ============================================================
 
-export interface ContextFileMeta {
+// 事件链文件夹内的单个上下文文件 (固定名 {prefix}.json 或 legacy 时间戳名)
+export interface ChainFileItem {
+  kind: string | null                  // 从文件名解析 (chat|pfca|proactive|social_chat|null)
   name: string
-  is_active: boolean
   size: number
   mtime: number
 }
 
-export interface ContextFileList {
-  kind: 'chat' | 'pfca' | 'proactive'
-  files: ContextFileMeta[]
+// 事件链文件夹 (一个任务链 = 一个文件夹, 内含各 agent 的上下文文件)
+export interface ChainInfo {
+  chain_id: string
+  is_active: boolean                   // 进行中 (仍被写入)
+  latest_mtime: number                 // 链内文件最新 mtime
+  files: ChainFileItem[]
+}
+
+// GET /context/chains 响应
+export interface ChainsResponse {
+  chains: ChainInfo[]
+  unlinked: { files: ChainFileItem[] } // 未关联链 (链外写入 + legacy 迁移)
   fetched_at: number
 }
 
@@ -497,9 +519,9 @@ export interface ContextEntry {
 }
 
 export interface ContextFileContent {
-  kind: 'chat' | 'pfca'
+  kind: string | null
   name: string
-  is_active: boolean
+  chain_id: string | null
   entries: ContextEntry[]
   raw_size: number
 }
@@ -516,12 +538,13 @@ export interface AmyThought {
   create_time: number
   expire_time: number
   remaining_seconds: number
-  category: 'external' | 'evaluation' | 'self_action' | 'system' | 'unknown'
+  category: 'external' | 'evaluation' | 'self_action' | 'system' | 'final' | 'unknown'
 }
 
 export interface AmyMood {
   norepinephrine: number
   dopamine: number
+  sc: number
 }
 
 export interface AmyActEntry {
@@ -534,6 +557,24 @@ export interface AmyActEntry {
   system_id?: string | null
 }
 
+export interface AmyFinalEvaluationEntry {
+  name: string
+  sc_kind: 'good' | 'bad' | 'none'
+  effect: string
+}
+
+export interface AmyScMeta {
+  default: number
+  min: number
+  max: number
+  decay_per_hour: number
+  decay_target: number
+  effect_good: number
+  effect_bad: number
+  smooth_target: number
+  smooth_step: number
+}
+
 export interface AmyDescriptionBand {
   lo: number
   hi: number
@@ -543,7 +584,8 @@ export interface AmyDescriptionBand {
 export interface AmyDescriptions {
   dopamine: AmyDescriptionBand[]
   norepinephrine: AmyDescriptionBand[]
-  range: { min: number; max: number }
+  sc: AmyDescriptionBand[]
+  range: { min: number; max: number; sc_min: number; sc_max: number }
 }
 
 export interface AmyState {
@@ -562,7 +604,9 @@ export interface AmyState {
     evaluation: AmyActEntry[]
     self_action: AmyActEntry[]
     system: AmyActEntry[]
+    final: AmyFinalEvaluationEntry[]
   }
   amy_descriptions: AmyDescriptions
+  sc_meta?: AmyScMeta
   error?: string
 }

@@ -10,25 +10,24 @@ proactive 工具模块
 
 已注册工具：
 - launch_pfca:               启动 PFCA（终结工具：调完 session 退出）
-- query_address_book:        查看通讯录（对齐 PFCA_tool_manager._query_address_book）
-- query_conversation_history: 查看一个会话的聊天记录（对齐 PFCA_tool_manager.query_history）
-- update_long_term_event:    受限更新长期事件（仅 update；用于推迟唤醒时间，详见工具 docstring）
+- query_address_book:        查看通讯录（ToolSocial 通用实现，对齐 PFCA_tool_manager）
+- query_history:             查看一个会话的聊天记录（ToolSocial 通用实现，对齐 PFCA_tool_manager）
+- update_long_term_task:     受限更新任务（仅 update；用于推迟唤醒时间，详见工具 docstring）
 - skip_proactive:            主动跳过本次任务（终结工具）
 
 暂未暴露给 LLM 的工具（实现 + 注册保留，仅从 TOOL_SCHEMAS 中隐藏，避免 LLM 发现/误调）：
 - memory_agent:              调整记忆（实现仍保留在 _tool_memory_adjustment）
-- event_register_agent:      调整事件（实现仍保留在 _tool_event_judgement；与 update_long_term_event
-                             不同：event_register_agent 走 EventRegisterAgent.run 的多轮 LLM 决策，
-                             可 create/update/delete；proactive 不开放给 LLM）
+- task_register_agent:       调整任务（实现仍保留在 _tool_task_judgement；与 update_long_term_task
+                             不同：task_register_agent 走 TaskRegisterAgent.run 的多轮 LLM 决策，
+                             可 create/update；proactive 不开放给 LLM）
 """
 
 import json
-import re
-from datetime import datetime
+from functools import partial
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from utils.logger import get_logger
-from brain.base import ToolManager
+from brain.base import ToolManager, ToolSocial
 
 logger = get_logger("ProactiveTools", "DEBUG")
 
@@ -45,10 +44,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "description": (
                 "启动 PFCA 执行主动任务（终结工具）。"
                 "调用完成后本次 proactive 会话即关闭。"
-                "PFCA 收到的输入是三个字段：任务信息（含根源 + 时机）+ 目标会话 id + 本次要处理的长期任务标题。"
-                "若本次主动唤醒是因为【当前已到达计划再处理时间的未完成事件】触发的，"
-                "target_long_term_event_title 必须填写该事件的标题（必须能在事件表里精确匹配）；"
-                "否则（无长期事件来源的主动任务，如基于情绪/观察的临时任务）传空字符串 ''。"
+                "PFCA 收到的输入是三个字段：任务信息（含根源 + 时机）+ 目标会话 id + 本次要处理的任务标题。"
+                "若本次主动唤醒是因为【当前已到达计划再处理时间的未完成任务】触发的，"
+                "target_task_title 必须填写该任务的标题（必须能在任务表里精确匹配）；"
+                "否则（无任务来源的主动任务，如基于情绪/观察的临时任务）传空字符串 ''。"
             ),
             "parameters": {
                 "type": "object",
@@ -68,12 +67,12 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                             "传空字符串 ''。"
                         ),
                     },
-                    "target_long_term_event_title": {
+                    "target_task_title": {
                         "type": "string",
                         "description": (
-                            "本次要处理的长期任务（长期事件）的标题。"
-                            "若本次主动唤醒是因为【当前已到达计划再处理时间的未完成事件】触发的，"
-                            "必须填写该事件的标题（须能在事件表中精确匹配一条 ongoing 长期事件）；"
+                            "本次要处理的任务标题。"
+                            "若本次主动唤醒是因为【当前已到达计划再处理时间的未完成任务】触发的，"
+                            "必须填写该任务的标题（须能在任务表中精确匹配一条未完成任务）；"
                             "否则传空字符串 ''。"
                         ),
                     },
@@ -82,48 +81,8 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_address_book",
-            "description": "查看自己都可以联系到谁或在哪些群聊中。chat_type 选'私聊'/'群聊'/'全部'，一般选全部。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "chat_type": {
-                        "type": "string",
-                        "enum": ["私聊", "群聊", "全部"],
-                        "description": "聊天类型筛选",
-                    },
-                },
-                "required": ["chat_type"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_conversation_history",
-            "description": (
-                "查询某个会话的历史消息。用于了解特定会话的上下文。"
-                "如不知道 session_id 请先调用 query_address_book 查通讯录。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "description": "目标会话的id，格式为'type_id'，例如'private_1234567890'或'group_198431299'。如没有这些信息，请先查询通讯录。",
-                    },
-                    "search_range": {
-                        "type": "string",
-                        "description": "格式为'last_n'，其中n为要返回的消息条数，例如'last_10'表示返回最后10条历史聊天消息。",
-                    },
-                },
-                "required": ["session_id", "search_range"],
-            },
-        },
-    },
+    ToolSocial.get_query_address_book_tool_schema(),
+    ToolSocial.get_query_history_tool_schema(),
     {
         "type": "function",
         "function": {
@@ -150,54 +109,46 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "update_long_term_event",
+            "name": "update_long_term_task",
             "description": (
-                "更新一条【已存在】的长期事件。\n"
+                "更新一条【已存在】的任务。\n"
                 "重要限制（proactive 上下文）：\n"
-                "  - 本工具**只能更新已存在的长期事件**，禁止创建新事件、禁止删除事件。\n"
-                "  - event_title 必须能在事件表里精确匹配到一条已存在的长期事件。\n"
-                "  - 不确定事件是否存在时，请先用 query_conversation_history 等工具确认，"
+                "  - 本工具**只能更新已存在的任务**，禁止创建新任务、禁止删除任务。\n"
+                "  - task_title 必须能在任务表里精确匹配到一条已存在的任务。\n"
+                "  - 不确定任务是否存在时，请先用 query_history 等工具确认，"
                 "或直接放弃更新（不要靠模糊标题硬调）。\n"
                 "【典型用途：推迟再次唤醒时间】\n"
-                "  当你审视当前被唤醒的输入，发现它来自一条已经到期的长期事件，"
+                "  当你审视当前被唤醒的输入，发现它来自一条已经到期的未完成任务，"
                 "但此刻又不想/不适宜执行（或条件不满足、或暂时不感兴趣），"
-                "**必须**调用本工具把这条事件的 next_occurrence 推迟到一个更晚的时间点，"
+                "**必须**调用本工具把这条任务的 next_occurrence 推迟到更晚的时间点，"
                 "以避免系统短期重复唤起——这是防止重复唤起的唯一受支持手段。\n"
-                "  - 把 event_type 设为 'ongoing'，并在 next_occurrence 里填入新的期望时间（ISO 8601）。\n"
-                "  - summary 里要说明为什么这次不处理 / 推迟到何时。\n"
-                "也可以用于：(1) 给已有事件追加新进展；(2) 把一条 ongoing 事件标记为 completed（结束）。"
+                "  - next_occurrence 里填入新的期望时间（ISO 8601）。\n"
+                "  - summary 是新的完整概况（覆盖旧的），要说明为什么这次不处理 / 推迟到何时。\n"
+                "也可以用于：(1) 给已有任务追加新进展；(2) 把任务标记为完成"
+                "（next_occurrence 填「完结」）。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "event_title": {
+                    "task_title": {
                         "type": "string",
                         "description": (
-                            "要更新的事件标题，必须能在事件表中精确匹配到一条已存在的长期事件。"
-                        ),
-                    },
-                    "event_type": {
-                        "type": "string",
-                        "enum": ["ongoing", "completed"],
-                        "description": (
-                            "更新后的事件类型。"
-                            "ongoing=继续关注，必须同时提供 next_occurrence；"
-                            "completed=标记为完成（事件不再触发主动任务）。"
+                            "要更新的任务标题，必须能在任务表中精确匹配到一条已存在的任务。"
                         ),
                     },
                     "summary": {
                         "type": "string",
                         "description": (
-                            "更新后的事件概况，将覆盖旧的概况。"
+                            "更新后的完整任务概况（覆盖旧的概况）。"
                             "若本次为推迟唤醒时间，请在这里说明推迟原因（例如：时机不成熟、缺关键信息等）。"
                         ),
                     },
                     "next_occurrence": {
                         "type": "string",
                         "description": (
-                            "预计再次发生时间。event_type='ongoing' 时必填，ISO 8601 格式，"
-                            "例如 '2024-01-20T10:00:00'。"
-                            "推迟唤醒时必须填一个比当前时间更晚的时间点，否则系统会立刻再次唤醒。"
+                            "下次发生时间。推迟唤醒时必填一个比当前时间更晚的 ISO 8601 时间点"
+                            "（例如 '2024-01-20T10:00:00'），否则系统会立刻再次唤醒；"
+                            "如要标记任务完成，填「完结」。"
                         ),
                     },
                     "reason": {
@@ -207,7 +158,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                         ),
                     },
                 },
-                "required": ["event_title", "event_type", "summary"],
+                "required": ["task_title", "summary", "next_occurrence"],
             },
         },
     },
@@ -231,12 +182,13 @@ class ProactiveToolRegistry(ToolManager):
             return
         self._functions: Dict[str, Callable[..., Awaitable[Any]]] = {
             "launch_pfca": _tool_launch_pfca,
-            "query_address_book": _tool_query_address_book,
-            "query_conversation_history": _tool_query_conversation_history,
+            "query_address_book": ToolSocial.query_address_book,
+            # consumer_id 显式传 "pfca"：LLM 已读到的消息推进 pfca 游标，truck 不再重复触发
+            "query_history": partial(ToolSocial.query_history, consumer_id="pfca"),
             "memory_adjustment": _tool_memory_adjustment,
-            "event_judgement": _tool_event_judgement,
+            "task_judgement": _tool_task_judgement,
             "skip_proactive": _tool_skip_proactive,
-            "update_long_term_event": _tool_update_long_term_event,
+            "update_long_term_task": _tool_update_long_term_task,
         }
         self._initialized = True
         logger.debug("ProactiveToolRegistry 初始化完成")
@@ -318,112 +270,44 @@ def get_proactive_tool_registry() -> ProactiveToolRegistry:
 
 # ============================================================
 # 工具实现（async functions）
-# 对齐 PFCA_tool_manager 中同类工具的实现
+# query_address_book / query_history 统一走 ToolSocial（common_ways）
 # ============================================================
 
 async def _tool_launch_pfca(
     task_info: str,
     target_session_id: str = "",
-    target_long_term_event_title: str = "",
+    target_task_title: str = "",
 ) -> str:
     """提交 PFCA 启动决策（不直接执行）。
 
-    设计：proactive 只负责"选择做什么"，实际启动 PFCA / 事件链 / conversation
+    设计：proactive 只负责"选择做什么"，实际启动 PFCA / 任务链 / conversation
     的动作交给 station 统一调度（与 ongoing_truck 的"只决策不执行"风格一致）。
 
     Args:
         task_info: 任务信息 str，含根源 + 时机 + 意图
         target_session_id: 目标会话 id（'private_xxx' / 'group_xxx' / 空字符串）
-        target_long_term_event_title: 本次要处理的长期事件标题。
-            若本次主动唤醒源于一条已到达 next_occurrence 的长期事件，必须填其标题（与事件表精确匹配）；
-            若无长期事件来源（如基于情绪/观察的临时主动任务），传空字符串 ''。
+        target_task_title: 本次要处理的任务标题。
+            若本次主动唤醒源于一条已到达 next_occurrence 的未完成任务，必须填其标题（与任务表精确匹配）；
+            若无任务来源（如基于情绪/观察的临时主动任务），传空字符串 ''。
 
     Returns:
         JSON 字符串：
-        ``{"status": "queued", "task_info": ..., "target_session_id": ..., "target_long_term_event_title": ...}``
-        由 ongoing_truck 在 decision_result 里透传给 station，station 启动事件链
+        ``{"status": "queued", "task_info": ..., "target_session_id": ..., "target_task_title": ...}``
+        由 ongoing_truck 在 decision_result 里透传给 station，station 启动任务链
         并调 PFCA 时会把这两段拼成 PFCA 的 user content。
     """
     logger.info(
         f"proactive 提交 PFCA 启动决策 (不直接执行), task_info 长度={len(task_info)}, "
         f"target={target_session_id or '(无)'}, "
-        f"long_term_event_title={target_long_term_event_title or '(无)'}"
+        f"task_title={target_task_title or '(无)'}"
     )
     payload = {
         "status": "queued",
         "task_info": task_info,
         "target_session_id": target_session_id or "",
-        "target_long_term_event_title": target_long_term_event_title or "",
+        "target_task_title": target_task_title or "",
     }
     return json.dumps(payload, ensure_ascii=False)
-
-
-async def _tool_query_address_book(chat_type: str) -> str:
-    """查询通讯录。
-
-    对齐 PFCA_tool_manager._query_address_book（pfca_tools.py:541）。
-    Args:
-        chat_type: '私聊' | '群聊' | '全部'
-    """
-    logger.debug(f"proactive 执行 query_address_book, chat_type={chat_type}")
-
-    from memory.address_book import get_address_book
-    address_book = get_address_book()
-
-    if chat_type == '私聊':
-        return await address_book.get_private_contacts()
-    elif chat_type == '群聊':
-        return await address_book.get_group_contacts()
-    elif chat_type == '全部':
-        return await address_book.get_all_contacts()
-    else:
-        return f"未知的聊天类型: {chat_type}"
-
-
-async def _tool_query_conversation_history(session_id: str, search_range: str) -> str:
-    """查询指定会话的历史聊天记录。
-
-    对齐 PFCA_tool_manager.query_history（pfca_tools.py:377）。
-    Args:
-        session_id:  会话标识，格式为 "type_id"，如 "private_1234567890" / "group_198431299"
-        search_range: 历史记录查询范围，格式为 'last_n'，例如 'last_10'
-    """
-    logger.debug(f"proactive 执行 query_conversation_history, session={session_id}, range={search_range}")
-
-    from brain.hc.global_session_history import (
-        get_global_session_history,
-        FetchOptions,
-        MessageFormatOptions,
-        FetchBehavior,
-    )
-
-    history = get_global_session_history()
-
-    message_count = 10
-    if search_range:
-        last_n_match = re.match(r'last_(\d+)', search_range)
-        if last_n_match:
-            message_count = int(last_n_match.group(1))
-        else:
-            logger.error(f"消息数量格式错误: {search_range}")
-            return "消息数量格式错误，请使用正确的格式: 'last_n'，其中n为要返回的消息条数，例如'last_10'表示返回最后10条消息。"
-
-    end_time = datetime.now().timestamp()
-    start_time = 0
-    result = await history.fetch(
-        session_id, "",
-        start_time=start_time,
-        end_time=end_time,
-        options=FetchOptions(
-            behavior=FetchBehavior(message_limit=message_count),
-            message_format=MessageFormatOptions(
-                show_new_marker=False,
-                show_timestamp=True,
-            ),
-        ),
-    )
-    messages = "\n".join(result.formatted_lines) if result.formatted_lines else ""
-    return messages if messages else "（没有历史消息）"
 
 
 async def _tool_memory_adjustment(
@@ -489,35 +373,33 @@ async def _tool_memory_adjustment(
     return str(result)
 
 
-async def _tool_event_judgement(content: str, operation_type: str) -> str:
-    """事件调整，根据 PFCA 的请求对事件进行记录、更新或归档。
+async def _tool_task_judgement(content: str, operation_type: str) -> str:
+    """任务调整，根据请求对任务进行创建或更新。
 
-    对齐 PFCA_tool_manager.event_judgement（pfca_tools.py:675）。
+    对齐 reflection_tools.task_judgement 的任务语义（2026-09-15 由 event_judgement 改来）。
 
     Args:
         content: 具体情况的详细描述
         operation_type: 操作类型
-            - 'create_ongoing': 创建新的持续关注事件
-            - 'update_ongoing': 修改或完成一个持续关注事件
-            - 'create_completed': 创建一个独立的完成事件
+            - 'create_task': 创建新任务
+            - 'update_task': 推进或完结一个已有任务
 
     Returns:
-        str: EventRegisterAgent 的最终文本回复（未使用工具的轮次）
+        str: TaskRegisterAgent 的最终文本回复（未使用工具的轮次）
     """
-    logger.info(f"执行event_judgement操作，operation_type={operation_type}，内容: {content}")
+    logger.info(f"执行task_judgement操作，operation_type={operation_type}，内容: {content}")
 
     from brain.hc.global_session_state import get_global_session_state
-    from brain.base.light_agent.event_register_agent import EventRegisterAgent
+    from brain.base.light_agent.task_register_agent import TaskRegisterAgent
 
     focus_state = get_global_session_state()
     action_desc = {
-        "create_ongoing": f"新增待办任务：{content}",
-        "update_ongoing": f"更新待办任务：{content}",
-        "create_completed": f"归档完成事件：{content}",
-    }.get(operation_type, f"记录待办任务：{content}")
+        "create_task": f"新增任务：{content}",
+        "update_task": f"更新任务：{content}",
+    }.get(operation_type, f"记录任务：{content}")
     focus_state.manager_pfca_actions('add', action_desc)
 
-    agent = EventRegisterAgent()
+    agent = TaskRegisterAgent()
     result = await agent.run(additional_content=content, operation_type=operation_type)
 
     if isinstance(result, dict) and result.get('formatted_output'):
@@ -542,37 +424,30 @@ async def _tool_skip_proactive(reason: str = "no_action_needed") -> str:
     return f"已跳过本次主动任务, reason={reason}"
 
 
-async def _tool_update_long_term_event(
-    event_title: str,
-    event_type: str,
+async def _tool_update_long_term_task(
+    task_title: str,
     summary: str,
-    next_occurrence: str = "",
+    next_occurrence: str,
     reason: str = "",
 ) -> str:
-    """受限的长期事件更新工具（proactive 专用）。
+    """受限的任务更新工具（proactive 专用）。
 
-    与 EventRegisterAgent 暴露的 update_ongoing_event 不同，这里**直接复用底层
-    _update_ongoing_event_impl**（绕过 EventRegisterAgent.run 的多轮 LLM 决策层），
-    因此只能 update、不能 create、不能 delete。
+    与 TaskRegisterAgent 暴露的 update_task_status 不同，这里**直接复用底层
+    ToolTask.update_task_status**（绕过 TaskRegisterAgent.run 的多轮 LLM 决策层），
+    因此只能 update、不能 create。
 
     Args:
-        event_title: 事件标题（必须能在事件表里精确匹配到一条已存在的长期事件）
-        event_type: 'ongoing' | 'completed'
-        summary: 更新后的事件概况
-        next_occurrence: 预计再次发生时间（ISO 8601，event_type='ongoing' 时必填）
+        task_title: 任务标题（必须能在任务表里精确匹配到一条已存在的任务）
+        summary: 更新后的完整任务概况（覆盖旧概况）
+        next_occurrence: 下次发生时间（ISO 8601）；输入「完结」则标记任务已完成
         reason: 本次更新原因（仅日志/留痕，不影响行为）
 
     Returns:
-        JSON 字符串，包含 success / event_title / event_type / next_occurrence / reason
+        JSON 字符串，包含 task_title / summary / next_occurrence / status / success / reason
     """
-    if not event_title:
+    if not task_title:
         return json.dumps(
-            {"success": False, "error": "event_title 不能为空"},
-            ensure_ascii=False,
-        )
-    if event_type not in ("ongoing", "completed"):
-        return json.dumps(
-            {"success": False, "error": f"event_type 必须是 'ongoing' 或 'completed'，收到: {event_type!r}"},
+            {"success": False, "error": "task_title 不能为空"},
             ensure_ascii=False,
         )
     if not summary:
@@ -580,38 +455,34 @@ async def _tool_update_long_term_event(
             {"success": False, "error": "summary 不能为空"},
             ensure_ascii=False,
         )
-    if event_type == "ongoing" and not next_occurrence:
+    if not next_occurrence:
         return json.dumps(
-            {"success": False, "error": "event_type='ongoing' 时必须提供 next_occurrence"},
+            {"success": False, "error": "next_occurrence 不能为空（推迟唤醒填更晚的 ISO 8601 时间，完结任务填「完结」）"},
             ensure_ascii=False,
         )
 
     logger.info(
-        f"proactive 更新长期事件: event_title={event_title!r}, "
-        f"event_type={event_type}, next_occurrence={next_occurrence!r}, reason={reason!r}"
+        f"proactive 更新任务: task_title={task_title!r}, "
+        f"next_occurrence={next_occurrence!r}, reason={reason!r}"
     )
 
-    # 懒导入：避免与 event_register_agent 形成循环 / 重
-    from brain.base.light_agent.event_register_agent import _update_ongoing_event_impl
+    # 懒导入：schema 与实现统一收口于 ToolTask（common_ways，2026-09-15）
+    from brain.base.common_ways.tool_task import ToolTask
 
-    result = await _update_ongoing_event_impl(
-        event_title=event_title,
-        event_type=event_type,
+    result = await ToolTask.update_task_status(
+        task_title=task_title,
         summary=summary,
-        next_occurrence=next_occurrence or None,
+        next_occurrence=next_occurrence,
     )
 
     # 记录 reason 到历史/日志（不影响 update 行为本身）
     if reason:
-        try:
-            from brain.hc.global_session_state import get_global_session_state
-            focus_state = get_global_session_state()
-            focus_state.manager_pfca_actions(
-                'add',
-                f"更新长期事件「{event_title}」：{reason}",
-            )
-        except Exception as e:
-            logger.debug(f"记录 reason 到 pfca_actions 失败（不影响主流程）: {e}")
+        from brain.hc.global_session_state import get_global_session_state
+        focus_state = get_global_session_state()
+        focus_state.manager_pfca_actions(
+            'add',
+            f"更新任务「{task_title}」：{reason}",
+        )
 
     # 包装返回：补一个 reason 字段供 LLM 校对
     result.setdefault("reason", reason)

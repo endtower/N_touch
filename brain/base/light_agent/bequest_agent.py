@@ -15,6 +15,7 @@ import asyncio
 from typing import Dict, List, Any, Optional
 
 from brain.base.light_agent.lightweight_agent import LightweightAgent
+from brain.base.common_ways.tool_bequest import ToolBequest
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
 from config.role_settings import role_config
@@ -33,45 +34,12 @@ class BequestAgent(LightweightAgent):
         super().__init__()
 
     # ===================== 工具映射 =====================
+    # schema 与实现已收口至 ToolBequest（2026-09-15），本类仅做委托拼装
     def _initialize_tool_functions(self) -> Dict[str, Any]:
-        return {
-            "upsert_bequest": self._upsert_bequest,
-            "delete_bequest": self._delete_bequest
-        }
+        return ToolBequest.get_tool_functions()
 
     def get_available_tools(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "upsert_bequest",
-                    "description": "创建经验。如果已存在同名嘱托则覆盖内容，否则创建新的嘱托",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "标题"},
-                            "summary": {"type": "string", "description": "内容"},
-                            "apply_scenario": {"type": "string", "enum": ["execution"], "description": "应用阶段：execution=发言时参考"}
-                        },
-                        "required": ["title", "summary", "apply_scenario"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "delete_bequest",
-                    "description": "删除经验。如果已登记的经验被认为不恰当，删除该经验",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "标题"}
-                        },
-                        "required": ["title"]
-                    }
-                }
-            }
-        ]
+        return ToolBequest.get_bequest_tool_schemas()
 
     def get_system_prompt(self) -> str:
         return f"""你是一个专业的嘱托经验登记Agent，负责整理本次会话中学到的词汇、句式结构。
@@ -81,7 +49,6 @@ class BequestAgent(LightweightAgent):
     - 需要像案例一样简洁，不能包含复杂的逻辑或解释。
     - 经验需要有逻辑，不能在直觉上太离谱，反面案例如：讽刺对方- 用‘我喜欢你’表达对方的讽刺。 这种经验太不符合逻辑，不能登记。
     - 每次通常只登记一条经验，最多登记三条经验，修改不受限制。
-    - 线上交流的基础方法，不能被删除，只能被修改
     - 例如: 
         - 标题（用途）：表达惊叹 内容： 用'逆天'，'这期神了'等词语可以表达惊讶
         - 标题（用途）：质疑对方 内容： 用'抽象'，'弱智言论'等词语可以嘲讽对方
@@ -114,39 +81,22 @@ class BequestAgent(LightweightAgent):
         return {"status": "completed", "results": results}
 
     # ===================== LLM 调用 =====================
-    async def _call_llm(self, messages: list, *, mode: str = "basic-reason",
+    async def _call_llm(self, messages: list, *, level: str = "flash",
                         tool_choice: Optional[str] = None,
                         system_prompt: Optional[str] = None, **kwargs):
-        """统一 LLM 调用：走 call_llm（mode='basic'）。"""
+        """统一 LLM 调用：走 call_llm（level='flash'）。"""
         from utils.llm_client_manager import call_llm
 
         sp = system_prompt if system_prompt is not None else self.get_system_prompt()
         full_messages = [{"role": "system", "content": sp}] + messages
         return await call_llm(
-            mode=mode,
+            level=level,
             messages=full_messages,
             tools=self.get_available_tools(),
         )
 
     # ===================== 工具实现 =====================
-    async def _upsert_bequest(self, title: str, summary: str, apply_scenario: Optional[str] = None) -> Dict[str, Any]:
-        bequest_ops = BequestOperations()
-        existing_id = await bequest_ops.get_bequest_id_by_title(title)
-
-        if existing_id:
-            await bequest_ops.update_bequest(title, summary=summary, apply_scenario=apply_scenario)
-            is_new = False
-            bequest_id = existing_id
-        else:
-            bequest_id = await bequest_ops.create_bequest(title=title, summary=summary, apply_scenario=apply_scenario)
-            is_new = True
-
-        return {"bequest_id": bequest_id, "title": title, "is_new": is_new}
-
-    async def _delete_bequest(self, title: str) -> Dict[str, Any]:
-        bequest_ops = BequestOperations()
-        success = await bequest_ops.delete_bequest_by_title(title)
-        return {"title": title, "success": success}
+    # upsert_bequest / delete_bequest 已迁至 ToolBequest（common_ways），此处不再重复实现
 
     # ===================== 辅助方法 =====================
     async def _fetch_chat_messages(self, session_id: str, start_time: float, end_time: float) -> str:
@@ -208,7 +158,7 @@ class BequestAgent(LightweightAgent):
         else:
             parts.append("（无）")
 
-        parts.append("\n\n请根据以上信息及事件影响结论，删除/修订/新增 执行阶段与策略阶段经验。")
+        parts.append("\n\n请根据以上信息及事件影响结论，删除/修订/新增 话术经验。")
         return "\n".join(parts)
 
     def _get_pending_emotion_results(self) -> List[Dict]:
@@ -264,7 +214,7 @@ class BequestAgent(LightweightAgent):
 
         # 三段式骨架：前处理 → LLM 循环 → 后处理
         processed_input = self._preprocess(user_message)
-        loop_result = await self._llm_loop(processed_input, mode='basic')
+        loop_result = await self._llm_loop(processed_input)
         content = loop_result.get("content", "")
         extra_info = loop_result.get("extra_info")
         return self._postprocess(content, extra_info)
@@ -277,13 +227,10 @@ class BequestAgent(LightweightAgent):
         logger.info(f"开始处理 {len(pending_results)} 个待登记经验")
         all_results = []
 
+        # 失败语义：任一条经验登记失败即整体中断（向上抛，就地崩溃阻断），不吞错继续
         for i, emotion_result in enumerate(pending_results, 1):
-            try:
-                result = await self.run(emotion_result)
-                all_results.append({"index": i, "session_name": emotion_result.get("session_name", "未知"), "status": "completed", "result": result})
-            except Exception as e:
-                logger.error(f"处理第 {i} 个 emotion_result 失败: {e}")
-                all_results.append({"index": i, "session_name": emotion_result.get("session_name", "未知"), "status": "failed", "error": str(e)})
+            result = await self.run(emotion_result)
+            all_results.append({"index": i, "session_name": emotion_result.get("session_name", "未知"), "status": "completed", "result": result})
 
         return all_results
 

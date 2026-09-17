@@ -381,6 +381,69 @@ class OneBotChannel:
     # 出站
     # --------------------------------------------------------
 
+    async def call_api(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """调用 OneBot API 并等待回执（echo 关联），返回完整响应 dict。
+
+        fail-fast：连接不在线 / 发送超时 / retcode != 0 一律抛 NetworkError，
+        不做静默重试（符合 user_rules：关键路径不吞错）。
+        """
+        if not self.is_connected():
+            raise NetworkError(
+                f"[OneBot:{self.name}] call_api({action}) aborted: NapCat not connected (fail-fast)"
+            )
+
+        ws = self._ws
+        assert ws is not None and not ws.closed  # is_connected 已保证
+
+        echo = f"ob-{uuid.uuid4().hex}"
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+
+        async with self._send_lock:
+            self._send_futures[echo] = fut
+
+        body = {"action": action, "params": params, "echo": echo}
+        try:
+            await ws.send_json(body)
+        except Exception as e:
+            async with self._send_lock:
+                self._send_futures.pop(echo, None)
+            self._connected_event.clear()
+            raise NetworkError(
+                f"[OneBot] call_api({action}) aborted: connection lost during send: {e}"
+            ) from e
+
+        try:
+            resp = await asyncio.wait_for(fut, timeout=self.config.send_timeout)
+        except asyncio.TimeoutError:
+            async with self._send_lock:
+                self._send_futures.pop(echo, None)
+            raise NetworkError(
+                f"[OneBot] call_api({action}) 超时（>{self.config.send_timeout}s）"
+            )
+
+        retcode = resp.get("retcode", -1)
+        if retcode != C.OB_RETCODE_OK:
+            msg = resp.get("msg") or resp.get("wording") or "unknown"
+            raise NetworkError(
+                f"[OneBot] call_api({action}) 失败 retcode={retcode}: {msg}"
+            )
+        return resp
+
+    async def get_msg(self, message_id: str) -> Dict[str, Any]:
+        """取回已发送/已接收消息的完整记录（含 QQ 服务器侧的 time 字段）。
+
+        用途：审批轮询的锚点必须与入站消息同处 QQ 服务器时钟域，
+        本地时钟锚点会和服务器时间戳产生漂移错位（详见 social_chat 审批机制）。
+        """
+        resp = await self.call_api(C.OB_API_GET_MSG, {"message_id": message_id})
+        data = resp.get("data")
+        if not isinstance(data, dict) or not data:
+            raise NetworkError(
+                f"[OneBot] get_msg({message_id}) 返回空数据，无法取服务器时间戳"
+            )
+        return data
+
     async def send(self, target: OutboundTarget, payload: OutboundPayload) -> str:
         # fail-fast：连接不在线就立即抛错，不缓冲不等
         if not self.is_connected():
@@ -406,35 +469,7 @@ class OneBotChannel:
 
         params: Dict[str, Any] = {params_key: target.target_id, "message": message}
 
-        echo = f"ob-{uuid.uuid4().hex}"
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
-
-        async with self._send_lock:
-            self._send_futures[echo] = fut
-
-        body = {"action": action, "params": params, "echo": echo}
-        try:
-            await ws.send_json(body)
-        except Exception as e:
-            async with self._send_lock:
-                self._send_futures.pop(echo, None)
-            self._connected_event.clear()
-            raise NetworkError(
-                f"[OneBot] send aborted: connection lost during send: {e}"
-            ) from e
-
-        try:
-            resp = await asyncio.wait_for(fut, timeout=self.config.send_timeout)
-        except asyncio.TimeoutError:
-            async with self._send_lock:
-                self._send_futures.pop(echo, None)
-            raise NetworkError(f"[OneBot] send 超时（>{self.config.send_timeout}s）")
-
-        retcode = resp.get("retcode", -1)
-        if retcode != C.OB_RETCODE_OK:
-            msg = resp.get("msg") or resp.get("wording") or "unknown"
-            raise NetworkError(f"[OneBot] send 失败 retcode={retcode}: {msg}")
+        resp = await self.call_api(action, params)
 
         data = resp.get("data") or {}
         message_id = str(data.get("message_id", ""))

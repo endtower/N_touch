@@ -238,7 +238,7 @@ async def handle_get_experiences(request: web.Request) -> web.Response:
     """GET /memory/experiences?limit=200
 
     返回 { experiences, total }。experiences 为 bequests 表按 start_time 倒序的
-    完整经验列表（title / summary / apply_scenario），前端分组展示。
+    完整经验列表（title / summary / category），前端分组展示。
     """
     limit = _safe_int(request.query.get("limit"), 200)
     if limit > 2000:
@@ -255,7 +255,7 @@ async def handle_get_experiences(request: web.Request) -> web.Response:
 
     try:
         cur = await conn.execute(
-            "SELECT bequest_id, title, summary, apply_scenario, start_time, updated_at "
+            "SELECT bequest_id, title, summary, category, start_time, updated_at "
             "FROM bequests ORDER BY coalesce(start_time, updated_at) DESC LIMIT ?",
             (limit,),
         )
@@ -265,7 +265,7 @@ async def handle_get_experiences(request: web.Request) -> web.Response:
                 "bequest_id": r["bequest_id"],
                 "title": r["title"] or "",
                 "summary": r["summary"] or "",
-                "apply_scenario": r["apply_scenario"] or "",
+                "category": r["category"] or "",
                 "start_time": r["start_time"] or "",
                 "updated_at": r["updated_at"] or "",
             }
@@ -285,15 +285,16 @@ async def handle_get_experiences(request: web.Request) -> web.Response:
 # PATCH /memory/experiences/{bequest_id} — 编辑经验/嘱托
 # ============================================================
 
-_BEQUEST_EDITABLE = {"title", "summary", "apply_scenario"}
+_BEQUEST_EDITABLE = {"title", "summary"}
 
 
 async def handle_update_experience(request: web.Request) -> web.Response:
     """PATCH /memory/experiences/{bequest_id}
 
     body (JSON, 只提交要改的字段):
-      { title?, summary?, apply_scenario? }
+      { title?, summary? }
 
+    category 固定 'speech' 不开放编辑。
     更新成功后返回最新经验对象 { experience, updated: True }。
     """
     bequest_id = request.match_info.get("bequest_id", "")
@@ -326,7 +327,7 @@ async def handle_update_experience(request: web.Request) -> web.Response:
 
         conn = await get_memory_db()._ensure_connection()
         cur = await conn.execute(
-            "SELECT bequest_id, title, summary, apply_scenario, start_time, updated_at "
+            "SELECT bequest_id, title, summary, category, start_time, updated_at "
             "FROM bequests WHERE bequest_id=?",
             (bequest_id,),
         )
@@ -338,7 +339,7 @@ async def handle_update_experience(request: web.Request) -> web.Response:
             "bequest_id": row["bequest_id"],
             "title": row["title"] or "",
             "summary": row["summary"] or "",
-            "apply_scenario": row["apply_scenario"] or "",
+            "category": row["category"] or "",
             "start_time": row["start_time"] or "",
             "updated_at": row["updated_at"] or "",
         }

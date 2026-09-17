@@ -21,6 +21,7 @@ import asyncio
 from typing import Any, Dict, Literal, Optional
 
 from utils.error_handling import async_handle_errors
+from utils.llm_client_manager import TokenBudget, TokenBudgetExceededError, token_budget_scope
 from utils.logger import get_logger
 
 from brain.base import HeavySession
@@ -46,6 +47,11 @@ EXIT_TOOLS = {"launch_pfca", "skip_proactive"}
 
 class ProactiveSession(HeavySession):
     """单次主动任务会话 — 类比 PFCASession"""
+
+    # 单会话累计 token 预算（熔断值，参照 token_stats.json 校准）
+    TOKEN_BUDGET = 500_000
+    # 本类重写了 start()（不走基类骨架），max_rounds 在自有循环里手工判
+    max_rounds = 40
 
     def __init__(self, task_draft: Dict[str, Any]):
         self.task_draft = task_draft
@@ -102,47 +108,43 @@ class ProactiveSession(HeavySession):
 
         # 重置 history（保证每次会话是干净的上下文）
         #
-        # 关键修复：之前用 reset_proactive_history_manager() + get_proactive_history_manager()
-        # 的策略会把磁盘上"上次异常退出残留的序列"也读回来（例如上次在 launch_pfca
-        # 时崩了，磁盘里就剩 [assistant(tool_calls)] + [user]，下次 _call_llm 一发就
-        # 触发 OpenAI 400 'insufficient tool messages following tool_calls message'）。
-        #
-        # 现在改为：复用同一个 history_manager 实例，先归档再清空，确保 active.json
-        # 从干净的空列表起步。
+        # 内存/磁盘分离后 LLM 只消费 history_manager 的内存会话历史（重启后
+        # 恒为空），旧"磁盘残留触发 OpenAI 400"的问题不复存在。这里直接归档
+        # 上一轮：终结链写入资格 / 轮转 unlinked 常驻文件，磁盘展示记录保留。
         if self.history_manager is None:
             self.history_manager = get_proactive_history_manager()
-        try:
-            # 如果磁盘上还有上次留下的消息（异常退出 / 进程崩了），先归档再清空
-            existing = self.history_manager.get_history() or []
-            if existing:
-                logger.warning(
-                    f"proactive 历史残留 {len(existing)} 条消息，"
-                    f"上次会话可能异常退出，先归档再清空"
-                )
-                self.history_manager.archive_context()
-            else:
-                # 即使没残留也写一遍空列表，保证 active.json 是合法 JSON
-                self.history_manager.clear()
-        except Exception as e:
-            logger.warning(f"清理 proactive 历史失败（继续）: {e}")
-            # 兜底：万一上面出错，强制写空文件避免读到脏数据
-            try:
-                self.history_manager.clear()
-            except Exception:
-                pass
+        self.history_manager.archive_context()
 
         self.input_manager.clear_bequest_cache() if hasattr(self.input_manager, "clear_bequest_cache") else None
 
         # 1. 准备 input_manager 的首次消息
         await self._prepare_first_message()
 
-        # 2. 推进主循环
+        # 2. 推进主循环（含 token 预算作用域与轮数上限；process_cycle 用基类实现）
+        budget = TokenBudget(self.TOKEN_BUDGET) if self.TOKEN_BUDGET else None
+        self.token_budget = budget
+        self._recent_tool_sigs = []
+        self._tool_repeat_strikes = 0
+        self._last_repeat_tool = ""
         try:
-            while self.running and not self.should_stop:
-                await self.process_cycle()
+            with token_budget_scope(budget):
+                while (self.running and not self.should_stop
+                       and self._rounds < self.max_rounds):
+                    if budget is not None and budget.exceeded:
+                        self._exit_reason = f"token 预算耗尽 ({budget.used}/{budget.max_tokens})"
+                        logger.warning(f"ProactiveSession {self._exit_reason}")
+                        break
+                    await self.process_cycle()
+        except TokenBudgetExceededError as e:
+            self._exit_reason = str(e)
+            logger.warning(f"ProactiveSession 会话因 token 预算退出: {e}")
         except Exception as e:
             logger.warning(f"ProactiveSession 主循环异常: {e}")
             self._exit_reason = f"error: {e}"
+
+        if self._exit_reason is None and self._rounds >= self.max_rounds:
+            self._exit_reason = f"达到最大轮数 ({self.max_rounds})"
+            logger.warning(f"ProactiveSession {self._exit_reason}")
 
         logger.info(f"ProactiveSession 退出, reason={self._exit_reason}")
 
@@ -174,52 +176,50 @@ class ProactiveSession(HeavySession):
             return
         self._prepared = True
 
-        planned_events = await self._fetch_planned_events()
-        triggered_event = (
-            self.payload.get("event")
-            or self.task_draft.get("triggered_event")
+        planned_tasks = await self._fetch_planned_tasks()
+        triggered_task = (
+            self.payload.get("task")
+            or self.task_draft.get("triggered_task")
         )
 
-        # 当 truck 传入了触发事件时, 在首条 user 消息底部追加一句「本次主动唤醒原因」
+        # 当 truck 传入了触发任务时, 在首条 user 消息底部追加一句「本次主动唤醒原因」
         # 唤醒原因文本由 truck 在 task_draft.wakeup_reason 中显式给出
         # (目前由 scheduled_proactive_truck / ongoing_truck 两个推给 proactive 的 truck 强制填入);
-        # 未提供则温柔兜底 (有 triggered_event 时用事件型文案, 否则省略避免空话)。
+        # 未提供则温柔兜底 (有 triggered_task 时用任务型文案, 否则省略避免空话)。
         wakeup_reason = self.task_draft.get("wakeup_reason")
-        if not wakeup_reason and triggered_event:
-            wakeup_reason = "存在未完成的事件，请处理！"
+        if not wakeup_reason and triggered_task:
+            wakeup_reason = "存在未完成的任务，请处理！"
 
         self.input_manager.prepare_first_message(
             message_type=FirstMessageType.NORMAL_STARTUP,
             task_draft=self.task_draft,
-            planned_events=planned_events,
-            triggered_event=triggered_event,
+            planned_tasks=planned_tasks,
+            triggered_task=triggered_task,
             wakeup_reason=wakeup_reason,
         )
         logger.debug(
-            f"proactive 首次消息已准备好, payload.event={'有' if triggered_event else '无'}, "
-            f"planned={len(planned_events)}, wakeup_reason={'有' if wakeup_reason else '无'}"
+            f"proactive 首次消息已准备好, payload.task={'有' if triggered_task else '无'}, "
+            f"planned={len(planned_tasks)}, wakeup_reason={'有' if wakeup_reason else '无'}"
         )
 
-    async def _fetch_planned_events(self) -> list:
-        """拉取所有 ongoing 事件，喂给 input_manager"""
-        try:
-            from brain.hc.database.event import EventOperations
-            ev_ops = EventOperations()
-            event_ids = await ev_ops.get_ongoing_events(limit=50)
-            events = []
-            for eid in event_ids:
-                rec = await ev_ops.get_event_by_id(eid)
-                if rec:
-                    events.append({
-                        "event_id": rec.get("event_id"),
-                        "title": rec.get("title"),
-                        "summary": rec.get("summary"),
-                        "next_occurrence": rec.get("next_occurrence"),
-                    })
-            return events
-        except Exception as e:
-            logger.warning(f"proactive 拉取 planned_events 失败: {e}")
-            return []
+    async def _fetch_planned_tasks(self) -> list:
+        """拉取所有未完成任务，喂给 input_manager
+
+        拉取失败直接上抛崩溃阻断（按 user_rules，不 try-ex 静默跳过）。"""
+        from brain.hc.database.task import TaskOperations
+        task_ops = TaskOperations()
+        task_ids = await task_ops.get_active_tasks(limit=50)
+        tasks = []
+        for tid in task_ids:
+            rec = await task_ops.get_task_by_id(tid)
+            if rec:
+                tasks.append({
+                    "task_id": rec.get("task_id"),
+                    "title": rec.get("title"),
+                    "summary": rec.get("summary"),
+                    "next_occurrence": rec.get("next_occurrence"),
+                })
+        return tasks
 
     # ============================================================
     # 主循环（复用父类 HeavySession.process_cycle 固定骨架）
@@ -272,7 +272,7 @@ class ProactiveSession(HeavySession):
         full_messages = [{"role": "system", "content": get_proactive_system_prompt()}] + messages
 
         response = await call_llm(
-            mode="basic-reason",
+            level="flash",
             messages=full_messages,
             tools=self.tool_registry.get_tools(),
         )

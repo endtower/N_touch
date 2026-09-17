@@ -471,6 +471,42 @@ function applyMessageDeleted(args: { session_id: string; message_id: string }) {
   }
 }
 
+// 批量删除消息: 乐观移除 + 通知后端, 后端成功后广播 messages_deleted (幂等).
+// message_ids 为前端展示 id (历史消息带 hist- 前缀), 内部换算成裸 id 后再发.
+function deleteMessages(args: { session_id: string; message_ids: string[] }) {
+  const list = state.messagesBySession[args.session_id]
+  if (!list || !args.message_ids.length) return
+  const idset = new Set(args.message_ids)
+  const realIds: string[] = []
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i]
+    if (idset.has(m.id)) {
+      // 历史消息有 _real_id (裸 message_id), 乐观推送/echo 的 m.id 本身就是真实 id.
+      realIds.push(m._real_id ?? m.id)
+      list.splice(i, 1)
+    }
+  }
+  if (!realIds.length) return
+  channel.send({
+    type: 'delete_messages',
+    session_id: args.session_id,
+    message_ids: realIds,
+  })
+}
+
+// 收到后端广播的 messages_deleted: 用于多客户端同步 (本客户端可能不是发起者).
+function applyMessagesDeleted(args: { session_id: string; message_ids: string[] }) {
+  const list = state.messagesBySession[args.session_id]
+  if (!list || !args.message_ids.length) return
+  const idset = new Set(args.message_ids)
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i]
+    if ((m._real_id && idset.has(m._real_id)) || idset.has(m.id)) {
+      list.splice(i, 1)
+    }
+  }
+}
+
 // ============================================================
 // 身份操作 (前端 -> 后端)
 // ============================================================
@@ -585,7 +621,7 @@ function clearExperiences() {
 }
 
 /**
- * 编辑某条经验/嘱托的具体字段 (title / summary / apply_scenario)。
+ * 编辑某条经验/嘱托的具体字段 (title / summary)。
  * 成功后用后端返回的最新 experience 原地替换列表里对应项，
  * 使详情面板无需全量重拉也能即时反映。
  */
@@ -828,6 +864,8 @@ export const chat = {
   applyLlmMessage,
   deleteMessage,
   applyMessageDeleted,
+  deleteMessages,
+  applyMessagesDeleted,
   createSession,
   deleteSession,
   sendMessage,

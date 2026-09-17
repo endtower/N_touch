@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """轻型 Agent 基类：无状态、单次任务、不持久化上下文的原子执行单元。
 
-设计文档：docs/archive/lightweight_agent_base_design.md
+设计记录：docs/已完成.md（light_agent 框架基类）
 
 本基类抽象出轻型 agent 的五个核心段落：
   1. 前处理 `_preprocess`   —— LLM 进入正式循环之前，对输入信息进行初次处理。
@@ -73,7 +73,7 @@ class LightweightAgent(ABC):
             return await self.tool_functions[function_name](**function_args)
         return f"未知函数: {function_name}"
 
-    async def _llm_loop(self, processed_input: Any, *, mode: str = "basic-reason",
+    async def _llm_loop(self, processed_input: Any, *, level: str = "flash",
                         max_rounds: int = 10) -> Dict[str, Any]:
         """LLM 循环：正式循环主体。
 
@@ -82,7 +82,7 @@ class LightweightAgent(ABC):
 
         Args:
             processed_input: `_preprocess` 处理后的输入（作为首条 user 消息）。
-            mode: LLM 模式（basic / basic-reason / advanced / advanced-reason）。
+            level: 模型等级（flash / pro / vision / embedding），统一从 ModelConfig 解析。
             max_rounds: 最大循环轮数（防死循环烧 token）。
 
         Returns:
@@ -93,7 +93,7 @@ class LightweightAgent(ABC):
         results: List[Dict[str, Any]] = []
 
         for _ in range(max_rounds):
-            response = await self._call_llm(messages, mode=mode, tool_choice="auto",
+            response = await self._call_llm(messages, level=level, tool_choice="auto",
                                             system_prompt=system_prompt)
             response_message = response.choices[0].message
 
@@ -159,7 +159,7 @@ class LightweightAgent(ABC):
         """
 
     @abstractmethod
-    async def _call_llm(self, messages: list, *, mode: str = "basic-reason",
+    async def _call_llm(self, messages: list, *, level: str = "flash",
                         tool_choice: Optional[str] = None,
                         system_prompt: Optional[str] = None, **kwargs):
         """统一 LLM 调用：由子类实现具体调用方式（如识图 agent 走视觉模型）。
@@ -168,7 +168,7 @@ class LightweightAgent(ABC):
 
         Args:
             messages: 不含 system 的消息列表（user / assistant / tool）。
-            mode: LLM 模式（basic / basic-reason / advanced / advanced-reason）。
+            level: 模型等级（flash / pro / vision / embedding），统一从 ModelConfig 解析。
             tool_choice: 工具选择策略（"none" / "auto" / None）。
             system_prompt: 覆盖系统提示词；默认取 self.get_system_prompt()。
 

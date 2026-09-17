@@ -79,9 +79,13 @@ async def async_process_from_att_factory(
     session_context = {"session_id": session_id} if session_id else None
 
     # 4. 运行 pfca 实例（输入显式传入，首条消息由 start() 内部准备）
+    #    is_task_running 必须 try/finally 复位：任何异常/取消路径残留 True，
+    #    会让后续 PFCA 请求被"已有pfca任务在运行"永久拒绝（致命静默）。
     pfca_instance.is_task_running = True
-    processed_result = await pfca_instance.start(message, session_context)
-    pfca_instance.is_task_running = False
+    try:
+        processed_result = await pfca_instance.start(message, session_context)
+    finally:
+        pfca_instance.is_task_running = False
 
     if processed_result is None:
         logger.error("致命错误:PFCA处理结果为None")

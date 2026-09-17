@@ -160,6 +160,9 @@ function handleServerMessage(msg: ServerMessage) {
     case 'message_deleted':
       chat.applyMessageDeleted({ session_id: msg.session_id, message_id: msg.message_id })
       break
+    case 'messages_deleted':
+      chat.applyMessagesDeleted({ session_id: msg.session_id, message_ids: msg.message_ids })
+      break
     case 'session_runtime':
       chat.applyRuntime(msg.runtime)
       break

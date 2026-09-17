@@ -49,6 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[Dict[str, Any]]:
     """FastAPI应用生命周期管理"""
     logger.info("开始初始化系统核心组件...")
     
+    
     # 初始化SystemCore（核心组件）
     async with SystemCore() as system_core:
         # 明确将核心组件绑定到app.state
@@ -91,8 +92,26 @@ def main():
         host = "127.0.0.1"
         port = 5000
 
+        # 运行期写入热点必须从热重载监视中排除：服务启动即写日志（logs/），
+        # 若被 watchfiles 监视到会触发「写入 → 重启 → 再写入」的无限重启风暴
+        project_dir = str(Path(__file__).resolve().parent)
+        reload_excludes = [
+            "logs", "logs/*", "*.log",           # 运行日志
+            "tests", "tests/*",                   # 测试产物 results/*.json
+            "docs", "docs/*",                     # 文档改动无需重启后端
+            "scripts", "scripts/*",
+            "web_frontend", "web_frontend/*",     # 前端由 Vite 自管
+            "None_Tooth", "None_Tooth/*",         # 独立插件项目
+            "__pycache__", "*__pycache__*", "*.pyc",
+            "*.db", "*.sqlite*", "*.sqlite3",     # 数据库文件
+        ]
+
         # 使用uvicorn启动FastAPI服务（开发环境开启reload，文件修改自动重启）
-        uvicorn.run("main:app", host=host, port=port, reload=True)
+        uvicorn.run(
+            "main:app", host=host, port=port, reload=True,
+            reload_dirs=[project_dir],
+            reload_excludes=reload_excludes,
+        )
 
     except KeyboardInterrupt:
         logger.info("接收到中断信号，正在停止服务...")

@@ -1,12 +1,43 @@
 import asyncio
+import os
+import traceback
 from typing import Dict
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
+from utils.chain_context import generate_chain_id, set_chain_context, reset_chain_context
 from config.truck_settings import is_truck_enabled
 from .trucks.private_truck import PrivateTruck
 from .trucks.special_attention_truck import SpecialAttentionTruck
+from .trucks.reflection_truck import ReflectionTruck
 
 logger = get_logger(__name__, 'WARNING')
+
+
+def _force_archive_chain_contexts():
+    """链结束强制归档：终结所有 kind 对该链的写入资格。
+
+    - conversation / observe / temporary / social_chat → Chat_HistoryManager 工厂
+    - pfca / proactive → 各自全局单例
+
+    新存储模型下链内文件写入即落位到 event_chains/{chain_id}/{prefix}.json，
+    归档只终结写入资格（移出进行中注册表 + 广播），文件原位保留，
+    前端按链文件夹直接查看该任务涉及的全部 agent 上下文；
+    链外（unlinked）场景则轮转常驻文件为时间戳归档并清空。
+    无论 PFCA 是否被调用都要执行（skip 分支也可能写入了 proactive 上下文）。
+    """
+    from brain.chat.chat_history_manager import get_history_manager
+    from brain.pfc.pfca.pfca_history_manager import get_pfca_history_manager
+    from brain.att.proactive.proactive_history_manager import get_proactive_history_manager
+    managers = [
+        get_history_manager('conversation'),
+        get_history_manager('observe'),
+        get_history_manager('temporary'),
+        get_history_manager('social_chat'),
+        get_pfca_history_manager(),
+        get_proactive_history_manager(),
+    ]
+    for m in managers:
+        m.archive_context()
 
 
 class AttentionStation:
@@ -16,6 +47,7 @@ class AttentionStation:
         self.ongoing_truck = None  # 先初始化为None，避免循环引用
         self.special_attention_truck = None  # 先初始化为None，避免循环引用
         self.scheduled_proactive_truck = None  # 定时主动任务 truck
+        self.reflection_truck = None  # 反思系统自动触发 truck
         # 任务队列 - 存储需要处理的truck请求
         self.task_queue = asyncio.Queue()
         # 已入队但尚未被 _process_tasks 消费的 truck_id 集合（去重，防止同一 truck 堆栈）
@@ -29,7 +61,8 @@ class AttentionStation:
         """返回所有处于 running 状态的 truck 实例 (跳过 None)"""
         trucks = []
         for t in (self.private_truck, self.ongoing_truck,
-                  self.special_attention_truck, self.scheduled_proactive_truck):
+                  self.special_attention_truck, self.scheduled_proactive_truck,
+                  self.reflection_truck):
             if t is None:
                 continue
             try:
@@ -85,6 +118,15 @@ class AttentionStation:
                     f"{[t.truck_id for t in other_paused]}"
                 )
 
+            # === 出队即生成本轮任务链 ID 并设置 contextvar ===
+            # 链内 proactive 决策阶段（get_truck_messages 内部阻塞等待 session 跑完）
+            # 与 PFCA / conversation / social_chat 阶段的上下文写入全部归属同一链。
+            # ProactiveCore 主循环跑在独立任务上，contextvar 不会自动传播，
+            # 由 truck 把 chain_id 塞进 task_draft 显式携带（见 ongoing/scheduled truck）。
+            chain_id = generate_chain_id()
+            chain_token = set_chain_context(chain_id)
+            logger.debug(f"本轮任务链 ID: {chain_id}")
+
             try:
                 # 请求truck生成完整消息
                 truck_messages = await truck.get_truck_messages()
@@ -100,9 +142,10 @@ class AttentionStation:
                     from brain.pfc.core import async_process_from_att_factory
                     from brain.hc.global_session_state import get_global_session_state
 
-                    # 开始新的事件链
+                    # 开始新的事件链（触发原因 = truck 注入的第一轮消息，
+                    # 由灵光一现记事本随文档自动记录；链 ID 复用出队时预生成的）
                     focus_state = get_global_session_state()
-                    focus_state.start_new_event_chain()
+                    focus_state.start_new_event_chain(formatted_message or "", chain_id=chain_id)
 
                     # PFCA 工厂接口仅需 (message, session_id, name)
                     # - raw_sessions 在 truck 侧形态:
@@ -138,6 +181,26 @@ class AttentionStation:
                     logger.info(
                         f"{truck_id} 校验/决策后无需 PFCA, 跳过"
                     )
+
+                # === 链收尾：强制归档（B 方案）===
+                # skip 分支也可能写入了 proactive 上下文，统一在链尾归档清空，
+                # 保证 active 文件不残留跨链内容（前端进行中视图因此准确）。
+                _force_archive_chain_contexts()
+            except Exception as e:
+                # 硬约定#4：运行期业务错误默认 fatal（os._exit(1)）。
+                # 任何未预期异常（含非 AbyssCoreError）都不能让 _process_tasks
+                # 后台任务静默死亡——否则 station 处理循环永久停摆，truck 与
+                # PFCA 全部失声且看似"正常"（致命静默，见本轮修复）。
+                logger.critical(
+                    f"station._process_tasks 处理 {truck_id} 时发生致命错误，强制退出进程: "
+                    f"{e}\n{traceback.format_exc()}"
+                )
+                for h in getattr(logger, 'handlers', []):
+                    try:
+                        h.flush()
+                    except Exception:
+                        pass
+                os._exit(1)
             finally:
                 # === 收尾: 恢复 truck 运行（无论是否异常都要 resume，避免永久 paused）===
                 # 触发 truck 在 remind_station() 中已经 self.pause() 了自己，
@@ -156,6 +219,9 @@ class AttentionStation:
                     if t.state == "paused":
                         t.start()
                         logger.info(f"已恢复{t.truck_id}运行（处理{truck_id}期间被暂停）")
+
+            # 链上下文收尾：恢复到无链状态，防止残留影响后续逻辑
+            reset_chain_context(chain_token)
 
             # 标记任务为已完成
             self.task_queue.task_done()
@@ -221,6 +287,12 @@ class AttentionStation:
                     self.scheduled_proactive_truck.start()
                 else:
                     logger.info("scheduled_proactive_truck 已禁用，不启动线程")
+            if self.reflection_truck is None:
+                self.reflection_truck = ReflectionTruck()
+                if is_truck_enabled('reflection_truck'):
+                    self.reflection_truck.start()
+                else:
+                    logger.info("reflection_truck 已禁用，不启动线程")
             
             # 启动任务处理主任务
             self._process_task = asyncio.create_task(self._process_tasks())
@@ -250,6 +322,8 @@ class AttentionStation:
             self.special_attention_truck.stop()
         if self.scheduled_proactive_truck:
             self.scheduled_proactive_truck.stop()
+        if self.reflection_truck:
+            self.reflection_truck.stop()
 
     def get_queue_size(self) -> int:
         """获取当前任务队列大小
@@ -266,6 +340,7 @@ class AttentionStation:
             'ongoing_truck': self.ongoing_truck,
             'special_attention_truck': self.special_attention_truck,
             'scheduled_proactive_truck': self.scheduled_proactive_truck,
+            'reflection_truck': self.reflection_truck,
         }
         return mapping.get(truck_id)
 

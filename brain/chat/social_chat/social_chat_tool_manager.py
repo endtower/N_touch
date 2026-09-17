@@ -1,11 +1,23 @@
 # -*- coding: utf-8 -*-
-"""social_chat 工具集：send_to_master / query_history / send_preset_to_target / construct_preset_message / transfer_back_to_social_agent + 继承工具。
+"""social_chat 工具集：send_to_master / query_history / send_to_target / send_image_to_target / set_send_mode / transfer_back + 通用工具（common_ways）。
 
 设计要点：
-- LLM 看不到 L3 / L2 的拦截层；拦截以"工具返回值"的形式对 LLM 暴露。
-- L3：send_preset_to_target 每次发审批请求给主人并监听『同意』才放行；construct_preset_message 不拦截。
-- L2：send_preset_to_target 仅首次发审批请求给主人并监听『同意』，本次会话后续自动放行；construct_preset_message 不拦截。
-- L1：均不拦截。
+- 发送工具收口：文字与图片拆分——send_to_master / send_to_target 只发纯文字
+  （message 换行自动拆成多条独立消息，委托 ToolConversation 统一执行）；
+  图片走 send_image_to_target（图先发，配文随后单独一条）。
+- 两种发送模式（chat_config.SOCIAL_CHAT_SEND_MODE 为初始值）：
+    approval     每次 send_to_target 先向主人发审批请求，主人首条非空回复 == 『同意』才放行；
+                 其他任何回复立即拒绝；15 秒无回复超时拒绝。拒绝 / 超时不终止本次 run。
+    unrestricted 直接发送；发送后按 SOCIAL_CHAT_UNRESTRICTED_NOTIFY 决定是否知会主人。
+- 模式切换走 set_send_mode：升级到 unrestricted 必须经主人『同意』审批（工具层硬拦截）；
+  降回 approval 立即生效。
+- 审批轮询基于消息库 seq 游标（consumer="social_chat_approval"），纯单调序号判定，
+  不涉及时钟，根治"检测到主人上一条消息"的时序错位 bug。
+- LLM 看不到拦截层内部；拦截以"工具返回值"的形式对 LLM 暴露。
+- 情感遭遇拆分登记（对齐 conversation 机制）：self_action 类随发送工具的 nature
+  参数自动登记（send_to_master → master 线 / send_to_target、send_image_to_target → working 线）；
+  evaluation 类随 transfer_back 的 encounter_type 登记（working 线）；
+  emotional_judgment 显式工具仅收 external（他人刺激）类 act。
 """
 
 import json
@@ -16,36 +28,29 @@ from typing import Dict, Any, List, Optional
 
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
-from brain.base import ToolManager
+from brain.base import ToolManager, ToolHandlers, ToolConversation, ToolHC
+from adapt.message_segments import text_segment
 from config.settings import chat_config
 from brain.amy.constants import ExternalInteractionAct, EvaluationAct, SelfActionAct
 
-# act 表 ↔ 工具 一一对应（对齐 conversation_tool_manager 的语义）：
-#   emotional_judgment.act  → ExternalInteractionAct（他人行为直接刺激，评价类）
-#                             + EvaluationAct（他人对我能力/表现评价）
-#                             + SelfActionAct（我主动选择做什么）
-#
-# social_chat 特殊性：同时挂两条会话线（master / working）。
-# 来源（session_type）参数必须由 LLM 显式标注，描述本条情感判断发生在哪条线上：
-#   - 'master'  = 主人会话（与主人沟通引发的情感）
-#   - 'working' = 工作会话（与社交对象的互动 / 通过预设条目发出的发言引发的情感）
-#
-# 对比 conversation：conversation 单会话，session 上下文从
-# global_session_state["conversation_session"] 取；social_chat 双会话，
-# session 上下文从 social_chat_core.master_session_id / working_session_id 取，
-# 按 session_type 路由。
-
 logger = get_logger('SocialChatToolManager', "INFO")
 
-# 系统硬编码的限制等级（统一从 chat_config 读取，详见 config.settings.ChatConfig.SOCIAL_CHAT_ENFORCEMENT_LEVEL）
-DEFAULT_ENFORCEMENT_LEVEL = chat_config.SOCIAL_CHAT_ENFORCEMENT_LEVEL
+# 审批轮询专用消费者游标（消息库 cursors 表，per session_id 隔离）
+APPROVAL_CONSUMER_ID = "social_chat_approval"
+# 初始发送模式（统一从 chat_config 读取，run 内可经 set_send_mode 切换）
+DEFAULT_SEND_MODE = chat_config.SOCIAL_CHAT_SEND_MODE
+VALID_SEND_MODES = ("approval", "unrestricted")
+
+# 审批参数
+APPROVAL_TIMEOUT_S = 15.0
+APPROVAL_POLL_INTERVAL_S = 1.5
 
 
 class SocialChatToolManager(ToolManager):
     """social_chat 工具管理器。
 
     使用流程：
-        mgr = SocialChatToolManager(core=social_chat_core, preset_messages=[...], enforcement_level='L3')
+        mgr = SocialChatToolManager(social_chat_core=core)
         mgr.get_tools() -> List[Dict]
         result = await mgr.handle_tool_call(tool_call)
     """
@@ -53,55 +58,60 @@ class SocialChatToolManager(ToolManager):
     def __init__(
         self,
         social_chat_core,
-        preset_messages: List[dict],
-        enforcement_level: str = DEFAULT_ENFORCEMENT_LEVEL,
+        send_mode: str = DEFAULT_SEND_MODE,
     ):
         """构造工具集。
 
-        注：master_session_id / working_session_id 均不再作为入参——
+        注：master_session_id / working_session_id 均不作为入参——
         通过 self.social_chat_core.master_session_id / working_session_id 读取
         （master 派生自 RoleConfig.MASTER_ID；working 由 social_chat_core.start() 注入）。
+
+        Args:
+            send_mode: 初始发送模式，取值见 VALID_SEND_MODES。
+                模式来源是 config（SOCIAL_CHAT_SEND_MODE），绝不接受 LLM 指定。
         """
         self.social_chat_core = social_chat_core
-        self.enforcement_level = (enforcement_level or DEFAULT_ENFORCEMENT_LEVEL).upper()
+        mode = (send_mode or DEFAULT_SEND_MODE).strip().lower()
+        if mode not in VALID_SEND_MODES:
+            raise ValueError(
+                f"send_mode 非法: {send_mode!r}（仅支持 {VALID_SEND_MODES}）"
+            )
+        self.send_mode: str = mode
 
-        # 预设条目池（可能被 construct_preset_message 扩充）
-        self._preset_messages: List[dict] = list(preset_messages)
-        self._sent_indices: set = set()
-        # L2 会话级"已批准"标志：首次 send_preset_to_target 走审批后置 True，
-        # 后续所有 send_preset_to_target 自动放行。
-        self._l2_session_approved: bool = False
+        # 本次 run 实际发出的消息记录（core._build_result 汇总用）
+        self._messages_sent: List[Dict[str, Any]] = []
 
-        # 复用 conversation 的工具集（继承工具直接代理，不重写）
-        # 注：ConversationToolManager.__init__ 只接受 conversation_core 参数；
-        # 这里使用 conversation_core 单例构造，但仅在继承工具被调用时才会触达其内部。
-        from brain.chat.conversation.conversation_core import get_conversation_core
-        from brain.chat.conversation.conversation_tool_manager import ConversationToolManager
-        self._conv_tools = ConversationToolManager(get_conversation_core())
-
+        # 通用工具（common_ways）：social_chat 与 conversation 平级，
+        # 通用能力（vision / stickers / 经验 / wait）直接走 brain/base/common_ways，
+        # 不再实例化 ConversationToolManager 做代理。
         # 工具函数表
         self.tool_functions = {
             "send_to_master": self.send_to_master,
             "query_history": self.query_history,
-            "send_preset_to_target": self.send_preset_to_target,
-            "construct_preset_message": self.construct_preset_message,
-            "transfer_back_to_social_agent": self.transfer_back_to_social_agent,
+            "send_to_target": self.send_to_target,
+            "send_image_to_target": self.send_image_to_target,
+            "set_send_mode": self.set_send_mode,
+            "transfer_back": self.transfer_back,
             "wait_and_observe": self.wait_and_observe,  # 包装：固定传 master_session_id
-            "call_vision_agent": self._conv_tools.call_vision_agent,
-            "list_stickers": self._conv_tools.list_stickers,
-            "experience_agent": self._conv_tools.experience_agent,
+            "call_vision_agent": self.call_vision_agent,
+            "list_stickers": self.list_stickers,
+            "experience_agent": self.experience_agent,
             "emotional_judgment": self.emotional_judgment,
+            "record_to_notepad": self.record_to_notepad,
+            "query_note": self.query_note,
         }
         logger.info(
-            f"SocialChatToolManager 已初始化: level={self.enforcement_level}, "
-            f"master={self.social_chat_core.master_session_id}, working={self.social_chat_core.working_session_id}, "
-            f"preset_count={len(self._preset_messages)}"
+            f"SocialChatToolManager 已初始化: send_mode={self.send_mode}, "
+            f"master={self.social_chat_core.master_session_id}, "
+            f"working={self.social_chat_core.working_session_id}"
         )
 
-    async def wait_and_observe(self, seconds: float) -> Dict[str, Any]:
-        """social_chat 等待并监听 working_session_id 对应会话的新消息。
+    async def wait_and_observe(self, seconds: float) -> str:
+        """social_chat 等待并监听会话新消息（先观察，后等待）。
 
-        实现对齐 conversation_tool_manager.wait_and_observe：
+        实现对齐 conversation_tool_manager.wait_and_observe，差异点：
+            - 先观察：调用即检测一次两条会话线——用户消息可能在本工具调用前
+              就已到达（如上一轮 LLM 生成回复期间），命中则立即返回，不空等；
             - 会话 ID 从 social_chat_core.working_session_id 取（single source of truth）；
             - 监听检测走 social_chat_input_manager.has_new_messages（消费式 unread 队列语义）；
             - 在 social_chat_agent_with_master 路径下 working_session_id == master_session_id，
@@ -110,10 +120,6 @@ class SocialChatToolManager(ToolManager):
         Args:
             seconds: 最长等待秒数（默认工具 schema 限制 10-30）。
         """
-        import asyncio
-        import time
-        from datetime import datetime as _dt
-
         working_id = self.social_chat_core.working_session_id
         if not working_id:
             raise RuntimeError(
@@ -121,56 +127,119 @@ class SocialChatToolManager(ToolManager):
                 "请确认 social_chat_core.start() 已正确注入 working_session_id。"
             )
         master_id = self.social_chat_core.master_session_id
-        # 会话文案：with_master 路径下 working_id == master_id，渲染成"主人会话"；
-        # 其他路径渲染成"工作会话"。
-        session_label = "主人会话" if working_id == master_id else "工作会话"
 
         from brain.chat.social_chat.social_chat_input_manager import get_social_chat_input_manager
         input_manager = get_social_chat_input_manager()
 
+        async def _probe_hit_line() -> Optional[str]:
+            """同时检测 master 与 working 两条会话线，返回命中线的文案；未命中返回 None。
+
+            with_master 路径下 working_id == master_id，只检测一次（避免重复探测）。
+            """
+            master_check = await input_manager.has_new_messages(session_id=master_id)
+            if master_check.get("has_new"):
+                return "主人会话"
+            if working_id != master_id:
+                working_check = await input_manager.has_new_messages(session_id=working_id)
+                if working_check.get("has_new"):
+                    return "工作会话"
+            return None
+
+        # 先观察：进入即检测一次，命中说明用户消息在调用前已到达，立即反馈不空等
+        hit_line = await _probe_hit_line()
+        if hit_line:
+            current_time = datetime.now().strftime("%H:%M:%S")
+            result_str = f"检测到{hit_line}新消息，无需等待，当前时间：{current_time}"
+            logger.info(f"social_chat wait_and_observe 先观察命中({hit_line}): {result_str}")
+            return result_str
+
+        # 后等待：逐秒轮询，任一线命中即中断
         start_time = time.time()
         elapsed = 0
 
         while elapsed < seconds:
             await asyncio.sleep(min(1.0, seconds - elapsed))
             elapsed = time.time() - start_time
-            # 同时检测 working_id 与 master_id；任一命中即中断，并显示命中的会话线。
-            # with_master 路径下 working_id == master_id，会命中两次，但只在 first hit 触发。
-            master_check = await input_manager.has_new_messages(session_id=master_id)
-            if master_check.get("has_new"):
-                current_time = _dt.now().strftime("%H:%M:%S")
+            hit_line = await _probe_hit_line()
+            if hit_line:
+                current_time = datetime.now().strftime("%H:%M:%S")
                 result_str = (
-                    f"检测到主人会话新消息，中断等待，"
+                    f"检测到{hit_line}新消息，中断等待，"
                     f"总共等待 {int(elapsed)} 秒，当前时间：{current_time}"
                 )
-                logger.info(f"social_chat wait_and_observe 命中(master): {result_str}")
+                logger.info(f"social_chat wait_and_observe 等待命中({hit_line}): {result_str}")
                 return result_str
-            if working_id != master_id:
-                working_check = await input_manager.has_new_messages(session_id=working_id)
-                if working_check.get("has_new"):
-                    current_time = _dt.now().strftime("%H:%M:%S")
-                    result_str = (
-                        f"检测到工作会话新消息，中断等待，"
-                        f"总共等待 {int(elapsed)} 秒，当前时间：{current_time}"
-                    )
-                    logger.info(f"social_chat wait_and_observe 命中(working): {result_str}")
-                    return result_str
 
-        current_time = _dt.now().strftime("%H:%M:%S")
+        current_time = datetime.now().strftime("%H:%M:%S")
         result_str = f"等待观察完成，总共等待 {int(elapsed)} 秒，当前时间：{current_time}"
         logger.info(result_str)
         return result_str
 
     # ============================================================
+    # 通用工具（common_ways）：与 conversation 平级，直接委托共享实现
+    # ============================================================
+
+    async def call_vision_agent(self, image_filename: str, context_hint: str = None) -> str:
+        """识图工具（委托通用 ToolVision.call_vision_agent，返回其 content 文案）。"""
+        from brain.base import ToolVision
+        result = await ToolVision.call_vision_agent(image_filename, context_hint)
+        return result.get("content") or "vision agent 未返回任何信息。"
+
+    async def list_stickers(self, keyword: str = "") -> str:
+        """查询已保存的表情包库（委托通用 ToolVision.list_stickers）。"""
+        from brain.base import ToolVision
+        return await ToolVision.list_stickers(keyword=keyword)
+
+    async def experience_agent(self, scenario: str) -> str:
+        """经验 agent（social_chat 自有包装，与 conversation 平级）。
+
+        检索核心走 common_ways.search_speech_bequests；本模块差异点：
+        - 激活缓存与 social_chat_input_manager 的首条经验激活共用同一份
+          （get_social_chat_input_manager()._activated_bequests），保证 run 内不重复注入；
+        - 不附带情感遭遇副作用（检索类操作不做遭遇登记，避免脏数据污染情绪评估）。
+        """
+        from brain.base.common_ways.bequest_helpers import search_speech_bequests
+        from brain.chat.social_chat.social_chat_input_manager import get_social_chat_input_manager
+
+        activated = get_social_chat_input_manager()._activated_bequests
+        matched = await search_speech_bequests(
+            scenario, skip=lambda bequest_id: bequest_id in activated, top_k=5,
+        )
+        for entry in matched:
+            activated.add(entry["id"])
+
+        if not matched:
+            return "你什么计策都没想起来。"
+
+        return "\n".join(f"{entry['title']} - {entry['summary']}" for entry in matched)
+
+    async def record_to_notepad(self, text: str, usage: str) -> str:
+        """记事本（灵光一现）写入：与 conversation 共用 ToolHC.record_note。
+
+        仅收纯文本与应对场景标注；元数据由系统侧自动附加（来源 social_chat，
+        会话取工作会话——素材产生地），记录进当前事件链的缓存文档，
+        PFCA 真正结束时统一以事件标题命名落库。
+        """
+        note_id = await ToolHC.record_note(
+            text=text,
+            source="social_chat",
+            session_id=self.social_chat_core.working_session_id,
+            session_name="",
+            usage=usage,
+        )
+        return f"已记录至记事本（{note_id}）。"
+
+    async def query_note(self, title: str) -> str:
+        """查询记事本某一章节的完整内容（标题来自首条输入的记事本手册）。
+
+        委托通用 ToolHC.query_note（起因/总结/自我评价/逐条记录及元数据）。
+        """
+        return await ToolHC.query_note(title)
+
+    # ============================================================
     # 工具 schema
     # ============================================================
     def get_tools(self) -> List[Dict[str, Any]]:
-        level = self.enforcement_level
-        target_segment_desc = (
-            "单 key 段（text 或 img），key 即段类型。"
-            "text: 文字内容；img: 图片文件名（不含路径），必须与消息中 [图片:xxx] 的 xxx 一致。"
-        )
-
         tools: List[Dict[str, Any]] = []
 
         # 1. send_to_master - 永远存在，路由固定到主人
@@ -180,28 +249,25 @@ class SocialChatToolManager(ToolManager):
                 "name": "send_to_master",
                 "description": (
                     "向主人私聊会话发送消息，用于与主人沟通、提议、反馈、询问等。"
+                    "想连发多条短句就在 message 里用换行分隔，一次调用会拆成多条独立消息逐条发出。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "segments": {
-                            "type": "array",
-                            "maxItems": 9,
-                            "description": "消息段数组，按顺序拼接显示。最多 9 段。",
-                            "items": {
-                                "type": "object",
-                                "description": target_segment_desc,
-                                "properties": {
-                                    "text": {"type": "string"},
-                                    "img":  {"type": "string"},
-                                },
-                                "additionalProperties": False,
-                                "minProperties": 1,
-                                "maxProperties": 1,
-                            },
+                        "message": {
+                            "type": "string",
+                            "description": "要发送的文字内容。用换行分隔多条短句。禁止为空。",
+                        },
+                        "nature": {
+                            "type": "string",
+                            "description": (
+                                "本条发言的性质（自行为类情感标签，可选）。从下列列表选择：\n"
+                                + '、'.join(SelfActionAct.names())
+                            ),
+                            "enum": SelfActionAct.names(),
                         }
                     },
-                    "required": ["segments"],
+                    "required": ["message"],
                 },
             },
         })
@@ -228,79 +294,114 @@ class SocialChatToolManager(ToolManager):
             },
         })
 
-        # 3. send_preset_to_target - L3 拦截；L2 / L1 不拦截
+        # 3. send_to_target - 对外发送核心工具（纯文字）；approval 模式下工具层硬审批
         tools.append({
             "type": "function",
             "function": {
-                "name": "send_preset_to_target",
+                "name": "send_to_target",
                 "description": (
-                    "从预设条目池中按 item_index 选取一条发送到工作会话。"
-                    "item_index 是 1-based 下标（首条 user 消息中的【预设条目池】列出）。"
-                    "已发送过的下标或超出范围的下标都会抛错。"
+                    "向工作会话发送文字消息（你要对其他人说的话）。"
+                    "想连发多条短句就在 message 里用换行分隔，一次调用会拆成多条独立消息逐条发出。"
+                    "审批模式下，系统会先把消息全文发给主人审批，主人回复『同意』后才真正发出；"
+                    "主人回复其他任何内容或超时都会拒绝本次发送。自由模式下直接发出。"
+                    "发图片用 send_image_to_target。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "item_index": {
-                            "type": "integer",
-                            "description": "1-based 下标，对应首条 user 消息中的【预设条目池】。",
+                        "message": {
+                            "type": "string",
+                            "description": "要发送的文字内容。用换行分隔多条短句。禁止为空。",
+                        },
+                        "nature": {
+                            "type": "string",
+                            "description": (
+                                "本条发言的性质（自行为类情感标签，可选）。从下列列表选择：\n"
+                                + '、'.join(SelfActionAct.names())
+                            ),
+                            "enum": SelfActionAct.names(),
                         }
                     },
-                    "required": ["item_index"],
+                    "required": ["message"],
                 },
             },
         })
 
-        # 4. construct_preset_message - 永远存在；L3 / L2 拦截；L1 自由
+        # 3.1 send_image_to_target - 对外发送图片，与文字发送分离
         tools.append({
             "type": "function",
             "function": {
-                "name": "construct_preset_message",
+                "name": "send_image_to_target",
+                "description": "向工作会话发送图片。审批模式下同样先经主人审批。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image": {
+                            "type": "string",
+                            "description": (
+                                "图片文件名（不含路径），必须与消息文本中 [图片:xxx] 的 xxx 一致。"
+                            ),
+                        },
+                        "nature": {
+                            "type": "string",
+                            "description": (
+                                "本条发送的性质（自行为类情感标签，可选）。从下列列表选择：\n"
+                                + '、'.join(SelfActionAct.names())
+                            ),
+                            "enum": SelfActionAct.names(),
+                        }
+                    },
+                    "required": ["image"],
+                },
+            },
+        })
+
+        # 4. set_send_mode - 发送模式切换（升级需主人『同意』）
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "set_send_mode",
                 "description": (
-                    "在对话过程中临时构造一条新的预设消息，以加入待发送序列。"
+                    "切换发送模式。"
+                    "切换到 unrestricted（自由发送，不再逐条审批）必须先征得主人同意："
+                    "系统会向主人发起审批，主人回复『同意』才生效，其他回复或超时视为拒绝。"
+                    "切换回 approval 立即生效，无需审批。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "segments": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": 1,
-                            "description": "单段（text 或 img）的新条目。",
-                            "items": {
-                                "type": "object",
-                                "description": target_segment_desc,
-                                "properties": {
-                                    "text": {"type": "string"},
-                                    "img":  {"type": "string"},
-                                },
-                                "additionalProperties": False,
-                                "minProperties": 1,
-                                "maxProperties": 1,
-                            },
-                        },
-                        "rationale": {
+                        "mode": {
                             "type": "string",
-                            "description": "构造本条新条目的理由（用于给主人审阅）。",
-                        },
+                            "enum": list(VALID_SEND_MODES),
+                            "description": "目标模式：approval=逐条审批；unrestricted=自由发送。",
+                        }
                     },
-                    "required": ["segments", "rationale"],
+                    "required": ["mode"],
                 },
             },
         })
 
-        # 5. transfer_back_to_social_agent - 永远存在
+        # 5. transfer_back - 永远存在
         tools.append({
             "type": "function",
             "function": {
-                "name": "transfer_back_to_social_agent",
-                "description": "结束本次委托，把控制权交还给 social_agent。",
+                "name": "transfer_back",
+                "description": "结束本次委托，把控制权交还给 PFCA。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "summary": {
                             "type": "string",
                             "description": "汇报给pfca agent的信息。不要带markdown格式。",
+                        },
+                        "encounter_type": {
+                            "type": "string",
+                            "description": (
+                                "本次任务中他人对我能力/表现的评价类型"
+                                "（评价类情感标签，可选）。从下列列表选择：\n"
+                                + '、'.join(EvaluationAct.names())
+                            ),
+                            "enum": EvaluationAct.names(),
                         }
                     },
                     "required": ["summary"],
@@ -308,58 +409,12 @@ class SocialChatToolManager(ToolManager):
             },
         })
 
-        # 6. 继承 conversation 的工具（与 conversation_tool_manager schema 对齐）
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "wait_and_observe",
-                "description": (
-                    "等待一段时间，等待新消息。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "seconds": {
-                            "type": "number",
-                            "minimum": 10.0,
-                            "maximum": 30.0,
-                        }
-                    },
-                    "required": ["seconds"],
-                },
-            },
-        })
+        # 6. 通用工具（common_ways 共享 schema，与 conversation 平级）
+        tools.append(ToolHandlers.get_wait_and_observe_tool_schema())
 
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "call_vision_agent",
-                "description": "图像识别 / 表情包管理 agent（复用 conversation 的 call_vision_agent）。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "image_filename": {"type": "string"},
-                        "context_hint": {"type": "string"},
-                    },
-                    "required": ["image_filename"],
-                },
-            },
-        })
-
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "list_stickers",
-                "description": "查询已保存的表情包库（复用 conversation 的 list_stickers）。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "keyword": {"type": "string"},
-                    },
-                    "required": [],
-                },
-            },
-        })
+        from brain.base import ToolVision
+        tools.append(ToolVision.get_call_vision_agent_tool_schema())
+        tools.append(ToolVision.get_list_stickers_tool_schema())
 
         tools.append({
             "type": "function",
@@ -401,25 +456,23 @@ class SocialChatToolManager(ToolManager):
                         "act": {
                             "type": "string",
                             "description": (
-                                "遭遇/行为类型，必须从下列三类合并列表中选择之一：\n"
-                                "【external / 他人行为直接刺激】"
-                                + '、'.join(ExternalInteractionAct.names()) + "\n"
-                                "【evaluation / 他人对我能力/表现评价】"
-                                + '、'.join(EvaluationAct.names()) + "\n"
-                                "【self_action / 我主动选择的行为】"
-                                + '、'.join(SelfActionAct.names())
+                                "遭遇/行为类型，仅收他人行为直接刺激类"
+                                "（自行为随发送工具的 nature、他人评价随 transfer_back 的"
+                                "encounter_type 自动登记，无需在此调用）。从下列列表选择：\n"
+                                + '、'.join(ExternalInteractionAct.names())
                             ),
-                            "enum": (
-                                ExternalInteractionAct.names()
-                                + EvaluationAct.names()
-                                + SelfActionAct.names()
-                            ),
+                            "enum": ExternalInteractionAct.names(),
                         },
                     },
                     "required": ["session_type", "act"],
                 },
             },
         })
+
+        # 7. 记事本（灵光一现，shortlight）：schema 与 conversation 共用（ToolHC 统一管理）；
+        #    登记元数据由 record_to_notepad 委托注入（source=social_chat，会话取工作会话）
+        tools.append(ToolHC.get_conversation_record_note_tool_schema())
+        tools.append(ToolHC.get_query_note_tool_schema())
 
         return tools
 
@@ -470,353 +523,237 @@ class SocialChatToolManager(ToolManager):
     # ============================================================
     # 工具实现
     # ============================================================
-    async def send_to_master(self, segments: list) -> str:
-        """复用 conversation 的 send_message 底层，固定路由到主人会话。"""
-        from adapt import OutboundTarget, OutboundPayload, SessionScope
-        from adapt.router import get_outbound_router
-        from adapt.message_segments import text_segment, image_segment
-        from brain.attachments import resolve_media_file, preflight
+    async def send_to_master(self, message: str, nature: str = None) -> str:
+        """固定路由到主人会话（委托 ToolConversation.send_message，message 换行自动分条）。
+
+        nature: 本条发言的性质（SelfActionAct 自行为类，可选）——发送成功后自动
+            登记一次自行为情感判断（master 线）。内部调用（审批请求 / 知会）不传。
+        """
+        nature = (nature or "").strip() or None
+        if nature and nature not in SelfActionAct.names():
+            raise ValueError(
+                f"send_to_master nature 未注册: {nature!r}（必须从 SelfActionAct 中选择）"
+            )
+
+        # master_session_id 由 RoleConfig.MASTER_ID 派生，永远是 private_
         from brain.chat.social_chat.social_chat_session import SocialChatSession
-
-        if not segments:
-            raise ValueError("segments 不能为空")
-
-        # 解析为 segments
-        out_segments = []
-        for seg in segments or []:
-            if not isinstance(seg, dict):
-                continue
-            if "text" in seg:
-                txt = str(seg.get("text") or "")
-                if txt:
-                    out_segments.append(text_segment(txt))
-            elif "img" in seg:
-                filename = str(seg.get("img") or "").strip()
-                if not filename:
-                    continue
-                try:
-                    real_path = resolve_media_file(filename)
-                except (ValueError, FileNotFoundError, PermissionError) as e:
-                    return f"发送失败：图片 {filename} 错误：{e}"
-                check = preflight(real_path)
-                if not check["ok"]:
-                    return f"发送失败：{check['reason']}"
-                out_segments.append(image_segment(file=check["path"]))
-
-        if not out_segments:
-            raise ValueError("没有任何有效段")
-
-        # 解析路由（master_session_id 由 RoleConfig.MASTER_ID 派生，永远是 private_）
         msid = self.social_chat_core.master_session_id or ""
-        if msid.startswith("group_"):
-            scope, target_id = SessionScope.GROUP, msid.split("_", 1)[1]
-        elif msid.startswith("private_"):
-            scope, target_id = SessionScope.PRIVATE, msid.split("_", 1)[1]
-        else:
-            scope, target_id = SessionScope.PRIVATE, msid
+        await ToolConversation.send_message(
+            session_id=msid,
+            message=message,
+            typing_delay_per_char=SocialChatSession.TYPING_DELAY_PER_CHAR,
+        )
 
-        router = await get_outbound_router()
-
-        sent_count = 0
-        INTER_SEGMENT_GAP = 1.5
-
-        for idx, seg in enumerate(out_segments):
-            if seg.type == "text":
-                per_seg_typing = len(seg.to_text()) * SocialChatSession.TYPING_DELAY_PER_CHAR
-            elif seg.type == "image":
-                per_seg_typing = 1.0
-            else:
-                per_seg_typing = 0.0
-            per_seg_typing = min(per_seg_typing, 7.0)
-            if per_seg_typing > 0:
-                await asyncio.sleep(per_seg_typing)
-
+        # 发言性质登记（整批作为一个发言动作登记一次；发送已成功，登记失败仅告警）
+        if nature:
             try:
-                await router.send(
-                    platform="qq",
-                    target=OutboundTarget(scope=scope, target_id=target_id),
-                    payload=OutboundPayload(segments=[seg]),
-                )
+                await self.emotional_judgment(session_type="master", act=nature)
             except Exception as e:
-                logger.error(f"send_to_master 段 {idx+1} 路由失败: {e}")
-                continue
+                logger.warning(f"send_to_master 性质登记情感判断失败（不影响主流程）: {e}")
 
-            sent_count += 1
-            if idx < len(out_segments) - 1:
-                await asyncio.sleep(INTER_SEGMENT_GAP)
-
-        if sent_count == 0:
-            return "发送失败：所有段均未发出"
         return f"已发送给主人，当前时间 {datetime.now().strftime('%H:%M:%S')}"
 
     async def query_history(self, search_range: str) -> str:
-        """复用 conversation 的 query_history 行为，路由固定到工作会话。"""
-        from brain.pfc.pfca.pfca_tools import get_pfca_tool_manager
-        return await get_pfca_tool_manager().query_history(
+        """查工作会话最近的消息（委托通用 ToolSocial.query_history，路由固定到工作会话）。
+
+        consumer_id 传 CONVERSATION_CONSUMER_ID：social_chat 与 conversation 共用游标，
+        LLM 已读到的消息 conversation 不会重复拉取（读最近 N 条 + 格式化原语
+        由 ToolSocial 统一收口，不再越层依赖 PFCA 工具管理器单例）。
+        """
+        from brain.base import ToolSocial, CONVERSATION_CONSUMER_ID
+        return await ToolSocial.query_history(
             session_id=self.social_chat_core.working_session_id,
             search_range=search_range,
+            consumer_id=CONVERSATION_CONSUMER_ID,
         )
 
-    async def send_preset_to_target(self, item_index: int) -> Dict[str, Any]:
-        """从预设池发条目到工作会话。
+    async def send_to_target(self, message: str, nature: str = None) -> Dict[str, Any]:
+        """向工作会话发送文字消息（委托 ToolConversation.send_message，换行自动分条）。
 
-        L3：先发审批请求给主人，等主人回复『同意』才真正发送（每次都需审批）。
-        L2：本次会话内首次发送需主人回复『同意』，之后所有发送自动放行。
-        L1：不拦截，直接发送。
+        approval 模式：先发审批请求给主人，主人首条非空回复 ==『同意』才放行；
+        其他回复立即拒绝；15 秒无回复超时拒绝。拒绝 / 超时不真正发送，返回结果给 LLM。
+        unrestricted 模式：直接发送；按 SOCIAL_CHAT_UNRESTRICTED_NOTIFY 知会主人。
+
+        nature: 本条发言的性质（SelfActionAct 自行为类，可选）——实际发出后自动
+            登记一次自行为情感判断（working 线）；被拒 / 超时不登记。
         """
-        if not isinstance(item_index, int):
-            raise ValueError("item_index 必须是整数")
-        if item_index < 1 or item_index > len(self._preset_messages):
-            raise ValueError(f"item_index 越界：1..{len(self._preset_messages)}")
-        if item_index in self._sent_indices:
-            raise ValueError(f"条目 {item_index} 已被发送过")
+        if not (message or "").strip():
+            raise ValueError("message 为空，禁止发送空消息")
 
-        seg = self._preset_messages[item_index - 1]
-        seg_text = (seg or {}).get("text") or f"[图片:{(seg or {}).get('img', '')}]"
-
-        if self.enforcement_level == "L3":
-            # L3：每次发送都需主人首条回复含『同意』才放行。
-            approval = await self._request_master_approval(
-                item_index=item_index,
-                seg_text=seg_text,
-                already_approved_message=None,
+        nature = (nature or "").strip() or None
+        if nature and nature not in SelfActionAct.names():
+            raise ValueError(
+                f"send_to_target nature 未注册: {nature!r}（必须从 SelfActionAct 中选择）"
             )
-            if approval != "approved":
-                # 被拒 / 超时 → 不发送，返回结果给 LLM 决定下一步
-                logger.warning(
-                    f"social_chat L3 审批未通过（条目 {item_index}，"
-                    f"approval={approval}），取消发送"
-                )
-                return {
-                    "status": "rejected",
-                    "item_index": item_index,
-                    "approval": approval,
-                    "reason": (
-                        "主人首条回复不含『同意』，视为拒绝"
-                        if approval == "rejected"
-                        else "主人 15 秒内未回复，审批超时"
-                    ),
-                }
-        elif self.enforcement_level == "L2":
-            # L2：本次会话内仅首次需要主人回复『同意』；之后所有发送自动放行。
-            if not getattr(self, "_l2_session_approved", False):
-                approval = await self._request_master_approval(
-                    item_index=item_index,
-                    seg_text=seg_text,
-                    already_approved_message=None,
-                )
-                if approval != "approved":
-                    logger.warning(
-                        f"social_chat L2 审批未通过（条目 {item_index}，"
-                        f"approval={approval}），取消发送"
-                    )
-                    return {
-                        "status": "rejected",
-                        "item_index": item_index,
-                        "approval": approval,
-                        "reason": (
-                            "主人首条回复不含『同意』，视为拒绝"
-                            if approval == "rejected"
-                            else "主人 15 秒内未回复，审批超时"
-                        ),
-                    }
-                self._l2_session_approved = True
-                logger.info("social_chat L2 等级：主人已批准，本次会话后续 send_preset_to_target 自动放行")
 
-        # 真正发送
-        message_id = await self._route_preset_segment(seg)
-        self._sent_indices.add(item_index)
-        logger.info(f"social_chat 已发送预设条目 {item_index}, message_id={message_id}")
-        return {
-            "status": "ok",
-            "message_id": message_id,
-            "item_index": item_index,
-            "sent_at": time.time(),
-        }
+        preview = message
+        rejected = await self._approval_gate(preview)
+        if rejected is not None:
+            return rejected
 
-    def _resolve_working_session_name(self) -> str:
-        """解析工作会话的展示名。
+        tsid = self.social_chat_core.working_session_id or ""
+        from brain.chat.social_chat.social_chat_session import SocialChatSession
+        await ToolConversation.send_message(
+            session_id=tsid,
+            message=message,
+            typing_delay_per_char=SocialChatSession.TYPING_DELAY_PER_CHAR,
+        )
+        sent_at = await self._finish_target_send(tsid, preview, nature)
 
-        优先取 global_session_state.pfca_sessions[*] 中匹配 working_session_id 的
-        session_name；找不到则回退到 working_session_id 本身。
+        return {"status": "ok", "sent_at": sent_at}
+
+    async def send_image_to_target(self, image: str, nature: str = None) -> Dict[str, Any]:
+        """向工作会话发送图片，与文字发送分离的专用工具。
+
+        图片解析 + preflight 前置于审批闸门：文件名有问题先失败，不打扰主人。
+        approval 模式下审批预览为 "[图片:文件名]"。
+
+        nature: 同 send_to_target（working 线）。
         """
-        from brain.hc.global_session_state import get_global_session_state
+        filename = (image or "").strip()
+        if not filename:
+            raise ValueError("image 文件名为空")
 
-        working_id = self.social_chat_core.working_session_id
-        try:
-            state = get_global_session_state()
-            for s in state.get_sessions():
-                if s.get("session_id") == working_id:
-                    name = (s.get("session_name") or "").strip()
-                    if name:
-                        return name
-                    break
-        except Exception as e:
-            logger.debug(f"social_chat 解析工作会话名失败: {e}")
+        nature = (nature or "").strip() or None
+        if nature and nature not in SelfActionAct.names():
+            raise ValueError(
+                f"send_image_to_target nature 未注册: {nature!r}（必须从 SelfActionAct 中选择）"
+            )
 
-        return working_id or "工作会话"
+        # 图片解析前置于审批闸门（resolve + preflight，失败 raise ValueError 由 LLM 自纠）
+        image_seg = ToolConversation._build_image_segment(filename)
+        preview = f"[图片:{filename}]"
 
-    async def _request_master_approval(
-        self,
-        item_index: int,
-        seg_text: str,
-        already_approved_message: Optional[str] = None,
-    ) -> str:
-        """向主人发审批请求后**轮询检查**主人会话里最新到达的那一条非空消息。
+        rejected = await self._approval_gate(preview)
+        if rejected is not None:
+            return rejected
 
-        判定规则：
-            - 命中第一条非空 == "同意" → 返回 "approved"；
-            - 命中第一条非空但 != "同意" → 立即返回 "rejected"；
-            - 15 秒内**完全没有任何非空消息** → 返回 "timeout"。
+        tsid = self.social_chat_core.working_session_id or ""
+        scope, target_id = ToolConversation._resolve_target(tsid)
+        from brain.chat.social_chat.social_chat_session import SocialChatSession
+        await ToolConversation.send_segments_with_typing(
+            scope, target_id, [image_seg],
+            typing_delay_per_char=SocialChatSession.TYPING_DELAY_PER_CHAR,
+        )
+        sent_at = await self._finish_target_send(tsid, preview, nature)
 
-        轮询策略：
-            - 每一轮 `since_ts = time.time()`，窗口 = `[now, +∞)`；
-            - 用 `fetch_message_first` 拉 since 之后的第一条非空消息；
-              主人刚发的最新一条就是这一条（若主人尚未回复，窗口内为空 → 进入下一轮）；
-            - 每 1.5 秒查一次，最长 15 秒；
-            - 一旦命中立刻判定，不继续等。
+        return {"status": "ok", "sent_at": sent_at}
 
-        Args:
-            item_index: 当前要发送的条目下标（仅用于日志/提示）。
-            seg_text:  条目渲染文本（用于审批请求内容）。
-            already_approved_message: 若调用方已确认主人事前批准，可传入人类可读的
-                上下文信息写入日志；当前调用点未启用该参数，保留以备后续扩展。
+    # ============================================================
+    # 内部发送 / 审批辅助
+    # ============================================================
+    async def _approval_gate(self, preview: str, request_kind: str = "send") -> Optional[Dict[str, Any]]:
+        """审批闸门：approval 模式下先请求主人审批。
+
+        未通过返回 {"status": "rejected", ...}（直接作为工具返回值透传给 LLM）；
+        通过或非 approval 模式返回 None。
+        """
+        if self.send_mode != "approval":
+            return None
+        verdict = await self._request_master_approval(preview, request_kind=request_kind)
+        if verdict["result"] != "approved":
+            logger.warning(
+                f"social_chat 审批未通过（{verdict['result']}），取消发送: {preview[:40]!r}"
+            )
+            return {
+                "status": "rejected",
+                "approval": verdict["result"],
+                "master_message": verdict.get("content", ""),
+                "reason": verdict["reason"],
+            }
+        return None
+
+    async def _finish_target_send(self, tsid: str, preview: str, nature: str = None) -> float:
+        """发送成功后的统一收尾：发送记录 / 日志 / nature 登记 / unrestricted 知会。
 
         Returns:
-            "approved" / "rejected" / "timeout"。调用方按 L3 拦截语义决定后续动作。
+            sent_at（发送完成时间戳）。
         """
-        working_session_name = self._resolve_working_session_name()
-        approval_prompt = (
-            f"AI 想在{working_session_name}发送消息[{item_index}]：\n"
-            f"「{seg_text}」\n"
-            f"请回复『同意』批准。"
-        )
+        sent_at = time.time()
+        self._messages_sent.append({"session": tsid, "content": preview, "sent_at": sent_at})
+        logger.info(f"social_chat 已发送到工作会话 {tsid}: {preview[:40]!r}")
 
-        # 1) 先取 since_ts 锚点（固化），再发审批请求，然后轮询拉取 since 之后的第一条非空消息。
-        #    锚点固化在发请求"前一刻"，每轮 since_ts 不变；窗口 = [anchor, +∞)，
-        #    第一条非空消息就是主人刚发的最新一条（如果主人尚未回复，则窗口内为空，循环继续）。
-        #    注意：AI 自己 outbound 的审批请求会被 _persist_outbound 以 user_id="system" 写入同一个 session，
-        #    fetch_message_first 必须用 exclude_system 过滤掉，否则会被误判为主人的回复（!= "同意" → 立即 rejected）。
-        from brain.chat.conversation.conversation_input_manager import get_conversation_input_manager
-        input_manager = get_conversation_input_manager()
+        # 发言性质登记（整批作为一个发言动作登记一次；发送已成功，登记失败仅告警）
+        if nature:
+            try:
+                await self.emotional_judgment(session_type="working", act=nature)
+            except Exception as e:
+                logger.warning(f"发送后性质登记情感判断失败（不影响主流程）: {e}")
 
-        # 关键：approval_anchor_ts 必须用 int(time.time()) 而不是 time.time()，
-        # 因为消息入库时（_persist_outbound, message_handler）写的是 int(time.time())，
-        # 而 time.time() 含小数位；当主人恰好在锚点之后的同秒回"同意"时，
-        # 主人消息 timestamp（小数位被截断为整秒）会 < approval_anchor_ts（小数位 > 0），
-        # 触发 fetch 闭区间下界把它踢掉，导致 timeout。
-        # 再减 1s 留出缓冲区，覆盖 NapCat 时钟与本地时钟的微小抖动，
-        # 主人刚发的"同意"即使同秒也能稳定命中 [anchor, +∞) 窗口。
-        approval_anchor_ts = int(time.time()) - 1
-        await self.send_to_master(segments=[{"text": approval_prompt}])
-        await asyncio.sleep(3)  # 给主人反应时间，避免主人还没看到提示就触发轮询
+        # unrestricted 模式知会主人（开关控制；内部直发，不走 LLM 版 send_to_master）
+        if self.send_mode == "unrestricted" and chat_config.SOCIAL_CHAT_UNRESTRICTED_NOTIFY:
+            working_name = self._resolve_working_session_name()
+            await self._send_raw_to_master(f"【知会】已在 {working_name} 发送：\n{preview}")
 
-        # 2) 轮询：每 1.5 秒查一次，最多 15 秒。
-        #    - 命中第一条非空 == "同意" → 通过；
-        #    - 命中第一条非空且 != "同意" → 立即拒绝；
-        #    - 全程没有任何非空消息 → 超时。
-        APPROVAL_TIMEOUT_S = 30.0
-        POLL_INTERVAL_S = 1.5
-        deadline = time.time() + APPROVAL_TIMEOUT_S
+        return sent_at
 
-        first_msg: dict = {}
-        # 收集每一轮命中过的消息：用于超时分支把"窗口内到底看到了谁"全部吐到日志，
-        # 方便定位"以为没收到，其实是 content_text 不等于'同意'被 rejected"之类的诊断。
-        every_hit_msgs: List[Dict[str, Any]] = []
-        polls = 0
-        while True:
-            polls += 1
-            check = await input_manager.fetch_message_first(
-                session_id=self.social_chat_core.master_session_id,
-                since_ts=approval_anchor_ts,
-            )
-            first_msg = check.get("first_message") or {}
-            first_content = (
-                (first_msg.get("content_text") or "").strip()
-                if isinstance(first_msg, dict) else ""
-            )
-            if first_content:
-                # 把命中消息全文细节打出来（含 user_id / timestamp / content / content_text），
-                # 这样无论判定结果如何都能看到第一手数据，便于定位 bug。
-                logger.info(
-                    f"social_chat 审批轮询命中（条目 {item_index}，polls={polls}，"
-                    f"anchor={approval_anchor_ts:.3f}）: "
-                    f"raw_msg={json.dumps(first_msg, ensure_ascii=False)}"
-                )
-                # 命中后也要累积，这样即使下一句 break，超时分支也拿得到（虽然这一帧不会走到超时）
-                every_hit_msgs.append(first_msg)
-                break
-            else:
-                # 空命中：nothing landed in [anchor, +∞) yet
-                logger.debug(
-                    f"social_chat 审批轮询第 {polls} 轮空命中（条目 {item_index}，"
-                    f"anchor={approval_anchor_ts:.3f}，now={time.time():.3f}）"
-                )
-            if time.time() >= deadline:
-                # 超时分支：把窗口内全部 raw 消息（每轮 first_message 累积）打到日志，
-                # 即便窗口始终空，也能从 anchor/nothing 之间的状态推断 bug 根因。
-                every_hit_summary = "[]"
-                try:
-                    every_hit_summary = json.dumps(
-                        every_hit_msgs, ensure_ascii=False, default=str
-                    )
-                except Exception:
-                    pass
-                logger.warning(
-                    f"social_chat 审批超时（条目 {item_index}，anchor={approval_anchor_ts:.3f}，"
-                    f"polls={polls}），窗口内累计命中消息: {every_hit_summary}"
-                )
-                return "timeout"
-            await asyncio.sleep(POLL_INTERVAL_S)
+    async def _send_raw_to_master(self, text: str) -> None:
+        """内部单条直发主人会话（审批请求 / 知会专用）。
 
-        # 仅按 content_text 判定（不带 user_name 前缀），避免 _format_messages 拼的
-        # "主人:同意" 形式被判为非"同意"而误判 rejected。
-        # 主人也可能在回复时前后携带空格 / 换行 / 全角空格，已经在 fetch_message_first 里 strip 过。
-        if first_content == "同意":
-            sender = first_msg.get("user_name", "?")
-            sender_id = first_msg.get("user_id", "?")
-            ts = first_msg.get("timestamp", 0)
-            logger.info(
-                f"social_chat 审批通过（条目 {item_index}）: sender={sender!r}, "
-                f"sender_id={sender_id}, timestamp={ts}, reply='{first_content[:40]}'"
-            )
-            return "approved"
-        sender = first_msg.get("user_name", "?")
-        sender_id = first_msg.get("user_id", "?")
-        ts = first_msg.get("timestamp", 0)
-        logger.warning(
-            f"social_chat 审批被拒（条目 {item_index}，首条 ≠ 同意）: "
-            f"sender={sender!r}, sender_id={sender_id}, timestamp={ts}, "
-            f"reply='{first_content[:40]}'"
-        )
-        return "rejected"
-
-    async def construct_preset_message(self, segments: list, rationale: str) -> Dict[str, Any]:
-        """构造一条新条目并追加到预设池。
-
-        本工具不发起审批：直接追加，保留 rationale 供 social_agent / LLM 后续回溯。
-        send_preset_to_target 仍受 enforcement_level 影响（L3 强制审批）。
+        与 LLM 面向的 send_to_master 的差异：不做换行拆条（多行审批提示必须保持
+        单条完整呈现，避免拆条拉长审批时序）、不登记 nature、不进 _messages_sent。
+        发送失败直接抛错阻断（fail-fast，不吞错）。
         """
-        if not segments:
-            raise ValueError("segments 不能为空")
-        if not rationale or not rationale.strip():
-            raise ValueError("rationale 必填")
+        from brain.chat.social_chat.social_chat_session import SocialChatSession
 
-        new_seg = segments[0]
-        new_index = len(self._preset_messages) + 1
-
-        self._preset_messages.append(new_seg)
-        logger.info(
-            f"social_chat 已新增预设条目 new_index={new_index}, rationale={rationale[:40]}"
+        msid = self.social_chat_core.master_session_id or ""
+        scope, target_id = ToolConversation._resolve_target(msid)
+        await ToolConversation.send_segments_with_typing(
+            scope, target_id, [text_segment(text)],
+            typing_delay_per_char=SocialChatSession.TYPING_DELAY_PER_CHAR,
         )
-        return {
-            "status": "ok",
-            "new_index": new_index,
-            "rationale": rationale,
-        }
 
-    async def transfer_back_to_social_agent(self, summary: str) -> Dict[str, Any]:
-        """结束本次委托，触发 social_chat_core 的退出流程。"""
+    async def set_send_mode(self, mode: str) -> Dict[str, Any]:
+        """切换发送模式。
+
+        升级到 unrestricted：工具层硬审批——发审批请求给主人，主人首条非空回复
+        ==『同意』才切换；其他回复或超时保持原模式。
+        降回 approval：立即生效（降权无风险，无需审批）。
+        """
+        mode = (mode or "").strip().lower()
+        if mode not in VALID_SEND_MODES:
+            raise ValueError(f"mode 非法: {mode!r}（仅支持 {VALID_SEND_MODES}）")
+
+        if mode == self.send_mode:
+            return {"status": "ok", "send_mode": self.send_mode, "note": "已是该模式，未变更"}
+
+        if mode == "unrestricted":
+            verdict = await self._request_master_approval(
+                preview="（申请开启自由发送模式：之后向工作会话发送消息不再逐条审批）",
+                request_kind="mode_switch",
+            )
+            if verdict["result"] != "approved":
+                logger.warning(f"social_chat 模式升级被拒（{verdict['result']}），保持 {self.send_mode}")
+                return {
+                    "status": "rejected",
+                    "approval": verdict["result"],
+                    "master_message": verdict.get("content", ""),
+                    "send_mode": self.send_mode,
+                    "reason": verdict["reason"],
+                }
+
+        old = self.send_mode
+        self.send_mode = mode
+        logger.info(f"social_chat 发送模式切换: {old} -> {mode}")
+        return {"status": "ok", "send_mode": mode, "previous": old}
+
+    async def transfer_back(self, summary: str, encounter_type: str = None) -> Dict[str, Any]:
+        """结束本次委托，触发 social_chat_core 的退出流程。
+
+        encounter_type: 本次任务中他人对我能力/表现的评价（EvaluationAct 类，可选）——
+            退出前登记一次评价类情感判断（working 线，评价产生于社交互动中）。
+        """
+        encounter_type = (encounter_type or "").strip() or None
+        if encounter_type and encounter_type not in EvaluationAct.names():
+            raise ValueError(
+                f"transfer_back encounter_type 未注册: {encounter_type!r}"
+                "（必须从 EvaluationAct 中选择）"
+            )
+        # 评价登记（conversation 同款：流转退出时顺带登记，失败直接抛错阻断，
+        # 避免带着未登记的情绪状态结束任务）
+        if encounter_type:
+            await self.emotional_judgment(session_type="working", act=encounter_type)
+
         # 把 summary 写入 core，供 stop_session / 返回结果使用
         if self.social_chat_core is not None:
             self.social_chat_core.set_transfer_summary(summary or "")
@@ -824,6 +761,10 @@ class SocialChatToolManager(ToolManager):
 
     async def emotional_judgment(self, session_type: str, act: str) -> str:
         """按 session_type 路由的情感判断。
+
+        平级自有实现，刻意不与 conversation 版合并——encounters 写入目标、
+        session_type 语义、schema 参数均不同，监管隔离要求状态分离
+        （见 docs/api/social_chat.md「工具介绍」）。
 
         与 conversation 版本的差异：
             - 会话上下文从 social_chat_core 取（master_session_id / working_session_id），
@@ -837,9 +778,11 @@ class SocialChatToolManager(ToolManager):
         Args:
             session_type: 'master' / 'working'。来源（情感判断发生在哪条会话线）：
                 'master'  = 主人私聊会话（与主人沟通引发的情感）；
-                'working' = 工作会话（与社交对象的互动 / 通过预设条目发出的发言引发的情感）。
-            act: 遭遇/行为标签，必须从 ExternalInteractionAct + EvaluationAct +
-                SelfActionAct 三类合并列表中选择之一（schema 已用 enum 强制）。
+                'working' = 工作会话（与社交对象的互动 / 通过工作会话发出的发言引发的情感）。
+            act: 遭遇/行为标签。显式工具仅收 ExternalInteractionAct（他人行为直接
+                刺激）类——self_action 类随发送工具 nature、evaluation 类随
+                transfer_back encounter_type 拆分登记，不从这里进（schema 已用
+                enum 强制；实现层白名单仍为三类合集，供自动登记路径复用）。
         """
         if session_type not in ("master", "working"):
             raise ValueError(
@@ -886,62 +829,124 @@ class SocialChatToolManager(ToolManager):
         self.social_chat_core.add_emotion_encounter(session_type=session_type, act=act)
 
         if success:
-            snapshot = await ei.thought_cache.calculate_mood_snapshot()
-            from brain.amy.prompt_engine import get_dopamine_desc, get_norepinephrine_desc
-            reasons = [t.desc for t in snapshot.top_thoughts[:2] if t.desc]
-            reasons_text = "、".join(reasons) if reasons else act
-            new_feeling = (
-                f"你的心情变化为：{get_norepinephrine_desc(snapshot.norepinephrine)}。"
-                f"{get_dopamine_desc(snapshot.dopamine)}"
-            )
             logger.info(
                 f"social_chat emotional_judgment 完成: session_type={session_type}, "
                 f"act={act}, session={sub_session_type}/{session_name}"
             )
-            return f"因为{reasons_text}，{new_feeling}"
+            # 表现侧出口：仅 NE/DA 两行激素描述 + 原因（仅非最终评价类想法），
+            # 不含 SC 行——pfca 决策侧情绪体系与本模块隔离（见 docs/api/amy.md）
+            return await ei.get_language_description()
         # build_conversation_thought 失败：act 已在白名单内，理论上不应到这里；
         # 真发生则按 user_rules 原则直接抛错阻断，不静默吞。
         raise RuntimeError(
             f"emotional_judgment 失败: session_type={session_type}, act={act}, msg={msg}"
         )
 
-    # ---------- 继承工具：复用 conversation_tool_manager 的同名方法，不重写 ----------
+    # ============================================================
+    # 审批机制（seq 游标轮询，零时钟依赖）
+    # ============================================================
+    async def _request_master_approval(self, preview: str, request_kind: str = "send") -> Dict[str, Any]:
+        """向主人发审批请求后，基于消息库 seq 游标轮询主人回复。
+
+        锚点机制（根治时序错位）：
+            1. 发请求前，把专用消费者游标（social_chat_approval）推进到主人会话当前最大 seq；
+            2. 再发审批请求（请求本身以 user_id="system" 落库，seq > 锚点）；
+            3. 轮询 get_unread_for：seq > 锚点的消息中，排除 system 后第一条非空消息即裁决。
+        全程只用单调 seq，不比较任何时间戳——主人"上一条消息"绝不可能泄漏进窗口。
+
+        判定规则（直接拒绝，最简语义）：
+            - 第一条非空 == "同意" → approved（立即发送）；
+            - 第一条非空 != "同意" → rejected（立即返回，LLM 即时回应主人）；
+            - 15 秒内没有任何非空消息 → timeout。
+
+        Args:
+            preview: 审批内容预览（要发送的消息全文 / 模式切换说明）。
+            request_kind: "send" = 发送审批；"mode_switch" = 模式切换审批（仅影响文案）。
+
+        Returns:
+            {"result": "approved"|"rejected"|"timeout",
+             "content": 命中的主人消息文本（timeout 时为 ""）,
+             "reason": 人读原因}
+        """
+        from memory.message_repository import get_message_store
+
+        master_id = self.social_chat_core.master_session_id
+        store = get_message_store()
+
+        # 1) 锚点：当前主人会话最大 seq（空会话视为 0），固化到专用消费者游标
+        latest = await store.get_latest_messages(master_id, 1)
+        anchor_seq = 0
+        if latest.get("messages"):
+            anchor_seq = int(latest["messages"][-1]["_seq"])
+        await store.advance_cursor(master_id, APPROVAL_CONSUMER_ID, anchor_seq)
+
+        # 2) 发审批请求
+        working_name = self._resolve_working_session_name()
+        if request_kind == "mode_switch":
+            approval_prompt = (
+                f"AI 申请开启自由发送模式：{preview}\n"
+                f"请回复『同意』开启；回复其他任何内容视为拒绝。"
+            )
+        else:
+            approval_prompt = (
+                f"AI 想在{working_name}发送消息：\n"
+                f"「{preview}」\n"
+                f"请回复『同意』批准；回复其他任何内容视为拒绝。"
+            )
+        # 内部直发（单条不拆行，保住审批提示的多行排版与时序）
+        await self._send_raw_to_master(approval_prompt)
+
+        # 3) 轮询：seq > 锚点的第一条非 system 非空消息即裁决
+        deadline = time.time() + APPROVAL_TIMEOUT_S
+        polls = 0
+        while True:
+            polls += 1
+            msgs = await store.get_unread_for(master_id, APPROVAL_CONSUMER_ID)
+            for m in msgs:
+                if m.get("user_id") == "system":
+                    continue
+                content = (m.get("content_text") or "").strip()
+                if not content:
+                    continue
+                logger.info(
+                    f"social_chat 审批裁决（{request_kind}，polls={polls}，anchor_seq={anchor_seq}）: "
+                    f"sender={m.get('user_name', '?')!r}, seq={m.get('_seq')}, reply={content[:40]!r}"
+                )
+                if content == "同意":
+                    return {"result": "approved", "content": content, "reason": "主人回复『同意』"}
+                return {
+                    "result": "rejected",
+                    "content": content,
+                    "reason": "主人回复不是『同意』，视为拒绝",
+                }
+            if time.time() >= deadline:
+                logger.warning(
+                    f"social_chat 审批超时（{request_kind}，polls={polls}，anchor_seq={anchor_seq}）"
+                )
+                return {"result": "timeout", "content": "", "reason": "主人 15 秒内未回复，审批超时"}
+            await asyncio.sleep(APPROVAL_POLL_INTERVAL_S)
 
     # ============================================================
     # 内部辅助
     # ============================================================
-    async def _route_preset_segment(self, seg: dict) -> str:
-        """通过 OutboundRouter 发送一条预设段（text / img）到工作会话。"""
-        from adapt import OutboundTarget, OutboundPayload, SessionScope
-        from adapt.router import get_outbound_router
-        from adapt.message_segments import text_segment, image_segment
-        from brain.attachments import resolve_media_file, preflight
+    def _resolve_working_session_name(self) -> str:
+        """解析工作会话的展示名。
 
-        tsid = self.social_chat_core.working_session_id or ""
-        if tsid.startswith("group_"):
-            scope, target_id = SessionScope.GROUP, tsid.split("_", 1)[1]
-        elif tsid.startswith("private_"):
-            scope, target_id = SessionScope.PRIVATE, tsid.split("_", 1)[1]
-        else:
-            scope, target_id = SessionScope.PRIVATE, tsid
+        优先取 global_session_state.pfca_sessions[*] 中匹配 working_session_id 的
+        session_name；找不到则回退到 working_session_id 本身。
+        """
+        from brain.hc.global_session_state import get_global_session_state
 
-        out_seg = None
-        if "text" in seg:
-            out_seg = text_segment(str(seg.get("text") or ""))
-        elif "img" in seg:
-            filename = str(seg.get("img") or "").strip()
-            real_path = resolve_media_file(filename)
-            check = preflight(real_path)
-            if not check["ok"]:
-                raise ValueError(f"图片 {filename} preflight 失败: {check['reason']}")
-            out_seg = image_segment(file=check["path"])
+        working_id = self.social_chat_core.working_session_id
+        try:
+            state = get_global_session_state()
+            for s in state.get_sessions():
+                if s.get("session_id") == working_id:
+                    name = (s.get("session_name") or "").strip()
+                    if name:
+                        return name
+                    break
+        except Exception as e:
+            logger.debug(f"social_chat 解析工作会话名失败: {e}")
 
-        if out_seg is None:
-            raise ValueError("预设条目段无效")
-
-        router = await get_outbound_router()
-        return await router.send(
-            platform="qq",
-            target=OutboundTarget(scope=scope, target_id=target_id),
-            payload=OutboundPayload(segments=[out_seg]),
-        )
+        return working_id or "工作会话"

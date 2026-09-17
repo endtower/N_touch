@@ -134,12 +134,18 @@ def setup_global_logger() -> logging.Logger:
         'CRITICAL': logging.CRITICAL
     }
     
-    # 创建根日志记录器，这样所有模块的日志都会自动传播到它
+    # 获取根日志记录器，这样所有模块的日志都会自动传播到它
     root_logger = logging.getLogger()
     root_logger.setLevel(level_map.get(log_level, logging.INFO))
-    
-    # 避免日志重复
-    if not root_logger.handlers:
+
+    # 各类 handler 独立判重（FileHandler 是 StreamHandler 的子类，console 判重需排除它）
+    has_file = any(isinstance(h, logging.FileHandler) for h in root_logger.handlers)
+    has_console = any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in root_logger.handlers
+    )
+
+    if not has_file:
         # 文件处理器 - 无颜色（用于总日志文件）
         global_file_handler = logging.FileHandler(global_log_file, encoding='utf-8')
         file_formatter = logging.Formatter(
@@ -147,10 +153,25 @@ def setup_global_logger() -> logging.Logger:
             datefmt=TIME_FORMAT
         )
         global_file_handler.setFormatter(file_formatter)
-        
-        # 添加处理器到根日志记录器
         root_logger.addHandler(global_file_handler)
+
+    if not has_console:
+        # 控制台处理器 - 全局唯一一份，挂在根记录器上；
+        # 所有模块 logger 通过 propagate 冒泡到这里，终端只输出一次，
+        # 避免父子 logger 各自挂 handler 导致同一日志重复打印
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(ColoredFormatter(
+            '%(asctime)s [%(levelname)s] %(name)s | %(message)s',
+            datefmt=TIME_FORMAT
+        ))
+        root_logger.addHandler(console_handler)
     
+    # 关键：watchfiles（uvicorn 热重载监视器）的日志若冒泡到根记录器，
+    # 会被文件处理器写进 logs/ 内的日志文件，而该文件本身处于监视范围，
+    # 形成「检测到变更 → 打日志 → 写回日志文件 → 再检测到变更」的自指永动刷屏。
+    # 切断传播即可让该日志不再进入终端与文件。
+    logging.getLogger("watchfiles").propagate = False
+
     # 设置_global_logger为根日志记录器
     _global_logger = root_logger
     return _global_logger
@@ -205,33 +226,23 @@ def setup_logging(name: str = 'app', log_level: Optional[int or str] = None) -> 
     logger = logging.getLogger(name)
     # 设置日志级别，但保持propagate=True，让日志能够传播到根记录器
     logger.setLevel(final_log_level)
-    logger.propagate = True  # 确保日志会传播到根记录器
-    
-    # 避免日志重复
-    if not logger.handlers:
-        # 确保全局日志记录器（根记录器）已设置
-        setup_global_logger()
-        
-        # 控制台处理器 - 有颜色
-        console_handler = logging.StreamHandler()
-        console_formatter = ColoredFormatter(
+    logger.propagate = True  # 日志统一冒泡到根记录器，由根上唯一的 console handler 输出
+
+    # 确保根记录器（文件 + 唯一控制台）已就绪
+    setup_global_logger()
+
+    # 模块自身不再挂控制台 handler（父子 logger 各挂一份会导致同一日志重复打印）；
+    # 仅为需要独立文件的模块挂文件 handler（只写文件，不影响终端输出）
+    if name in SEPARATE_LOG_MODULES and not any(
+        isinstance(h, logging.FileHandler) for h in logger.handlers
+    ):
+        module_log_file = log_dir / f"{name}_{time.strftime('%Y-%m-%d')}.log"
+        module_file_handler = logging.FileHandler(module_log_file, encoding='utf-8')
+        module_file_handler.setFormatter(logging.Formatter(
             '%(asctime)s [%(levelname)s] %(name)s | %(message)s',
             datefmt=TIME_FORMAT
-        )
-        console_handler.setFormatter(console_formatter)
-        
-        # 添加控制台处理器
-        logger.addHandler(console_handler)
-        
-        # 检查是否需要为该模块创建单独的日志文件
-        if name in SEPARATE_LOG_MODULES:
-            module_log_file = log_dir / f"{name}_{time.strftime('%Y-%m-%d')}.log"
-            module_file_handler = logging.FileHandler(module_log_file, encoding='utf-8')
-            module_file_handler.setFormatter(logging.Formatter(
-                '%(asctime)s [%(levelname)s] %(name)s | %(message)s',
-                datefmt=TIME_FORMAT
-            ))
-            logger.addHandler(module_file_handler)
+        ))
+        logger.addHandler(module_file_handler)
     
     # 日志等级已配置，此处不打印调试信息
     return logger

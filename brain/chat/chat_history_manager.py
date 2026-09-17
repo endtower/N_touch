@@ -23,9 +23,7 @@ class Chat_HistoryManager(HistoryManager):
             prefix: 模块名前缀，必须是 SUPPORTED_PREFIXES 中的一个
         """
         self.prefix = prefix
-        # 使用前缀作为历史记录文件名，避免多个模块使用同一个active.json文件
-        history_file = f'{prefix}.json'
-        super().__init__(history_file=history_file)
+        super().__init__()
 
     def get_memory_dir(self) -> Path:
         """获取存储目录路径。
@@ -41,22 +39,6 @@ class Chat_HistoryManager(HistoryManager):
     def get_file_prefix(self) -> str:
         """获取文件名前缀"""
         return self.prefix
-    
-    def archive_context(self):
-        """归档当前所有活跃历史记录并清空上下文"""
-        history = self.get_history()
-        if history:
-            from datetime import datetime
-            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-            archive_filename = f'{self.get_file_prefix()}_archived_{timestamp}.json'
-            archive_file = self.memory_dir / archive_filename
-            import json
-            with open(archive_file, 'w', encoding='utf-8') as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
-            logger.info(f'已归档上下文到文件: {archive_file.name}')
-            self._cleanup_old_archives()
-            self.clear()
-            logger.info(f'已将所有活跃历史记录归档，共 {len(history)} 条消息')
 
 # 创建全局历史管理器实例
 _history_manager_instances = {}

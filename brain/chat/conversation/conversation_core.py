@@ -25,9 +25,15 @@ def _extract_attachment_refs(text: str) -> List[str]:
     return refs
 
 
+_core_instance: Optional['ConversationCore'] = None
+
+
 def get_conversation_core() -> 'ConversationCore':
     """获取 ConversationCore 单例实例"""
-    return ConversationCore()
+    global _core_instance
+    if _core_instance is None:
+        _core_instance = ConversationCore()
+    return _core_instance
 
 
 class ConversationCore(HeavyCore):
@@ -45,9 +51,8 @@ class ConversationCore(HeavyCore):
             return
         super().__init__()
         self._session = None
-        # 会话停止时由 stop_session 记录、后处理 _postprocess 消费的退出信息
-        self._pending_exit_reason: Optional[str] = None
-        self._pending_progress_summary: str = ""
+        # 会话停止时由 stop_session 记录、后处理 _postprocess 消费的总结
+        self._pending_summary: str = ""
         self._encounters_cache: List[str] = []
         self._emotion_type_cache: str = ""
         self._pfca_strategy_cache: str = ""
@@ -74,7 +79,7 @@ class ConversationCore(HeavyCore):
         Args:
             session_id: 会话标识，格式为 "type_id"，如 "private_1234567890" / "group_198431299"
             purpose: 本次会话的目的（已包含任何必要的补充信息；上游自行拼装）
-            max_messages: 软限制消息条数
+            max_messages: 软限制发送轮次数（一次发送工具调用计 1）
         """
         return await self.start(
             session_id=session_id,
@@ -83,15 +88,14 @@ class ConversationCore(HeavyCore):
         )
 
     @async_handle_errors()
-    async def stop_session(self, exit_reason: str, progress_summary: str = "") -> None:
-        """停止会话（兼容入口）：记录退出信息并请求停止 Session。
+    async def stop_session(self, summary: str) -> None:
+        """停止会话（兼容入口）：记录总结并请求停止 Session。
 
         后处理 _postprocess() 由骨架 start() 在 Session 结束后统一执行，
-        这里只记录退出信息（供后处理消费）并停止 Session 循环。
+        这里只记录总结（供后处理消费）并停止 Session 循环。
         """
-        self._pending_exit_reason = exit_reason
-        self._pending_progress_summary = progress_summary
-        await self.stop(exit_reason)
+        self._pending_summary = summary
+        await self.stop(summary)
 
     # ============================================================
     # 前处理（抽象实现）
@@ -111,8 +115,7 @@ class ConversationCore(HeavyCore):
         from brain.chat.conversation.conversation_input_manager import get_conversation_input_manager
 
         # 上一轮会话已由骨架 start() 统一收尾（self._session 已清空），这里直接重置本轮状态
-        self._pending_exit_reason = None
-        self._pending_progress_summary = ""
+        self._pending_summary = ""
         self._clear_session_cache()
         get_conversation_input_manager().reset()
         logger.debug(f"启动会话，session_id={session_id}, purpose={purpose}")
@@ -142,13 +145,12 @@ class ConversationCore(HeavyCore):
         """会话结束后的后处理：拉取历史、拼装退出消息、持久化并清理，返回最终结果。"""
         from memory.session_history import get_global_session_history, FetchOptions, MessageFormatOptions
 
-        # 退出信息由 stop_session 在会话期间记录，这里统一消费
-        exit_reason = self._pending_exit_reason or "会话结束"
-        progress_summary = self._pending_progress_summary or ""
+        # 总结由 stop_session 在会话期间记录，这里统一消费
+        summary = self._pending_summary or "会话结束"
 
         history = get_global_session_history()
         chat_content = ""
-        actual_exit_reason = exit_reason
+        actual_exit_reason = summary
 
         if self.conversation_id and self.start_time:
             # 最终返回给 PFCA：拉取该会话中 pfca 游标之后（上次处理后）的全部消息，
@@ -171,9 +173,9 @@ class ConversationCore(HeavyCore):
             chat_content = "\n".join(fetch_result.formatted_lines) if fetch_result.formatted_lines else ""
 
             if not chat_content:
-                format_message = f"阶段性对话结束，原因：{exit_reason}，总结：{progress_summary}没有产生消息"
+                format_message = f"阶段性对话结束，总结：{summary}；没有产生消息"
             else:
-                format_message = f"阶段性对话结束，原因：{exit_reason}，总结：{progress_summary}\n{chat_content}"
+                format_message = f"阶段性对话结束，总结：{summary}\n{chat_content}"
 
             # 把"会话中由 LLM 识图工具识别并保存的图片"在末尾单独成行提示 PFCA
             # （只展示 LLM 主动调用 recognize_image 识别过的图，不再罗列所有附件）
@@ -201,7 +203,7 @@ class ConversationCore(HeavyCore):
 
         # format_message 仅在 conversation_id/start_time 都存在时才会被赋值，
         # 这里用 actual_exit_reason 兜底打印，避免 UnboundLocalError。
-        logger.debug(actual_exit_reason or f"会话结束，原因：{exit_reason}")
+        logger.debug(actual_exit_reason or f"会话结束，总结：{summary}")
         return actual_exit_reason
 
     # ============================================================
@@ -250,22 +252,14 @@ class ConversationCore(HeavyCore):
     async def _persist_and_cleanup(self, exit_reason: str):
         """持久化情绪数据并清理缓存"""
         from brain.chat.conversation.conversation_bequest import get_conversation_bequest
-        from brain.hc.database.bequest import BequestOperations
         from brain.hc.global_session_state import get_global_session_state
-        from config.settings import chat_config
-        
+
         focus_state = get_global_session_state()
         bequest_cache = get_conversation_bequest()
-        
+
         conversation_key = self.conversation_id or ""
 
         activated = bequest_cache.get_all()
-        fixed_title = getattr(chat_config, 'FIXED_BEQUEST_TITLE', None)
-        if fixed_title:
-            bequest_ops = BequestOperations()
-            fixed_id = await bequest_ops.get_bequest_id_by_title(fixed_title)
-            if fixed_id and fixed_id not in activated:
-                activated.append(fixed_id)
 
         if self.has_emotion_evaluation() and conversation_key:
             focus_state.add_emotion_result(
@@ -280,7 +274,7 @@ class ConversationCore(HeavyCore):
                 encounters=self._encounters_cache,
                 activated_bequests=activated
             )
-            logger.info(f"情绪评价已持久化，activated_bequests: {len(activated)} 条（含固定经验）")
+            logger.info(f"情绪评价已持久化，activated_bequests: {len(activated)} 条")
         else:
             logger.debug("无情绪评价，跳过持久化")
         

@@ -14,8 +14,8 @@ proactive 输入管理模块
 
 Slot 设计（参考 pfca_input_manager）：
     message_base:    本次主动任务的核心描述（intent + reason + target）
-    planned_events:  当前数据库里所有 ongoing 事件
-    triggered_event: 当前已到达预定时间的那个事件
+    planned_tasks:   当前数据库里所有未完成任务
+    triggered_task:  当前已到达预定时间的那个任务
     amy_effect:      情绪状态
     temporary_memory: 短期记忆
 """
@@ -55,8 +55,8 @@ class ProactiveInputManager:
         self,
         message_type: str,
         task_draft: Dict[str, Any],
-        planned_events: List[Dict[str, Any]] = None,
-        triggered_event: Optional[Dict[str, Any]] = None,
+        planned_tasks: List[Dict[str, Any]] = None,
+        triggered_task: Optional[Dict[str, Any]] = None,
         wakeup_reason: Optional[str] = None,
     ) -> None:
         """缓存首次消息请求，由 proactive_session 在合适时机调用 build_first_content() 获取 content
@@ -64,15 +64,15 @@ class ProactiveInputManager:
         Args:
             message_type: 消息类型（当前仅 NORMAL_STARTUP）
             task_draft: 主动任务草稿
-            planned_events: 数据库里所有 ongoing 事件（用于"当前计划中要做的事件"）
-            triggered_event: 当前已到达预定时间的事件
+            planned_tasks: 数据库里所有未完成任务（用于"当前计划中要做的任务"）
+            triggered_task: 当前已到达预定时间的任务
             wakeup_reason: 本次主动唤醒原因（注入到首条 user 消息最底部）
         """
         self._queued_request = {
             "message_type": message_type,
             "task_draft": task_draft or {},
-            "planned_events": planned_events or [],
-            "triggered_event": triggered_event,
+            "planned_tasks": planned_tasks or [],
+            "triggered_task": triggered_task,
             "wakeup_reason": wakeup_reason,
         }
         logger.debug(f"已缓存 proactive 首次消息请求: {message_type}")
@@ -93,11 +93,11 @@ class ProactiveInputManager:
         # 1. 重置槽位
         self._reset_blocks()
 
-        # 2. 收集计划中要做的事件
-        self._collect_planned_events(request["planned_events"])
+        # 2. 收集计划中要做的任务
+        self._collect_planned_tasks(request["planned_tasks"])
 
-        # 3. 收集当前已触发的事件
-        self._collect_triggered_event(request["triggered_event"])
+        # 3. 收集当前已触发的任务
+        self._collect_triggered_task(request["triggered_task"])
 
         # 4. 收集近期事件（最近 5 条临时记忆）
         self._collect_recent_memory()
@@ -121,8 +121,8 @@ class ProactiveInputManager:
         from datetime import datetime
         self._blocks = {
             "current_time": f"【当前时间】{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "planned_events": "",
-            "triggered_event": "",
+            "planned_tasks": "",
+            "triggered_task": "",
             "recent_memory": "",
             "amy_effect": "",
             "wakeup_reason": "",
@@ -154,38 +154,38 @@ class ProactiveInputManager:
             lines.append(f"附加信息: {payload}")
         self._blocks["message_base"] = "\n".join(lines)
 
-    def _collect_planned_events(self, planned_events: List[Dict[str, Any]]) -> None:
-        """收集"当前计划中要做的事件"，即所有 ongoing 事件"""
-        if not planned_events:
-            self._blocks["planned_events"] = "（当前没有正在进行的长期事件）"
+    def _collect_planned_tasks(self, planned_tasks: List[Dict[str, Any]]) -> None:
+        """收集"当前计划中要做的任务"，即所有未完成任务"""
+        if not planned_tasks:
+            self._blocks["planned_tasks"] = "（当前没有进行中的任务）"
             return
-        lines = ["【当前计划中要做的事件】"]
-        for i, ev in enumerate(planned_events, 1):
-            title = ev.get("title", "未知")
-            summary = ev.get("summary", "")
-            next_occ = ev.get("next_occurrence") or "未排期"
+        lines = ["【当前计划中要做的任务】"]
+        for i, task in enumerate(planned_tasks, 1):
+            title = task.get("title", "未知")
+            summary = task.get("summary", "")
+            next_occ = task.get("next_occurrence") or "未排期"
             lines.append(f"{i}. {title}")
             if summary:
                 lines.append(f"   概况: {summary}")
             lines.append(f"   下次触发时间: {next_occ}")
-        self._blocks["planned_events"] = "\n".join(lines)
+        self._blocks["planned_tasks"] = "\n".join(lines)
 
-    def _collect_triggered_event(self, triggered_event: Optional[Dict[str, Any]]) -> None:
-        """收集"当前已到达预定时间的事件"（即本次触发的事件）"""
-        if not triggered_event:
+    def _collect_triggered_task(self, triggered_task: Optional[Dict[str, Any]]) -> None:
+        """收集"当前已到达预定时间的任务"（即本次触发的任务）"""
+        if not triggered_task:
             return
-        title = triggered_event.get("title", "未知")
-        summary = triggered_event.get("summary", "")
-        next_occ = triggered_event.get("next_occurrence", "")
+        title = triggered_task.get("title", "未知")
+        summary = triggered_task.get("summary", "")
+        next_occ = triggered_task.get("next_occurrence", "")
         lines = [
-            "【当前已到达计划再处理时间的未完成事件】",
+            "【当前已到达计划再处理时间的未完成任务】",
             f"标题: {title}",
         ]
         if summary:
             lines.append(f"概况: {summary}")
         if next_occ:
             lines.append(f"触发时间: {next_occ}")
-        self._blocks["triggered_event"] = "\n".join(lines)
+        self._blocks["triggered_task"] = "\n".join(lines)
 
     def _collect_recent_memory(self, limit: int = 5) -> None:
         """收集近期事件（最近 N 条临时记忆），拼接在【当前已到达预定时间的事件】之后
@@ -196,36 +196,55 @@ class ProactiveInputManager:
         Args:
             limit: 拉取最近 N 条，默认 5
         """
-        try:
-            from brain.hc.temporary_memory import get_recent_experience
-            text = get_recent_experience(limit=limit, label="近期事件", with_current_time=True)
-            if text:
-                self._blocks["recent_memory"] = text
-        except Exception as e:
-            logger.debug(f"proactive 收集近期事件失败: {e}")
+        # 记忆获取失败直接上抛崩溃阻断（硬约定 #4），与 PFCA 读取侧语义一致
+        from brain.hc.temporary_memory import get_recent_experience
+        text = get_recent_experience(limit=limit, label="近期事件", with_current_time=True)
+        if text:
+            self._blocks["recent_memory"] = text
 
     async def _collect_amy_effect(self) -> None:
-        """收集情绪状态（情绪消费者游标）。
+        """收集情绪状态（情绪消费者游标，决策侧）。
 
-        用 get_unread_events("proactive") 拉取未消费情绪事件；
-        有新事件才更新情绪槽，并推进游标。
+        契约与 pfca 一致（get_unread_events → 取描述 → 成功后再 advance_cursor）：
+        - 无未消费事件直接返回；
+        - 情绪体系隔离过滤：仅当未读事件含最终评价类事件（act 命中
+          FinalEvaluationAct 词表）才更新情绪槽；表现侧 NE/DA 事件
+          （conversation/social_chat 的情感遭遇）是噪声，仅推进游标消费掉。
+        - 取描述失败/为空时不推进游标，事件留给下一轮，不丢；
+        - 取描述异常直接上抛崩溃阻断（硬约定），不吞异常。
         """
-        try:
-            from brain.amy.emotional_interface import get_emotional_interface
-            ei = await get_emotional_interface()
-            events = await ei.get_unread_events("proactive")
-            if not events:
-                return
-            # 推进游标到已消费的最大 seq
-            await ei.advance_cursor("proactive", max(e["seq"] for e in events))
+        from brain.amy.emotional_interface import get_emotional_interface
+        from brain.amy.constants import FinalEvaluationAct
 
-            current = await ei.get_amy_description()
-            if not current or current == self._last_amy:
-                return
-            self._last_amy = current
-            self._blocks["amy_effect"] = current
-        except Exception as e:
-            logger.debug(f"proactive 收集情绪失败: {e}")
+        ei = await get_emotional_interface()
+        events = await ei.get_unread_events("proactive")
+        if not events:
+            return
+
+        max_seq = max(e["seq"] for e in events)
+        # 决策侧只关心最终评价类事件；NE/DA 噪声事件游标照常推进消费掉
+        # （不推进会无限积压重查），但不触发情绪槽更新。
+        final_events = [
+            e for e in events
+            if FinalEvaluationAct.kind_of(e.get("act", "") or "") is not None
+        ]
+        if not final_events:
+            await ei.advance_cursor("proactive", max_seq)
+            return
+
+        # 决策侧出口描述：单行 SC 行动对应 + 原因：最终评价类想法摘要（成因出口内嵌）
+        current = await ei.get_decision_description()
+        if not current:
+            return
+
+        # 描述已成功取到，推进游标到已消费的最大 seq
+        await ei.advance_cursor("proactive", max_seq)
+
+        # 描述与上次相同则不重复注入（游标已推进，仅跳过槽位更新）
+        if current == self._last_amy:
+            return
+        self._last_amy = current
+        self._blocks["amy_effect"] = current
 
     def _collect_wakeup_reason(self, wakeup_reason: Optional[str]) -> None:
         """收集本次主动唤醒原因（注入到首条 user 消息最底部）。

@@ -7,16 +7,32 @@ from brain.base.heavy_agent.heavy_session import HeavySession
 from brain.base.heavy_agent.heavy_core import HeavyCore
 from brain.base.heavy_agent.tool_manager import ToolManager
 from brain.base.common_ways import (
+    CONVERSATION_CONSUMER_ID,
     build_session_environment,
+    build_social_chat_environment,
     ToolHandlers,
+    ToolConversation,
     ToolVision,
+    ToolHC,
+    ToolSocial,
+    ToolPersistent,
+    ToolBequest,
+    ToolTask,
 )
 
 __all__ = [
     'HeavySession',
     'HeavyCore',
     'ToolManager',
+    'CONVERSATION_CONSUMER_ID',
     'build_session_environment',
+    'build_social_chat_environment',
     'ToolHandlers',
+    'ToolConversation',
     'ToolVision',
+    'ToolHC',
+    'ToolSocial',
+    'ToolPersistent',
+    'ToolBequest',
+    'ToolTask',
 ]

@@ -122,12 +122,15 @@ class OutboundRouter:
         if chat_config.SIMULATED_SEND:
             message_id = await self._send_via_web(target, payload)
             if not message_id:
-                # 模拟模式下 web 通道不存在 / 没客户端 = 没前端看 = 跳过
+                # 模拟模式下 web 通道无客户端 = 无实际投递对象，
+                # 但消息仍须落库（设计决策：跳过实际发送，仅落库 + 推 MessageBus；
+                # 此处直接 return 会导致 AI 出站消息从历史记录中丢失）
                 logger.info(
-                    f"[SIMULATED_SEND] web 通道无客户端, 跳过: "
+                    f"[SIMULATED_SEND] web 通道无客户端, 跳过投递仅落库: "
                     f"{target.scope.value}:{target.target_id}"
                 )
-                return ""
+                import uuid
+                message_id = uuid.uuid4().hex
         else:
             logger.info(
                 f"[OutboundRouter] -> {p.value} {target.scope.value}:{target.target_id} "

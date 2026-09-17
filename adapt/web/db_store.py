@@ -83,6 +83,10 @@ class DBStore:
     async def delete_message(self, scope: str, bare_id: str, message_id: str) -> bool:
         return await self._repo.delete_message(f"{scope}_{bare_id}", message_id)
 
+    async def delete_messages(self, scope: str, bare_id: str, message_ids: List[str]) -> List[str]:
+        """批量删除, 返回实际删除的 message_id 列表。"""
+        return await self._repo.delete_messages(f"{scope}_{bare_id}", message_ids)
+
     async def delete_session(self, scope: str, bare_id: str) -> bool:
         session_id = f"{scope}_{bare_id}"
         # 存在性判断：sessions 表是否有该行（不依赖 session_name，

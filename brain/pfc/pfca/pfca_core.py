@@ -21,6 +21,7 @@ from utils.logger import get_logger
 from brain.pfc.pfca.pfca_session import PFCASession
 from brain.pfc.pfca.pfca_history_manager import get_pfca_history_manager
 from brain.pfc.pfca.pfca_input_manager import get_pfca_input_manager, FirstMessageType
+from brain.hc.global_session_state import get_global_session_state
 
 # 获取日志记录器
 logger = get_logger('PFCACore', 'INFO')
@@ -36,12 +37,6 @@ class PFCACore:
         self.model_name = pfca_config.MODEL_NAME
         self.should_stop = False
         self.current_session: PFCASession | None = None
-        # 在本次 PFCA 会话（即一条事件链）期间持久化的事件登记 agent。
-        # 设计：pfca_tools.event_judgement 会从本字段获取同一个 agent 实例，
-        # 这样多次调用 event_judgement 时 agent 上下文（messages / tools_called）是连续的，
-        # 保证 PFCA 与 event_register_agent 之间的多轮通讯不会丢上下文。
-        # 本次会话结束时由 stop()/start() 负责清空，避免跨链泄漏。
-        self.event_register_agent = None
 
     async def stop(self):
         """
@@ -92,21 +87,23 @@ class PFCACore:
         pfca_history_manager.archive_context()
         logger.info("PFCA Core 启动，已归档 PFCA History")
 
-        # 新事件链开始：清空跨链的事件登记 agent 上下文，避免上一条事件链的 backlog / 工具记录泄漏。
-        # agent 实例本身允许为 None，下游按需懒加载。
-        if self.event_register_agent is not None:
-            try:
-                self.event_register_agent.reset()
-            except Exception as e:
-                logger.warning(f"重置 event_register_agent 失败（继续）: {e}")
-            self.event_register_agent = None
-            logger.debug("PFCA Core 启动：已清空上一事件链的 event_register_agent 上下文")
-
         logger.info("执行 PFCASession")
         session = PFCASession()
         self.current_session = session
-        session_result = await session.start()
-        self.current_session = None
+        try:
+            session_result = await session.start()
+        finally:
+            self.current_session = None
+            # terminate 退出兜底（docs/已完成.md #9）：会话若未经"第二次确认调用"结束
+            # （token 预算熔断 / 外部 stop 等），首次调用暂存的总结
+            # 在此补写入临时记忆——保证"最后一次 terminate 的总结"不丢。
+            # 正常确认路径已在 terminate 内弹出暂存，此处为 no-op。
+            # 写入失败直接上抛（硬约定 #4），不吞。
+            pending = get_global_session_state()._data.pop("pending_terminate", None)
+            if pending and pending.get("summary"):
+                from brain.hc.temporary_memory import get_temporary_memory
+                get_temporary_memory().add(pending["summary"])
+                logger.info("会话退出兜底：已将未确认的 terminate 总结写入短期记忆")
 
         logger.info(f"PFCA Core 执行完成")
 

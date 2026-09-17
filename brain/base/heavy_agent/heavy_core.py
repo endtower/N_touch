@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """重型 Core 基类：大模块的统一生命周期接口（前处理 → Session → 后处理）。
 
-设计文档：docs/archive/heavycore_base_design.md
+设计记录：docs/已完成.md（HeavyCore / HeavySession 框架基类）
 
 本基类抽象出重型大模块（Conversation / SocialChat / PFCA）的公共生命周期骨架：
 - 固定骨架：start() / stop() 由基类实现，子类不重写。

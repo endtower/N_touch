@@ -2,7 +2,7 @@
 """social_chat 会话循环。
 
 与 conversation_session 的关键差异：
-- 无 strategy_check_agent（social_chat 由 social_agent 驱动，不使用 PFCA 策略机）
+- 无 strategy_check_agent（social_chat 由 PFCA 的 social_chat_agent 工具驱动，不使用 PFCA 策略机）
 - 无 emotion 持久化（不写 emotion_results）
 - 由 social_chat_core 主动调用 request_stop() 终止循环
 
@@ -16,7 +16,7 @@ from typing import List, Dict, Optional
 
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
-from utils.llm_client_manager import call_llm
+from utils.llm_client_manager import call_llm, TokenBudget, TokenBudgetExceededError, token_budget_scope
 
 from brain.base import HeavySession
 from brain.chat.chat_history_manager import get_history_manager
@@ -29,14 +29,17 @@ logger = get_logger('SocialChatSession', "DEBUG")
 
 class SocialChatSession(HeavySession):
     PREFIX = 'social_chat'
-    TYPING_SPEED_CHARS_PER_MINUTE = 100
+    TYPING_SPEED_CHARS_PER_MINUTE = 150
     TYPING_DELAY_PER_CHAR = 60.0 / TYPING_SPEED_CHARS_PER_MINUTE
+
+    # 单会话累计 token 预算（熔断值，参照 token_stats.json 校准）
+    TOKEN_BUDGET = 500_000
+    # wait_and_observe 的语义就是"参数相同地反复等待"，豁免重复调用检测
+    repeat_exempt_tools = frozenset({"wait_and_observe"})
 
     def __init__(
         self,
         social_chat_core,
-        preset_messages: list,
-        enforcement_level: str,
         max_self_loops: int = 30,
         max_no_tool_call: int = 4,
         min_response_interval: float = 0.0,
@@ -45,6 +48,7 @@ class SocialChatSession(HeavySession):
 
         master / working 会话 ID 一律从 social_chat_core 读，调用方不传。
         social_chat_core 必须非 None——未注入就直接崩溃（符合 user_rules）。
+        发送模式不在此注入：SocialChatToolManager 从 config（SOCIAL_CHAT_SEND_MODE）取初始值。
         """
         if social_chat_core is None:
             raise ValueError("SocialChatSession 缺少 social_chat_core 引用")
@@ -53,14 +57,9 @@ class SocialChatSession(HeavySession):
         _ = social_chat_core.working_session_id
 
         self.social_chat_core = social_chat_core
-        self.enforcement_level = enforcement_level
 
         self.history_manager = get_history_manager(prefix=self.PREFIX)
-        self.tool_manager = SocialChatToolManager(
-            social_chat_core=social_chat_core,
-            preset_messages=preset_messages,
-            enforcement_level=enforcement_level,
-        )
+        self.tool_manager = SocialChatToolManager(social_chat_core=social_chat_core)
         self._input_manager = get_social_chat_input_manager()
 
         self.self_loop_count = 0
@@ -116,19 +115,36 @@ class SocialChatSession(HeavySession):
         self.no_tool_call_count = 0
         self.last_response_time = 0.0
         self.running = True
+        # 骨架级熔断状态（本类自有 start 循环，不经过基类 start 的初始化）
+        self._recent_tool_sigs = []
+        self._tool_repeat_strikes = 0
+        self._last_repeat_tool = ""
         self.history_manager.archive_context()
 
-        while self.running and self.self_loop_count < self.max_self_loops:
-            user_input = await self._user_input()
-            if user_input:
-                self.self_loop_count = 0
-                self.history_manager.append({"role": "user", "content": user_input})
+        budget = TokenBudget(self.TOKEN_BUDGET) if self.TOKEN_BUDGET else None
+        self.token_budget = budget
+        with token_budget_scope(budget):
+            while self.running and self.self_loop_count < self.max_self_loops:
+                if budget is not None and budget.exceeded:
+                    self._exit_reason = f"token 预算耗尽 ({budget.used}/{budget.max_tokens})"
+                    logger.error(self._exit_reason)
+                    break
 
-            if not await self.should_continue():
-                logger.info("social_chat 会话结束条件满足，退出循环")
-                break
+                user_input = await self._user_input()
+                if user_input:
+                    self.self_loop_count = 0
+                    self.history_manager.append({"role": "user", "content": user_input})
 
-            await self.process_cycle()
+                if not await self.should_continue():
+                    logger.info("social_chat 会话结束条件满足，退出循环")
+                    break
+
+                try:
+                    await self.process_cycle()
+                except TokenBudgetExceededError as e:
+                    self._exit_reason = str(e)
+                    logger.warning(f"social_chat 会话因 token 预算退出: {e}")
+                    break
 
         if self.self_loop_count >= self.max_self_loops:
             self._exit_reason = f"达到最大自我循环次数 ({self.max_self_loops})"
@@ -138,8 +154,12 @@ class SocialChatSession(HeavySession):
         result = await self._input_manager.get_user_input()
         return result or ""
 
-    async def _inject_single_user_message(self) -> bool:
-        """用户输入已在 start() 循环顶部注入，此处不再重复注入。"""
+    async def _inject_first_user_message(self) -> bool:
+        """首条消息已由 start() 循环顶部经 _user_input() 注入，此处不再重复注入。"""
+        return False
+
+    async def _inject_incremental_user_message(self) -> bool:
+        """增量消息已由 start() 循环顶部经 _user_input() 注入，此处不再重复注入。"""
         return False
 
     async def _on_cycle_start(self) -> None:
@@ -152,8 +172,9 @@ class SocialChatSession(HeavySession):
         llm_messages = [
             {"role": "system", "content": get_social_chat_system_prompt()}
         ] + messages
-        return await call_llm(
-            mode="basic-reason",
+        response = await call_llm(
+            level="flash",
             messages=llm_messages,
             tools=tools,
         )
+        return response.choices[0].message

@@ -15,6 +15,7 @@ import asyncio
 from datetime import datetime
 from typing import Dict, Any, Optional
 
+from config.settings import ChatConfig
 from utils.logger import setup_logging
 
 logger = setup_logging(__name__, log_level="INFO")
@@ -27,8 +28,15 @@ class EventChainMixin:
     # 事件链生命周期
     # ============================================================
 
-    def start_new_event_chain(self) -> None:
-        """开始新的事件链"""
+    def start_new_event_chain(self, trigger_text: str = "", chain_id: Optional[str] = None) -> None:
+        """开始新的事件链
+
+        Args:
+            trigger_text: 事件链触发原因（truck 向 PFCA 注入的第一轮消息），
+                由灵光一现记事本随文档自动记录。
+            chain_id: 外部预生成的链 ID（station 出队即生成，保证 proactive 阶段
+                与 PFCA 阶段归属同一链）；None 则本地生成（hc 内部调用场景）。
+        """
         if self._event_chain_active:
             logger.warning("事件链已处于活动状态，无需重复开启")
             return
@@ -37,11 +45,18 @@ class EventChainMixin:
 
         self._event_chain_active = True
         self._current_event_chain = {
-            "chain_id": f"event_chain_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "chain_id": chain_id or f"event_chain_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
             "start_time": current_time,
             "end_time": None,
         }
         self._processed_by_hc = False
+
+        # 灵光一现记事本：随事件链开启创建缓存文档（缓存态，自动记录触发原因；
+        # PFCA terminate 真正结束时以事件标题命名落库）
+        from brain.hc.shortlight import get_shortlight_notepad
+        get_shortlight_notepad().begin_chain(
+            self._current_event_chain["chain_id"], trigger_text=trigger_text
+        )
 
         self._real_time_file = self._storage_path / f"event_history_{self._current_event_chain['chain_id']}_real_time.json"
 
@@ -84,6 +99,10 @@ class EventChainMixin:
         self._on_event_chain_end()
         # 事件链收尾：触发 bequest 经验登记（责任从 PFCA 收尾移至事件链收尾）
         self._trigger_bequest_learning()
+        # 事件链收尾：丢弃记事本缓存文档（真正结束路径已在 terminate 落库；
+        # 熔断/强停等未真正结束路径不落库，缓存丢弃）
+        from brain.hc.shortlight import get_shortlight_notepad
+        get_shortlight_notepad().discard_chain()
 
         logger.info(
             f"事件链已结束并持久化: {file_path}，"
@@ -95,7 +114,13 @@ class EventChainMixin:
 
         一次完整处理周期（事件链）结束时，统一登记该周期内各会话产生的
         情绪结果经验；责任从 PFCA 收尾移至事件链收尾。
+
+        紧急关闭：bequest 经验登记存在静默报错，现由 ChatConfig.BEQUEST_LEARNING_ENABLED
+        总控（默认关闭），需要恢复时置 True 或设置环境变量 ABYSS_BEQUEST_LEARNING=1。
         """
+        if not ChatConfig.BEQUEST_LEARNING_ENABLED:
+            logger.warning("bequest 经验登记已关闭（BEQUEST_LEARNING_ENABLED=False），跳过登记")
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -111,13 +136,23 @@ class EventChainMixin:
             self._bequest_task = None
 
     async def _run_bequest_learning(self) -> None:
-        """异步执行 bequest 经验登记（fire-and-forget 任务体）。"""
+        """异步执行 bequest 经验登记（fire-and-forget 任务体）。
+
+        失败语义：经验登记属重大关键链路，任何异常就地打印完整堆栈并
+        崩溃阻断（os._exit(1)，依赖 supervisor 重启）；不回灌、不吞错、不继续，
+        防止错误扩大蔓延（对齐项目崩溃语义约定）。
+        """
+        import os
+        import traceback
         from brain.base.light_agent.bequest_agent import BequestAgent
         try:
             agent = BequestAgent()
             await agent.run_all()
         except Exception as e:
-            logger.error(f"bequest 经验登记失败: {e}")
+            logger.critical(
+                f"bequest 经验登记失败，触发崩溃阻断: {e}\n{traceback.format_exc()}"
+            )
+            os._exit(1)
 
     def is_event_chain_active(self) -> bool:
         """事件链是否处于活动状态"""

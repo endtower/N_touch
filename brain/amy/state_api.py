@@ -4,7 +4,7 @@ Amy 模块状态契约（stable public API）
 
 供预设测试环境使用：把 amy 的 thought 持久化状态导出/还原为可读 JSON
 （崩溃/覆盖机制已移除，system_state 载荷随之取消）。
-- 载体：JSON（可肉眼编辑、可版本化），见 docs/archive/preset_test_env_design.md
+- 载体：JSON（可肉眼编辑、可版本化），设计记录见 docs/已完成.md（测试系统）
 - 归属：本契约归 Amy 模块暴露；tests 只做隔离运行时的组装与应用。
 - 全异步；任何获取失败直接抛异常阻断，不用 try-ex 兜底继续。
 - 注：`_consumers` 为实例级、EmotionalInterface 重建即空，不纳入快照。

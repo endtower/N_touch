@@ -17,7 +17,8 @@ PFCA Session - 统一的消息注入器
 - 实现抽象方法 _inject_first_user_message / _inject_incremental_user_message
   （每轮最多一条 user 消息，首条 > 增量 优先级）。
 - 工具能力统一由 tool_manager 提供（get_tools / handle_tool_call 委托）。
-- 自我保护上限由 config.settings.llm_config 驱动（max_rounds / max_no_tool_call）。
+- 自我保护上限由 config.settings.llm_config 驱动（max_no_tool_call）；空转防护仅保留
+  会话累计 token 预算熔断（轮数上限与重复调用检测已禁用，2026-09-09 决策）。
 """
 from typing import List, Dict, Any, Literal
 from utils.logger import get_logger
@@ -34,6 +35,13 @@ logger = get_logger('PFCASession', "DEBUG")
 class PFCASession(HeavySession):
     """PFCA Session - 统一的消息注入器"""
 
+    # 单会话累计 token 预算（唯一的空转熔断；token_stats.json 实测 pfca 单次均值 ~15.5k，
+    # 正常会话远低于该值，2M 仅拦截病理性空转）。
+    # 2026-09-09 决策：PFCA 移除轮数上限与重复调用检测，空转防护仅保留本预算熔断。
+    TOKEN_BUDGET = 2_000_000
+    # 连续重复调用检测已禁用（None = 不启用，见 HeavySession.repeat_threshold）
+    repeat_threshold = None
+
     def __init__(self):
         self.history_manager = get_pfca_history_manager()
         self.tool_manager = get_pfca_tool_manager()
@@ -48,8 +56,8 @@ class PFCASession(HeavySession):
         self.max_no_tool_call = llm_config.MAX_NO_TOOL_CALLS
         self.tool_error_count = 0
         self.max_tool_error = 3
-        # 循环上限（父类 should_continue 默认基于 max_rounds 判断）
-        self.max_rounds = llm_config.MAX_SELF_LOOPS
+        # 轮数上限已禁用（None = 不限轮数）：空转防护仅保留 token 预算熔断
+        self.max_rounds = None
         self._rounds = 0
 
     def get_tools(self) -> List[Dict]:
@@ -94,7 +102,7 @@ class PFCASession(HeavySession):
 
         from utils.llm_client_manager import call_llm
         response = await call_llm(
-            mode='basic-reason',
+            level='flash',
             messages=full_messages,
             tools=self.get_tools(),
         )

@@ -14,11 +14,14 @@ LLM 工具入参也统一为 session_id，不再单独传 session_type。
 """
 
 import json
+import time
 import asyncio
+from functools import partial
 from typing import Dict, Any, List
+from brain.amy.constants import FinalEvaluationAct
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
-from brain.base import ToolManager
+from brain.base import ToolManager, ToolHC, ToolSocial
 from brain.hc.global_session_state import get_global_session_state
 from brain.pfc.pfca.pfca_input_manager import (
     get_pfca_input_manager,
@@ -47,7 +50,7 @@ class PFCA_tool_manager(ToolManager):
                 "type": "function",
                 "function": {
                     "name": "conversation_agent",
-                    "description": "启动conversation_agent，直接开启一段对话（约 5-15 句）。可指定目标会话 id；不指定则默认为主人的私聊会话。",
+                    "description": "启动conversation_agent，开启一段对话（约 5-15 句）。可指定目标会话 id；不指定则默认为主人的私聊会话。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -65,7 +68,7 @@ class PFCA_tool_manager(ToolManager):
                             },
                             "max_messages": {
                                 "type": "integer",
-                                "description": "本段话题的消息条数软上限，达到后会回到 PFCA 重新拟定策略。首次建议 0-5。"
+                                "description": "本段话题的发送轮次软上限（一次发送工具调用计 1，即使拆成多条消息），达到后回到 PFCA 重新拟定策略。首次建议 0-5。"
                             }
                         },
                         "required": ["session_id", "purpose", "max_messages"]
@@ -75,92 +78,55 @@ class PFCA_tool_manager(ToolManager):
             {
                 "type": "function",
                 "function": {
-                    "name": "social_agent",
-                    "description": "启动social_agent，对其他人（群聊或非主人私聊）发起社交任务。委托 social_agent 制定计划，并执行该计划。",
+                    "name": "social_chat_agent",
+                    "description": ("启动 social_chat_agent，在主人的监管/协作/支持下，与目标对话进行沟通，适用于谨慎环境的社交任务。"),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "session_id": {
                                 "type": "string",
-                                "description": "工作会话 id，格式 'type_id'，例如 'group_xxx' / 'private_yyy'（非主人会话）。"
+                                "description": "工作会话 id，格式 'type_id'（如 'group_xxx' / 'private_yyy'）。不能是主人的私聊会话（主人私聊用 conversation_agent）。"
                             },
-                            "task_info": {
+                            "purpose": {
                                 "type": "string",
-                                "description": "社交任务内容：任务目标，与现状简报，前因后果等。"
+                                "description": "社交任务书：目标 / 现状 / 期望结局 / 关键约束。给出具体策略而非话术；禁止描述自己的情绪。"
+                            },
+                            "extra_info": {
+                                "type": "string",
+                                "description": "可选，任务补充材料：相关消息原文、人物印象要点、前因后果。严禁含糊指代（要求告知某事结果必须附结果内容）。"
                             }
                         },
-                        "required": ["session_id", "task_info"]
+                        "required": ["session_id", "purpose"]
                     }
                 }
             },
+            ToolSocial.get_query_history_tool_schema(),
             {
                 "type": "function",
                 "function": {
-                    "name": "query_history",
-                    "description": "查询某个会话的历史聊天记录。",
+                    "name": "wait_and_observe",
+                    "description": (
+                        "在指定目标会话等待对方的回复。"
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "session_id": {
                                 "type": "string",
-                                "description": "目标会话 id，格式 'type_id'。"
+                                "description": "目标会话 id，格式 'type_id'，例如 'private_xxx' / 'group_yyy'。"
                             },
-                            "search_range": {
-                                "type": "string",
-                                "description": "格式 'last_n'，例如 'last_10' 表示最后 10 条。"
+                            "seconds": {
+                                "type": "number",
+                                "description": "最长等待秒数",
+                                "minimum": 10.0,
+                                "maximum": 30.0
                             }
                         },
-                        "required": ["session_id", "search_range"]
+                        "required": ["session_id", "seconds"]
                     }
                 }
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "memory_agent",
-                    "description": "管理角色第一印象与关系信息（写入通讯录的角色说明 / 短期记忆中的角色群聊信息）。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "session_id": {
-                                "type": "string",
-                                "description": "会话 id，格式 'type_id'。"
-                            },
-                            "modification_type": {
-                                "type": "string",
-                                "enum": ["session", "mentioned_person"],
-                                "description": "'session' 修改目标会话印象；'mentioned_person' 创建会话中被提及的重要人物。"
-                            },
-                            "content": {
-                                "type": "string",
-                                "description": "自然语言描述要修改的方向。"
-                            },
-                            "extra_name": {
-                                "type": "string",
-                                "description": "仅 modification_type='mentioned_person' 时必填，被提及人物的名字。"
-                            }
-                        },
-                        "required": ["session_id", "modification_type", "content"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "query_address_book",
-                    "description": "查看通讯录（可联系的会话 / 群聊），或直接查询指定角色的印象。查找范围可选「私聊」「群聊」「全部」；也可以输入具体角色名称，此时将直接查询该角色在记忆中的印象。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "search_range": {
-                                "type": "string",
-                                "description": "查找范围：「私聊」「群聊」「全部」之一，或具体角色名称（如「主人」）。输入具体名称时，将直接查询该角色的印象。"
-                            }
-                        },
-                        "required": ["search_range"]
-                    }
-                }
-            },
+            ToolSocial.get_query_address_book_tool_schema(),
             {
                 "type": "function",
                 "function": {
@@ -186,42 +152,37 @@ class PFCA_tool_manager(ToolManager):
             {
                 "type": "function",
                 "function": {
-                    "name": "event_register_agent",
-                    "description": "管理长期事件（即下次系统自动唤醒时该处理什么）。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": "事件前因后果、相关人物、下次激活时间等。ongoing 必须注明具体未完成事件。"
-                            },
-                            "operation_type": {
-                                "type": "string",
-                                "enum": ["create_ongoing", "update_ongoing", "create_completed"],
-                                "description": "create_ongoing=新建持续关注事件；update_ongoing=推进或结束 ongoing；create_completed=归档有长期学习意义的完成事件。"
-                            }
-                        },
-                        "required": ["content", "operation_type"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
                     "name": "terminate",
                     "description": "结束当前 PFCA 会话，等待下一事件再次唤醒。",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "reason": {
+                            "summary": {
                                 "type": "string",
-                                "description": "本次会话总结：前因后果、自我感受，需包含具体人物名称。"
+                                "description": (
+                                    "本次会话的总结：完整前因后果、自我感受与关键细节，需包含具体人物名称。"
+                                    "该总结会写入短期记忆，并随记事本一同落库存档"
+                                    "——事件经过无需再用 record_to_notepad 记录。"
+                                )
+                            },
+                            "title": {
+                                "type": "string",
+                                "maxLength": 15,
+                                "description": "本次事件的简易标题（不超过 15 字），最终评价想法将绑定该标题。"
+                            },
+                            "final_evaluation": {
+                                "type": "string",
+                                "enum": FinalEvaluationAct.names(),
+                                "description": "本次 PFCA 会话的最终评价，仅第二次调用（确认退出时）生效；不填按无评价"
                             }
                         },
-                        "required": ["reason"]
+                        "required": ["summary", "title"]
                     }
                 }
-            }
+            },
+            ToolHC.get_list_notes_tool_schema(),
+            ToolHC.get_query_note_tool_schema(),
+            ToolHC.get_pfca_record_note_tool_schema(),
         ]
 
     def __init__(self):
@@ -230,14 +191,17 @@ class PFCA_tool_manager(ToolManager):
         # 初始化工具映射表，用于动态路由
         self.tool_functions = {
             "conversation_agent": self.conversation_agent,
-            "social_agent": self.social_agent,
-            "query_history": self.query_history,
+            "social_chat_agent": self.social_chat_agent,
+            # consumer_id 显式传 "pfca"：LLM 已读到的消息推进 pfca 游标，truck 不再重复触发
+            "query_history": partial(ToolSocial.query_history, consumer_id="pfca"),
+            "wait_and_observe": self.wait_and_observe,
             "terminate": self.terminate,
-            "memory_agent": self.memory_adjustment,
-            "query_address_book": self._query_address_book,
+            "query_address_book": ToolSocial.query_address_book,
             "advanced_decision_agent": self.deep_thinking,
             "recall_memory": self.recall_memory,
-            "event_register_agent": self.event_judgement
+            "query_note": self.query_note,
+            "list_notes": self.list_notes,
+            "record_to_notepad": self.record_to_notepad
         }
 
     @async_handle_errors()
@@ -323,7 +287,7 @@ class PFCA_tool_manager(ToolManager):
         Args:
             purpose: 本次聊天的目的与期望结局，具体策略与计划。
             extra_info: 额外补充信息（其他会话消息原文、agent 结论 / 计划书等）。
-            max_messages: 软限制消息条数
+            max_messages: 软限制发送轮次数（一次发送工具调用计 1）
             session_id: 可选，目标会话 id，格式 'type_id'。为空时默认主人的私聊会话。
 
         Returns:
@@ -362,109 +326,76 @@ class PFCA_tool_manager(ToolManager):
         logger.info(f"conversation模块返回结果(session_id={session_id}): {chat_result}")
         return chat_result
 
-    async def social_agent(self, session_id: str, task_info: str) -> Any:
+    async def social_chat_agent(self, session_id: str, purpose: str, extra_info: str = "") -> Any:
         """
-        启动social_agent，对其他人（群聊 / 非主人私聊）发起社交任务。       
-        委托 social_agent 制定计划：与主人沟通审批后输出方案。
+        启动 social_chat_agent，对其他人（群聊 / 非主人私聊）推进一个社交任务。
+
+        purpose / extra_info 拼装为任务书直传 SocialChatCore.start()；
+        会话注册与汇报窗口锚点由 core 自治，工具层不做重复注册；
+        对外发言的监管（发送模式 / 主人审批）由 social_chat 内部处理。
 
         Args:
-            session_id: 工作会话 ID，格式为 "type_id"（如 "group_xxx" / "private_yyy"）。
+            session_id: 工作会话 id，格式 "type_id"（如 "group_xxx" / "private_yyy"）。
                 不能是主人的私聊会话（主人私聊请用 conversation_agent）。
-            task_info: 社交任务计划书（目标 / 现状 / 期望结局 / 关键约束 / 涉及人物等）。
+            purpose: 社交任务书：目标 / 现状 / 期望结局 / 关键约束。
+            extra_info: 可选补充材料（相关消息原文、人物印象要点、前因后果）。
 
         Returns:
-            Dict[str, Any]: social_agent 返回的结果（含 plan / rounds 等）
+            Dict[str, Any]: social_chat 返回结果 {summary_text, messages_sent, exit_reason}
         """
         if not session_id or not session_id.strip():
             raise ValueError("session_id 必填")
-        if not task_info or not task_info.strip():
-            raise ValueError("task_info 必填")
+        if not purpose or not purpose.strip():
+            raise ValueError("purpose 必填")
 
         from config.role_settings import RoleConfig
         master_private = f"private_{RoleConfig.MASTER_ID}"
         if session_id.strip() == master_private:
             raise ValueError(
-                f"social_agent 不能用于主人的私聊会话 ({master_private})；"
+                f"social_chat_agent 不能用于主人的私聊会话 ({master_private})；"
                 f"请改用 conversation_agent。"
             )
 
-        # "消费一次"语义约束：
-        # social_agent 下游会通过 social_chat_core.start() 进入 social_chat，
-        # social_chat 的 input_manager 从 pfca_sessions[*].last_processed_time 读起点
-        # （不存在则直接 raise，阻断全量拉取）。这里在 social_agent 入口处显式
-        # 注册两条会话，让下游一定能在 pfca_sessions 里查到起点。
-        # 顺序：主人会话先、工作会话后。
-        from brain.hc.global_session_state import get_global_session_state
-        focus_state = get_global_session_state()
-        try:
-            await focus_state.add_pfca_session(master_private, "主人")
-        except Exception as e:
-            logger.error(f"social_agent 注册主人会话 {master_private} 到 pfca_sessions 失败: {e}", exc_info=True)
-            raise
-        try:
-            await focus_state.add_pfca_session(session_id.strip(), "")
-        except Exception as e:
-            logger.error(f"social_agent 注册工作会话 {session_id.strip()} 到 pfca_sessions 失败: {e}", exc_info=True)
-            raise
+        if extra_info and extra_info.strip():
+            combined_purpose = (
+                f"本次任务由 pfca 发布（对其他人 / 群聊的社交任务）\n"
+                f"任务目标：{purpose.strip()}\n"
+                f"任务格外信息：{extra_info.strip()}"
+            )
+        else:
+            combined_purpose = purpose.strip()
 
-        logger.debug(f"social_agent: session_id={session_id}, task_info长度={len(task_info)}")
-
-        # 直接委托 ConversationCore / SocialChatCore（不再经过 social_agent 模块）：
-        # 1) 先用 ConversationCore 与主人商讨社交计划并获取审批；
-        # 2) 再用 SocialChatCore 把主人确认后的方案发送到工作会话。
-        from brain.chat.conversation.conversation_core import get_conversation_core
         from brain.chat.social_chat.social_chat_core import SocialChatCore
-        from config.settings import chat_config
-
-        # —— 1. 与主人商讨计划并获取审批 ——
-        combined_purpose = (
-            "本次任务由 pfca 发布\n"
-            "本次任务为对其他人（群聊 / 非主人私聊）发起社交任务\n"
-            f"任务目标：{task_info.strip()}\n"
-            "请与主人商讨社交计划并获取审批。"
-        )
-        conversation_core = get_conversation_core()
-        plan = await conversation_core.start_session(
-            session_id=master_private,
+        result = await SocialChatCore().start(
             purpose=combined_purpose,
-            max_messages=5,
-        )
-        plan_text = plan or ""
-
-        # —— 2. 把主人确认后的方案发送到工作会话 ——
-        enforcement_level = getattr(chat_config, "SOCIAL_CHAT_ENFORCEMENT_LEVEL", "L1")
-        social_chat_core = SocialChatCore()
-        result = await social_chat_core.start(
-            purpose=plan_text,
             working_session_id=session_id.strip(),
-            preset_messages=[{"text": plan_text}] if plan_text else [{"text": task_info.strip()}],
-            enforcement_level=enforcement_level,
         )
-        logger.info(f"social_agent 返回结果: {result}")
+        logger.info(f"social_chat_agent 返回结果: {result}")
         return result
 
-    async def query_history(self, session_id: str, search_range: str) -> str:
-        """
-        查询指定会话的最新历史聊天记录，并把 pfca 游标推进到本次拉取的最大 seq。
+    async def wait_and_observe(self, session_id: str, seconds: float) -> str:
+        """在目标会话等待对方的回复（走 PFCA 游标，"pfca" 消费者）。
+
+        游标语义（与 query_history / truck 未读检测共用同一游标）：
+        1. 获取 PFCA 游标进度，作为本轮等待的已读基线；
+        2. 每秒轮询目标会话未读用户消息（seq > 游标且 user_id != 'system'，
+           即只认对方的回复，自己发出的消息不算回复）；
+        3. 检测到回复：fetch_unread 拉取消息内容并推进 PFCA 游标到最新 seq
+           （消费）——之后 truck 未读检测不再重复触发本会话；
+        4. 超时无回复：游标不动（无消息可消费）。
 
         Args:
-            session_id: 会话标识，格式为 "type_id"，如 "private_1234567890" / "group_198431299"
-            search_range: 历史记录查询范围，格式为'last_n'，例如'last_10'
+            session_id: 目标会话 id，格式 "type_id"，如 "private_xxx" / "group_xxx"。
+            seconds: 最长等待秒数（10-30，越界收敛到边界）。
 
         Returns:
-            str: 查询到的历史消息内容
+            str: 收到的回复内容，或超时提示。
         """
-        logger.debug(f"执行历史记录查询操作，时间范围: {search_range}")
-
-        message_count = 10
-        if search_range:
-            import re
-            last_n_match = re.match(r'last_(\d+)', search_range)
-            if last_n_match:
-                message_count = int(last_n_match.group(1))
-            else:
-                logger.error(f"消息数量格式错误: {search_range}")
-                return "消息数量格式错误，请使用正确的格式: 'last_n'，其中n为要返回的消息条数，例如'last_10'表示返回最后10条消息。"
+        import datetime
+        session_id = (session_id or "").strip()
+        if not session_id:
+            raise ValueError("wait_and_observe 缺少必填参数 session_id")
+        seconds = min(max(float(seconds), 10.0), 30.0)
 
         from memory.message_repository import get_message_store
         from memory.session_history import (
@@ -473,50 +404,106 @@ class PFCA_tool_manager(ToolManager):
             MessageFormatOptions,
         )
 
-        # 用单例（测试隔离库/真实库），勿新建默认路径实例
         store = get_message_store()
-        session_data = await store.get_latest_session_messages(session_id, message_count)
-        messages = session_data.get("message_list", [])
-
-        # 拉取到目标的最新消息后，推进 pfca 游标到本次拉取的最大 seq ——
-        # LLM 已读到这些消息，truck 未读检测（seq > pfca 游标）不再重复触发本会话。
-        if messages:
-            target_seq = max(m.get("_seq") or -1 for m in messages)
-            current = await store.get_cursor(session_id, "pfca")
-            if target_seq > current:
-                await store.advance_cursor(session_id, "pfca", target_seq)
-                logger.info(f"query_history 已推进 pfca 游标 {current} -> {target_seq} ({session_id})")
-
         history = get_global_session_history()
-        formatted_lines, _ = history.format_messages(
-            messages,
-            FetchOptions(
-                message_format=MessageFormatOptions(
-                    show_new_marker=False,
-                    show_timestamp=True
-                )
-            )
-        )
-        messages_str = "\n".join(formatted_lines) if formatted_lines else ""
-        chat_result = messages_str if messages_str else "未找到匹配的消息"
-        logger.debug(f"历史记录查询模块返回结果: {chat_result}")
-        return chat_result
 
-    async def terminate(self, reason: str, check: bool = False) -> str:
+        # 1. 获取 PFCA 游标进度，作为等待基线
+        baseline = await store.get_cursor(session_id, "pfca")
+        logger.info(
+            f"wait_and_observe 开始等待: session_id={session_id}, "
+            f"seconds={seconds}, pfca游标基线={baseline}"
+        )
+
+        start_time = time.time()
+        elapsed = 0.0
+        while elapsed < seconds:
+            wait_time = min(1.0, seconds - elapsed)
+            await asyncio.sleep(wait_time)
+            elapsed = time.time() - start_time
+
+            # 2. 只读探测未读用户消息（对方回复；system 消息是自己发言，不算回复）
+            if await store.count_unread_user_for(session_id, "pfca") <= 0:
+                continue
+
+            # 3. 消费：拉取未读（仅未读，不补历史）并推进 PFCA 游标到最新 seq
+            result = await history.fetch_unread(
+                session_id,
+                "",
+                consumer_id="pfca",
+                options=FetchOptions(
+                    message_format=MessageFormatOptions(
+                        exclude_system=True,
+                        show_timestamp=True,
+                    )
+                ),
+                advance_cursor=True,
+                max_unread=20,
+                min_messages=0,
+            )
+            if not result.has_new:
+                # 计数与拉取之间游标已被其他路径推进（竞态），继续等待
+                continue
+
+            new_cursor = await store.get_cursor(session_id, "pfca")
+            current_time = datetime.datetime.now().strftime("%H:%M:%S")
+            content = "\n".join(result.formatted_lines) if result.formatted_lines else ""
+            logger.info(
+                f"wait_and_observe 收到回复，推进 pfca 游标 "
+                f"{baseline} -> {new_cursor} ({session_id})"
+            )
+            return f"等待 {int(elapsed)} 秒后收到回复，当前时间：{current_time}\n{content}"
+
+        current_time = datetime.datetime.now().strftime("%H:%M:%S")
+        logger.info(
+            f"wait_and_observe 超时: session_id={session_id}, pfca游标保持 {baseline} 不变"
+        )
+        return f"等待观察完成，未收到对方回复，总共等待 {int(seconds)} 秒，当前时间：{current_time}"
+
+    async def query_note(self, title: str) -> str:
+        """查询记事本某一章节（按标题精确匹配，重名取最新）的完整细节，
+        委托通用 ToolHC.query_note（起因/总结/自我评价/逐条记录及元数据）。"""
+        return await ToolHC.query_note(title)
+
+    async def list_notes(self) -> str:
+        """列出记事本全部已落库笔记概览，委托通用 ToolHC.list_notes
+        （标题/触发原因摘要/落库时间/记录条数；为 query_note 提供标题来源）。"""
+        return await ToolHC.list_notes()
+
+    async def record_to_notepad(self, text: str, usage: str) -> str:
+        """记事本（灵光一现）写入——PFCA 策略视角：采集观察到的对方素材，不做经验提炼。
+        仅收纯文本与语境标注；来源标注 source="pfca"，溯源走事件链，
+        记录进当前事件链的缓存文档，terminate 落库时统一以事件标题命名。"""
+        note_id = await ToolHC.record_note(
+            text=text,
+            source="pfca",
+            session_id="",
+            session_name="",
+            usage=usage,
+        )
+        return f"已记录至记事本（{note_id}）。"
+
+    async def terminate(self, summary: str, title: str = "", check: bool = False, final_evaluation: str = "") -> str:
         """
         结束当前全部的任务链。
 
-        第一次调用：返回行动记录和确认提示，等待用户确认。
-        第二次调用：真正执行退出逻辑。
+        第一次调用：将 summary/title/final_evaluation 暂存进 GlobalSessionState（不落库），
+        返回行动记录和确认提示。
+        第二次调用（最后一次）：以本次参数把 summary 写入短期记忆、随记事本落库并登记
+        最终评价（SC 轴闭环 + 想法入池）——保证两次调用只有最后一次计入 temporary memory。
+        若会话未经第二次调用结束（max_rounds 熔断 / 强停等），由 pfca_core.start 的
+        退出兜底把暂存补写入短期记忆（防总结丢失，docs/已完成.md #9）。
 
         Args:
-            reason: 结束当前任务链的原因或说明
+            summary: 本次会话的总结（完整前因后果、自我感受与关键细节）
+            title: 本次事件的简易标题（≤15 字），最终评价想法绑定该标题
             check: 已废弃，不再使用
+            final_evaluation: 本次 PFCA 会话的最终评价（词表名，来自 FinalEvaluationAct）；
+                仅第二次调用（确认退出）时生效；留空按「未得到他人评价与反馈」登记
 
         Returns:
             str: 操作结果，包含行动记录和确认提示
         """
-        logger.debug(f"执行terminate操作，原因: {reason}")
+        logger.debug(f"执行terminate操作，总结: {summary}")
 
         from brain.hc.global_session_state import get_global_session_state
         focus_state = get_global_session_state()
@@ -528,7 +515,17 @@ class PFCA_tool_manager(ToolManager):
 
         if not terminate_confirmed:
             focus_state._data["terminate_confirmed"] = True
-            logger.info("terminate 第一次调用，显示确认提示")
+            logger.info("terminate 第一次调用，暂存总结并显示确认提示")
+
+            # 只暂存、不落库（docs/已完成.md #9 修复）：两次调用语义下只有"最后一次"
+            # 计入 temporary memory——第二次调用（确认退出）才写入；若会话经
+            # max_rounds 熔断/强停等路径结束、永远没有第二次调用，则由
+            # pfca_core.start 的退出兜底把暂存补写入临时记忆。
+            focus_state._data["pending_terminate"] = {
+                "summary": summary,
+                "title": title,
+                "final_evaluation": final_evaluation,
+            }
 
             return f"""你的行动记录：
 {actions_text}
@@ -542,121 +539,54 @@ class PFCA_tool_manager(ToolManager):
         focus_state._data["terminate_confirmed"] = False
         logger.info("terminate 第二次调用，执行真正的退出逻辑")
 
-        # 第二次调用时，将 LLM 提供的「reason」作为唯一内容写入短期记忆。
+        # 第二次调用（最后一次）才把「summary」写入短期记忆：保证两次调用只有最后一次
+        # 计入，首次调用的暂存在此弹出作废（若 LLM 更新了总结，以本次为准）。
         # 不再混入本地拼接的 actions_text 等字段，保证短期记忆内容仅来源于工具属性。
         # 不传 identifier：让每一轮的"事件概要"都作为独立条目保留下来，
         # 仅受 MAX_MESSAGES 自然滚动约束；不要让「pfca_terminate_summary」这种常量
         # 标识符把历史概要逐轮覆盖掉，否则「近期经历」里永远只剩最新一条概要。
-        try:
-            from brain.hc.temporary_memory import get_temporary_memory
-            get_temporary_memory().add(reason)
-            logger.info("已将 terminate 总结写入短期记忆")
-        except Exception as e:
-            logger.warning(f"写入 terminate 短期记忆失败: {e}")
+        # 写入失败直接上抛（硬约定 #4），不吞。
+        from brain.hc.temporary_memory import get_temporary_memory
+        focus_state._data.pop("pending_terminate", None)
+        get_temporary_memory().add(summary)
+        logger.info("已将 terminate 总结写入短期记忆（最后一次调用）")
+
+        # 登记本次 PFCA 会话的最终评价（SC 轴闭环 + 想法入池）：
+        # 好 +10 / 坏 -10 / 无评价向 40 单点抚平（pull_toward_value）。
+        # 评价归一：LLM 未明确选择「好/坏」（空值、词表外、含糊文本）一律自动落
+        # 「未得到他人评价与反馈」，不让幻觉词表值触发 ValueError 崩溃。
+        final_evaluation = (final_evaluation or "").strip()
+        if FinalEvaluationAct.kind_of(final_evaluation) not in ("good", "bad"):
+            final_evaluation = FinalEvaluationAct.none_name()
+        # 关键闭环步骤，禁止 try-except 吞异常；获取失败直接上抛崩溃阻断。
+        # title 透传给最终评价，想法 desc 格式：在事件{title} 中，{评价词}。
+        from brain.amy.emotional_interface import get_emotional_interface
+        ei = await get_emotional_interface()
+        await ei.apply_final_evaluation(final_evaluation, title)
+
+        # 灵光一现记事本落库（真正结束）：以本次事件标题命名，将本事件链期间
+        # conversation 记录的素材、触发原因、PFCA 总结与最终评价一并持久化到 shortlight/notes/。
+        # 无活跃链文档属状态异常，直接上抛崩溃阻断（硬约定 #4）。
+        from brain.hc.shortlight import get_shortlight_notepad
+        await get_shortlight_notepad().finalize_chain(
+            title, final_evaluation=final_evaluation, summary=summary
+        )
 
         from brain.pfc.pfca.pfca_core import get_pfca_instance
         pfca_core = get_pfca_instance()
         await pfca_core.stop()
         logger.info("PFCA Core 退出标志已设置，执行退出流程")
 
-        return f"已成功结束任务链，原因: {reason}"
-
-    async def memory_adjustment(self, session_id: str, modification_type: str, content: str, extra_name: str = "") -> str:
-        """
-        调整或创建记忆
-
-        Args:
-            session_id: 发生的会话ID（在哪一个会话的会谈中被提及的）。
-                        格式为 'type_id'，例如 'private_1234567890' / 'group_198431299'。
-                        系统会根据该 ID 自动判定是群聊（Group）还是私聊（Session/Character）。
-            modification_type: 修改类型。
-                        'session'：修改本会话印象（兼容群聊/私聊）。
-                        'mentioned_person'：创建一个在该会话中被提及的重要人物。
-            content: 自然语言描述修改的值。
-            extra_name: 仅当 modification_type='mentioned_person' 时必填，被提及人物的名字。
-
-        Returns:
-            str: Agent 的文本回复
-        """
-        # 参数校验
-        if not session_id:
-            return "[错误] memory_adjustment 缺少必填参数 session_id"
-        if modification_type not in ("session", "mentioned_person"):
-            return f"[错误] memory_adjustment 的 modification_type 必须是 'session' 或 'mentioned_person'，收到: {modification_type}"
-        if not content:
-            return "[错误] memory_adjustment 缺少必填参数 content"
-        if modification_type == "mentioned_person" and not extra_name:
-            return "[错误] modification_type='mentioned_person' 时必须提供 extra_name（被提及人物的名字）"
-
-        logger.info(
-            f"执行memory_adjustment操作: session_id={session_id}, "
-            f"modification_type={modification_type}, content={content}, extra_name={extra_name}"
-        )
-
-        from brain.hc.global_session_state import get_global_session_state
-        from brain.base.light_agent.memory_agent import MemoryAgent
-
-        # 事件链由 station 在调 async_process_from_att_factory 前统一启动，
-        # 这里不再启动事件链（与 station 的事件链生命周期对齐）。
-        focus_state = get_global_session_state()
-
-        # 记录到行动日志
-        if modification_type == "mentioned_person":
-            pfca_action = f"记录被提及人物「{extra_name}」（来源会话 {session_id}）：{content}"
-        else:
-            pfca_action = f"调整会话「{session_id}」印象：{content}"
-        focus_state.manager_pfca_actions('add', pfca_action)
-        logger.info(f"添加pfca action: {pfca_action}")
-
-        agent = MemoryAgent()
-        result = await agent.run(
-            session_id=session_id,
-            modification_type=modification_type,
-            content=content,
-            extra_name=extra_name or None,
-        )
-        return str(result)
-    async def _query_address_book(self, search_range: str) -> str:
-        """
-        查询通讯录 / 指定角色的印象
-
-        Args:
-            search_range: 查找范围。可选'私聊'、'群聊'、'全部'；
-                          或直接输入具体角色名称，此时将直接查询该角色的印象。
-
-        Returns:
-            str: 通讯录信息；输入具体名称时返回该角色的印象信息。
-        """
-        logger.debug(f"执行query_address_book操作，查找范围: {search_range}")
-
-        from memory.address_book import get_address_book
-        address_book = get_address_book()
-
-        if search_range == '私聊':
-            return await address_book.get_private_contacts()
-        if search_range == '群聊':
-            return await address_book.get_group_contacts()
-        if search_range == '全部':
-            return await address_book.get_all_contacts()
-
-        # 其他输入视为具体角色名称 → 直接查询该角色的印象
-        from brain.hc.database.character_compose import CharacterCompose
-        character_compose = CharacterCompose()
-        impression_result = await character_compose.first_session_impression_search(name=search_range)
-        formatted_info = impression_result.get(
-            "formatted_info", f"你对{search_range}没有任何印象。"
-        )
-        return f"你查询了「{search_range}」的印象：\n{formatted_info}"
+        return f"已成功结束任务链，总结: {summary}"
 
     async def deep_thinking(self, thinking_mode: str, current_summary: str = "") -> str:
         """
-        深入思考工具，处理重新整理思绪、总结观点或启动社交计划三种模式。
+        深入思考工具，处理重新整理思绪或总结观点两种模式。
 
         Args:
             thinking_mode:
                 - reorganize: 重新整理思绪，使用 ReorganizeAgent 重新思索根本性行动方针
                 - opinion: 观点，根据现状总结形成观点
-                - social: 社交计划，调用 social_agent(session_id, task_info) 工具处理社交计划
 
         Returns:
             str: 思考结果
@@ -678,8 +608,8 @@ class PFCA_tool_manager(ToolManager):
             decision_thought = direction_result.get("decision_thought", "")
 
             if clear_mind:
-                logger.info("检测到根本性方向错误，归档 PFCA 上下文并传入方向性指令")
-                pfca_history_manager.archive_context()
+                logger.info("检测到根本性方向错误，清空 PFCA 上下文并传入方向性指令")
+                pfca_history_manager.clear()
 
                 focus_state = get_global_session_state()
                 current_session = (focus_state.get_sessions() or [{}])[0]
@@ -706,35 +636,27 @@ class PFCA_tool_manager(ToolManager):
             opinion = opinion_result.get("opinion", "")
             return f"【观点】{opinion}"
 
-        elif thinking_mode == "social":
-            # thinking_mode "social" 已从 schema 中移除（社交计划请直接调 social_agent 工具）。
-            # 此分支保留作为保险：若旧代码 / 单元测试传入该模式，按 ValueError 上抛，强制让调用方改用 social_agent。
-            raise ValueError(
-                "advanced_decision_agent 不再支持 thinking_mode='social'；"
-                "请改用 social_agent(session_id, task_info) 工具。"
-            )
-
     async def recall_memory(self, operation: str, title: str) -> str:
         """
-        回想记忆，查找记忆中一个事件或经验/嘱托的完整信息
+        回想记忆，查找记忆中一个任务或经验/嘱托的完整信息
 
         Args:
-            operation: 操作类型，event=回想事件，bequest=回想经验/嘱托
-            title: 要回想的事件或经验/嘱托的标题（完整标题）
+            operation: 操作类型，task=回想任务，bequest=回想经验/嘱托
+            title: 要回想的任务或经验/嘱托的标题（完整标题）
 
         Returns:
             str: 检索结果
         """
         logger.debug(f"执行recall_memory操作，操作类型: {operation}，标题: {title}")
 
-        if operation == "event":
-            from brain.hc.database.event import EventOperations
-            event_ops = EventOperations()
-            event_id = await event_ops.get_event_id_by_title(title)
-            if not event_id:
-                result = f"未找到标题为「{title}」的事件"
+        if operation == "task":
+            from brain.hc.database.task import TaskOperations
+            task_ops = TaskOperations()
+            task_id = await task_ops.get_task_id_by_title(title)
+            if not task_id:
+                result = f"未找到标题为「{title}」的任务"
             else:
-                result = await event_ops.format_event_by_id(event_id)
+                result = await task_ops.format_task_by_id(task_id)
         elif operation == "bequest":
             from brain.hc.database.bequest import BequestOperations
             bequest_ops = BequestOperations()
@@ -743,47 +665,6 @@ class PFCA_tool_manager(ToolManager):
             return f"未知的操作类型: {operation}"
 
         return result
-
-    async def event_judgement(self, content: str, operation_type: str) -> str:
-        """
-        事件调整，根据 PFCA 的请求对事件进行记录、更新或归档。
-
-        Args:
-            content: 具体情况的详细描述
-            operation_type: 操作类型
-                - 'create_ongoing': 创建新的持续关注事件
-                - 'update_ongoing': 修改或完成一个持续关注事件
-                - 'create_completed': 创建一个独立的完成事件
-
-        Returns:
-            str: EventRegisterAgent 的最终文本回复（未使用工具的轮次）
-        """
-        logger.info(f"执行event_judgement操作，operation_type={operation_type}，内容: {content}")
-
-        from brain.hc.global_session_state import get_global_session_state
-        from brain.pfc.pfca.pfca_core import get_pfca_instance
-        from brain.base.light_agent.event_register_agent import EventRegisterAgent
-
-        focus_state = get_global_session_state()
-        action_desc = {
-            "create_ongoing": f"新增待办任务：{content}",
-            "update_ongoing": f"更新待办任务：{content}",
-            "create_completed": f"归档完成事件：{content}",
-        }.get(operation_type, f"记录待办任务：{content}")
-        focus_state.manager_pfca_actions('add', action_desc)
-
-        # 复用同一事件链内的 EventRegisterAgent 实例，确保 PFCA 在本条事件链中
-        # 多次调用 event_judgement 时，agent 的 messages / backlog 上下文是连续的。
-        pfca_core = get_pfca_instance()
-        if pfca_core.event_register_agent is None:
-            pfca_core.event_register_agent = EventRegisterAgent()
-            logger.debug("event_judgement: 为本次 PFCA 会话新建 EventRegisterAgent")
-        agent = pfca_core.event_register_agent
-        result = await agent.run(additional_content=content, operation_type=operation_type)
-
-        if isinstance(result, dict) and result.get('formatted_output'):
-            return result['formatted_output']
-        return str(result) if result else "任务已记录"
 
 
 # 全局PFCA工具管理器实例，延迟初始化

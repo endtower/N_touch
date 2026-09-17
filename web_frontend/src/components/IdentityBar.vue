@@ -38,7 +38,6 @@ const isPrivate = computed(() => props.session.scope === 'private')
 // 系统当前状态展示 (后端维护单一 activity 状态, 前端只渲染):
 //   - activity 存在且 status='tool_call':
 //       source='proactive' → "proactive 调用 xxx"
-//       source='social_agent' → "pfca→social_agent xxx" (层级链简化)
 //       其他 (pfca) → "LLM xxx"
 //   - activity 存在且 status='active' (模块活跃但未调工具):
 //       source='proactive' → "proactive 处理中"
@@ -53,15 +52,6 @@ const eventChainActive = computed<boolean | null>(() => {
   return v
 })
 const activity = computed(() => chat.state.activity)
-
-// 层级链简化显示 (social_agent 专用):
-//   - social_agent 广播带 parent_tool_name (如 "social_agent"),
-//     前缀简化为 "pfca→social_agent", title 保留完整工具名.
-const llmActivityText = computed(() => {
-  const s = activity.value
-  if (!s || s.status !== 'tool_call' || s.source !== 'social_agent' || !s.args_summary) return ''
-  return s.parent_tool_name ? `pfca→social_agent ${s.args_summary}` : `social_agent ${s.args_summary}`
-})
 
 function openManager() {
   popoverVisible.value = false
@@ -111,18 +101,7 @@ function onCreateSubmit(payload: { user_id: string; user_name: string; switch_to
         <el-icon :size="13"><Loading /></el-icon>
         <span class="activity-text">proactive 调用 {{ activity.args_summary }}</span>
       </span>
-      <!-- 2. social_agent 正在调用工具 (层级链, 显示 pfca→social_agent 简化前缀) -->
-      <span
-        v-else-if="activity && activity.status === 'tool_call' && activity.source === 'social_agent' && llmActivityText"
-        class="identity-hint-activity"
-        :title="activity.parent_tool_name
-          ? `social_agent (由 ${activity.parent_tool_name} 启动) 正在调用: ${activity.args_summary}`
-          : `social_agent 正在调用: ${activity.args_summary}`"
-      >
-        <el-icon :size="13"><Loading /></el-icon>
-        <span class="activity-text">{{ llmActivityText }}</span>
-      </span>
-      <!-- 3. LLM (pfca) 正在调用具体工具 -->
+      <!-- 2. LLM (pfca) 正在调用具体工具 -->
       <span
         v-else-if="activity && activity.status === 'tool_call' && activity.args_summary"
         class="identity-hint-activity"
@@ -131,7 +110,7 @@ function onCreateSubmit(payload: { user_id: string; user_name: string; switch_to
         <el-icon :size="13"><Loading /></el-icon>
         <span class="activity-text">LLM {{ activity.args_summary }}</span>
       </span>
-      <!-- 4. 模块活跃但未调工具 (proactive 启动后思考中) → "proactive 处理中" -->
+      <!-- 3. 模块活跃但未调工具 (proactive 启动后思考中) → "proactive 处理中" -->
       <span
         v-else-if="activity && activity.status === 'active' && activity.source === 'proactive'"
         class="identity-hint-proactive"
@@ -140,7 +119,7 @@ function onCreateSubmit(payload: { user_id: string; user_name: string; switch_to
         <el-icon :size="13"><Loading /></el-icon>
         proactive 处理中
       </span>
-      <!-- 5. 系统未激活 -->
+      <!-- 4. 系统未激活 -->
       <span
         v-else-if="eventChainActive === false"
         class="identity-hint-inactive"
@@ -149,7 +128,7 @@ function onCreateSubmit(payload: { user_id: string; user_name: string; switch_to
         <el-icon :size="13"><CircleClose /></el-icon>
         系统未激活
       </span>
-      <!-- 6. 系统激活 + LLM 思考中 -->
+      <!-- 5. 系统激活 + LLM 思考中 -->
       <span
         v-else-if="eventChainActive === true"
         class="identity-hint-active-idle"
@@ -158,7 +137,7 @@ function onCreateSubmit(payload: { user_id: string; user_name: string; switch_to
         <el-icon :size="13"><Loading /></el-icon>
         系统处理中…
       </span>
-      <!-- 7. 尚未同步系统状态 (初次握手前) -->
+      <!-- 6. 尚未同步系统状态 (初次握手前) -->
       <span
         v-else
         class="identity-hint-empty"

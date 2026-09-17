@@ -1,43 +1,54 @@
-# Abyss Core
+# N_Touch（Abyss Core）
 
-Abyss Core是一个模块化、高效且符合大脑功能分区的系统架构，旨在实现一个类似人类思维过程的AI聊天机器人系统。
+一个类脑架构的 AI 聊天机器人后端：外部消息经适配层写入消息库，注意力系统以
+**游标轮询**驱动 PFCA 决策层，再分发给对话代理；情绪系统（amy）与状态/记忆系统（hc）
+贯穿全程。QQ 侧经 NapCat（OneBot v11）接入，另带 Vue3 网页前端。
 
-## 项目架构概述
+> 本仓库由 Abyss_Core0.71 干净副本逐步重构而来（内部代号 N_Touch 0.1）。
 
-本项目采用双循环架构设计：
-- 主线程事件循环处理常规任务
-- 独立attention线程处理注意力相关功能
+## 快速入口
 
-项目采用神经科学术语命名模块（如att、pre等），实现高内聚低耦合的模块化设计。
+| 你想… | 看这里 |
+|---|---|
+| **了解项目与文档导航** | [docs/README.md](docs/README.md) — 项目概览 + 关键约束 + 全库索引 |
+| 查某个模块的 API | [docs/api/](docs/api/README.md) — 按代码包 1:1 对应的 API 参考 |
+| 查已完成 / 待办 / 现象 / 远景 | [docs/已完成.md](docs/已完成.md) · [docs/待办.md](docs/待办.md) · [docs/现象观察.md](docs/现象观察.md) · [docs/未来改进.md](docs/未来改进.md) |
+| 跑测试 | [docs/测试系统使用说明.md](docs/测试系统使用说明.md) |
 
-## 目录结构
+## 目录结构（2026-08 重构后）
 
 ```
-Abyss_Core/
-├── api/                 # API接口层，处理客户端请求
-├── core/                # 核心协调层，负责系统各模块的协调
-├── brain/               # 脑功能模块层，包含注意力、目的规划和对话功能
-│   ├── att/             # 注意力模块(attention)
-│   ├── pre/             # 前额叶模块(目的规划)
-│   └── chat/            # 对话模块
-├── memory/              # 记忆存储层，管理短期记忆和长期记忆
-├── utils/               # 通用工具函数
-├── config/              # 配置文件
-├── main.py              # 应用入口
-├── requirements.txt     # 依赖包列表
-└── logs/                # 日志目录（运行时生成）
+main.py               FastAPI 入口（lifespan 启动 SystemCore；注意：本身零业务路由）
+core/                 SystemCore + ServiceRegistry 生命周期
+adapt/                外部适配层：web(前端 5002)、onebot(NapCat 5001)、出站路由
+memory/               消息入库与游标消费（chat_history.db）
+brain/
+  att/                注意力：station 仲裁 + 4 个 truck + proactive 后台循环
+  pfc/                决策层（PFCA）
+  chat/               对话代理（conversation / social_chat）
+  amy/                情绪系统（EmotionalInterface 统一门面）
+  hc/                 全局状态 + SQLite 长期记忆库（memory.db）+ 临时记忆
+  base/               HeavyCore / HeavySession / ToolManager 等框架基类
+utils/                日志 / 错误处理 / LLM 客户端 / 动态提示词等共享服务
+web_frontend/         Vue3 前端（WS 契约权威定义在 src/types.ts）
+tests/                冒烟测试 + 预设测试环境
+scripts/              迁移与校验脚本（check_api_docs.py 文档漂移校验）
+docs/                 文档（入口索引 + 四份状态文档 + api/ 活文档 + 指南）
 ```
 
-## 核心功能模块
+## 端口
 
-- **API接口层**：处理来自NoneBot等客户端的请求
-- **核心协调层**：管理各模块的生命周期和通信
-- **注意力模块**：实现独立事件循环，管理注意力分配
-- **前额叶模块**：负责目的规划、目标设定和长期计划
-- **对话模块**：处理用户交互、对话生成和响应管理
-- **记忆存储层**：统一管理记忆功能
-- **通用工具层**：提供日志记录、消息处理等基础工具
+| 端口 | 组件 |
+|---|---|
+| 5000 | main.py FastAPI（仅承载 lifespan，无业务路由） |
+| 5001 | OneBot v11 反向 WS 服务端（NapCat 连入） |
+| 5002 | WebChannel：对前端的全部 HTTP + WS 接口 |
+| 5173 | web_frontend Vite 开发服（代理到 5002） |
+| 8080 | None_Tooth（NoneBot2，遗留；其 HTTP 桥已废弃） |
 
-## 开发指南
+## 启动
 
-请参考ARCHITECTURE_DOCUMENT.md获取详细的架构设计文档。
+```bash
+python main.py            # 后端（开发模式自带 reload）
+cd web_frontend && npm run dev   # 前端
+```

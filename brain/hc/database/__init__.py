@@ -1,7 +1,7 @@
 from .core import get_memory_db, MemoryDatabase
 from .character import CharacterOperations
 from .group import GroupOperations
-from .event import EventOperations
+from .task import TaskOperations
 from .bequest import BequestOperations
 from .fuzzy_role import FuzzyRoleOperations, get_fuzzy_role_ops
 from .familiarity import FamiliarityOperations, get_familiarity
@@ -15,7 +15,7 @@ __all__ = [
     'MemoryDatabase',
     'CharacterOperations',
     'GroupOperations',
-    'EventOperations',
+    'TaskOperations',
     'BequestOperations',
     'FuzzyRoleOperations',
     'get_fuzzy_role_ops',

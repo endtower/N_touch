@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """工具管理器基类：统一 get_tools + handle_tool_call 接口。
 
-设计文档：docs/archive/heavyweight_session_base_design.md
+设计记录：docs/已完成.md（HeavySession 框架基类）
 
 各 Session 的 *ToolManager 继承本基类，实现 get_tools() + handle_tool_call()。
 统一错误处理逻辑抽到基类 _safe_execute()：

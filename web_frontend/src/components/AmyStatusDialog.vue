@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
-import { MagicStick, Refresh, ChatLineSquare, Sunny, Lightning, Clock } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
-import type { AmyState, AmyThought, AmyActEntry, AmyDescriptionBand } from '../types'
+import { MagicStick, Refresh, ChatLineSquare, Sunny, Lightning, Clock, Plus, Edit, Delete, Odometer } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import type { AmyState, AmyThought, AmyActEntry, AmyFinalEvaluationEntry, AmyDescriptionBand } from '../types'
 
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [v: boolean] }>()
@@ -10,8 +10,19 @@ const emit = defineEmits<{ 'update:visible': [v: boolean] }>()
 const data = ref<AmyState | null>(null)
 const loading = ref(false)
 const lastFetchedAt = ref<number>(0)
-const expandedAct = ref<string | null>(null)
 let pollTimer: number | null = null
+
+// ===== 想法池编辑（调试/测试） =====
+const createDialogVisible = ref(false)
+const createForm = ref({ act: '', desc: '', intensity: 1.0, duration: 300 })
+const editDialogVisible = ref(false)
+const editTarget = ref<AmyThought | null>(null)
+const editForm = ref({ desc: '', act: '', intensity: 1.0, duration: 300 })
+const saving = ref(false)
+
+// ===== 最终评价登记（完整闭环：SC + 想法入池） =====
+const finalEvalDialogVisible = ref(false)
+const finalEvalForm = ref({ name: '', title: '' })
 
 watch(
   () => props.visible,
@@ -57,6 +68,137 @@ async function fetchData(silent = false) {
   }
 }
 
+async function apiJson(url: string, opts: RequestInit) {
+  const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts })
+  let body: any = null
+  try { body = await res.json() } catch { /* 忽略非 JSON 响应 */ }
+  if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`)
+  return body
+}
+
+/** 可编辑的 act 候选（排除系统内置类，仅编辑对话框用） */
+const allActNames = computed(() => {
+  if (!data.value) return [] as string[]
+  const names: string[] = []
+  for (const cat of ['external', 'evaluation', 'self_action'] as const) {
+    for (const e of data.value.acts[cat]) names.push(e.name)
+  }
+  return names
+})
+
+function openCreateWithAct(act: string) {
+  createForm.value = { act, desc: '', intensity: 1.0, duration: 300 }
+  createDialogVisible.value = true
+}
+
+/** 最终评价完整闭环（SC 涨跌 + 想法入池）：弹标题输入 → POST /amy/final-evaluation */
+function openFinalEval(name: string) {
+  finalEvalForm.value = { name, title: '' }
+  finalEvalDialogVisible.value = true
+}
+
+async function saveFinalEval() {
+  const title = finalEvalForm.value.title.trim()
+  if (!title) {
+    ElMessage.warning('请输入本次事件简易标题（≤15 字）')
+    return
+  }
+  if (title.length > 15) {
+    ElMessage.warning('标题不能超过 15 字')
+    return
+  }
+  saving.value = true
+  try {
+    await apiJson('/amy/final-evaluation', {
+      method: 'POST',
+      body: JSON.stringify({ final_evaluation: finalEvalForm.value.name, title }),
+    })
+    ElMessage.success('已登记最终评价（SC + 想法入池）')
+    finalEvalDialogVisible.value = false
+    await fetchData()
+  } catch (e: any) {
+    ElMessage.error(`登记失败: ${e?.message || e}`)
+  } finally {
+    saving.value = false
+  }
+}
+
+async function saveCreate() {
+  if (!createForm.value.act || !createForm.value.desc.trim()) {
+    ElMessage.warning('act 与描述必填')
+    return
+  }
+  saving.value = true
+  try {
+    await apiJson('/amy/thoughts', {
+      method: 'POST',
+      body: JSON.stringify({ ...createForm.value, desc: createForm.value.desc.trim() }),
+    })
+    ElMessage.success('已新增 thought')
+    createDialogVisible.value = false
+    await fetchData()
+  } catch (e: any) {
+    ElMessage.error(`新增失败: ${e?.message || e}`)
+  } finally {
+    saving.value = false
+  }
+}
+
+function openEdit(t: AmyThought) {
+  editTarget.value = t
+  editForm.value = {
+    desc: t.desc,
+    act: t.act,
+    intensity: t.intensity,
+    duration: Math.max(1, t.remaining_seconds),
+  }
+  editDialogVisible.value = true
+}
+
+async function saveUpdate() {
+  if (!editTarget.value) return
+  if (!editForm.value.desc.trim()) {
+    ElMessage.warning('描述不能为空')
+    return
+  }
+  saving.value = true
+  try {
+    const body: Record<string, unknown> = {
+      desc: editForm.value.desc.trim(),
+      act: editForm.value.act === editTarget.value.act ? undefined : editForm.value.act,
+      intensity: editForm.value.intensity,
+      duration: editForm.value.duration || undefined,
+    }
+    await apiJson(`/amy/thoughts/${editTarget.value.id}`, { method: 'PATCH', body: JSON.stringify(body) })
+    ElMessage.success('已更新 thought')
+    editDialogVisible.value = false
+    await fetchData()
+  } catch (e: any) {
+    ElMessage.error(`更新失败: ${e?.message || e}`)
+  } finally {
+    saving.value = false
+  }
+}
+
+async function removeThought(t: AmyThought) {
+  try {
+    await ElMessageBox.confirm(`删除 thought「${t.desc.slice(0, 30)}…」？删除后立即生效（system 类会在重启时恢复）。`, '删除确认', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  try {
+    await apiJson(`/amy/thoughts/${t.id}`, { method: 'DELETE' })
+    ElMessage.success('已删除 thought')
+    await fetchData()
+  } catch (e: any) {
+    ElMessage.error(`删除失败: ${e?.message || e}`)
+  }
+}
+
 function close() {
   emit('update:visible', false)
 }
@@ -88,12 +230,13 @@ function moodTone(v: number) {
   return { color: 'var(--text-3)', bg: 'var(--bg-subtle)', label: '平静' }
 }
 
-function actCategoryLabel(c: AmyThought['category']) {
+function actCategoryLabel(c: AmyThought['category'] | string) {
   switch (c) {
     case 'external':    return { label: '外部互动', color: 'var(--accent-2)' }
     case 'evaluation':   return { label: '评价',     color: 'var(--accent)' }
     case 'self_action':  return { label: '自身行为', color: 'var(--warn)' }
     case 'system':       return { label: '系统',     color: 'var(--text-3)' }
+    case 'final':        return { label: '最终评价', color: '#a78bfa' }
     default:             return { label: '未知',     color: 'var(--text-3)' }
   }
 }
@@ -107,12 +250,36 @@ function bandTextFor(value: number, bands: AmyDescriptionBand[] | undefined) {
   return b || bands[0] || null
 }
 
+// SC 描述带本身就是 0-100 单极区间，直接按原值匹配（不取绝对值）
+function scBandFor(value: number, bands: AmyDescriptionBand[] | undefined) {
+  if (!bands || !bands.length) return null
+  const b = bands.find(b => value >= b.lo && value <= b.hi)
+  return b || bands[0] || null
+}
+
+// SC 视觉色调（0-100 单极：越高越自信）
+function scTone(v: number) {
+  if (v >= 60) return { color: 'var(--accent-2)', bg: 'rgba(52, 211, 153, 0.18)', label: '高自信' }
+  if (v >= 40) return { color: 'var(--text-2)', bg: 'var(--bg-subtle)', label: '平稳' }
+  return { color: 'var(--warn)', bg: 'rgba(245, 158, 11, 0.18)', label: '低自信' }
+}
+
+// 最终评价 sc_kind 的友好标签
+function scKindLabel(k: string) {
+  switch (k) {
+    case 'good': return '好'
+    case 'bad': return '坏'
+    default: return '无评价'
+  }
+}
+
 // 计算每个 thought 对当前 mood 的实际贡献 (用后端给的 act 表)
 const ACT_INDEX = computed(() => {
   if (!data.value) return new Map<string, AmyActEntry>()
+  // 只索引参与 mood 的常规 ACT；final 词表只影响 SC, 不产生 NE/DA 增量, 不进入索引
   const m = new Map<string, AmyActEntry>()
-  for (const list of Object.values(data.value.acts)) {
-    for (const e of list as AmyActEntry[]) m.set(e.name, e)
+  for (const cat of ['external', 'evaluation', 'self_action', 'system'] as const) {
+    for (const e of data.value.acts[cat]) m.set(e.name, e)
   }
   return m
 })
@@ -131,10 +298,6 @@ const MOOD_RANGE = 100
 function gaugeWidth(v: number) {
   return Math.min(Math.abs(v), MOOD_RANGE) / MOOD_RANGE * 100
 }
-
-function showAct(name: string) {
-  expandedAct.value = expandedAct.value === name ? null : name
-}
 </script>
 
 <template>
@@ -152,7 +315,7 @@ function showAct(name: string) {
         <div class="amy-title">
           <el-icon :size="18" color="var(--accent)"><MagicStick /></el-icon>
           <span>LLM 情绪状态</span>
-          <span class="amy-sub">Amy · NE / DA · 只读 · 3s 自动刷新</span>
+          <span class="amy-sub">Amy · NE / DA / SC · 想法池可编辑 · 3s 自动刷新</span>
         </div>
         <div class="amy-actions">
           <span class="amy-fetched">最后更新 {{ timeShort(lastFetchedAt) }}</span>
@@ -233,6 +396,43 @@ function showAct(name: string) {
           </div>
         </div>
 
+        <!-- SC 仪表 -->
+        <div class="amy-gauge-card">
+          <div class="amy-gauge-head">
+            <span class="amy-gauge-label">
+              <el-icon :size="13"><Odometer /></el-icon>
+              自我一致性 SC
+            </span>
+            <span class="amy-gauge-value" :style="{ color: scTone(data.mood.sc).color }">
+              {{ data.mood.sc.toFixed(1) }}
+            </span>
+          </div>
+          <div class="amy-gauge-bar">
+            <div class="amy-gauge-track">
+              <div
+                class="amy-gauge-fill"
+                :style="{
+                  width: (Math.min(Math.max(data.mood.sc, 0), 100) / 100 * 100) + '%',
+                  background: scTone(data.mood.sc).color,
+                }"
+              />
+            </div>
+            <div class="amy-gauge-scale">
+              <span>0</span><span>20</span><span>40</span><span>60</span><span>80</span><span>100</span>
+            </div>
+          </div>
+          <div class="amy-gauge-band" v-if="scBandFor(data.mood.sc, data.amy_descriptions?.sc)">
+            <span class="amy-gauge-band-label">{{ scTone(data.mood.sc).label }}</span>
+            <span class="amy-gauge-band-text">{{ scBandFor(data.mood.sc, data.amy_descriptions?.sc)?.text }}</span>
+          </div>
+          <div class="amy-sc-rule" v-if="data.sc_meta">
+            衰减 每小时向 {{ data.sc_meta.decay_target }} 降 {{ data.sc_meta.decay_per_hour }} 点 ·
+            <span class="pos">好评价 +{{ data.sc_meta.effect_good }}</span> ·
+            <span class="neg">坏评价 {{ data.sc_meta.effect_bad }}</span> ·
+            无评价向 {{ data.sc_meta.smooth_target }} 抚平 ±{{ data.sc_meta.smooth_step }}
+          </div>
+        </div>
+
       </section>
 
       <!-- LLM 实际看到的描述 -->
@@ -245,8 +445,9 @@ function showAct(name: string) {
 
       <!-- 活跃 thought 列表 -->
       <section class="amy-section">
-        <div class="amy-section-head">
+        <div class="amy-section-head amy-section-head-ops">
           <span>活跃想法池 (active thoughts) · {{ data.thoughts.all_active_count }} 条</span>
+          <span class="amy-add-hint"><el-icon :size="12"><Plus /></el-icon> 点击下方 ACT 表条目添加</span>
         </div>
         <div v-if="!data.thoughts.all_active.length" class="amy-empty">无活跃 thought</div>
         <div v-else class="amy-thought-grid">
@@ -278,7 +479,11 @@ function showAct(name: string) {
                   DA {{ thoughtContribution(t).da >= 0 ? '+' : '' }}{{ thoughtContribution(t).da }}
                 </span>
               </span>
-              <span class="amy-thought-time">{{ timeShort(t.create_time) }}</span>
+              <span class="amy-thought-ops">
+                <el-button v-if="t.category !== 'system'" :icon="Edit" size="small" text type="primary" @click="openEdit(t)">编辑</el-button>
+                <el-button :icon="Delete" size="small" text type="danger" @click="removeThought(t)">删除</el-button>
+                <span class="amy-thought-time">{{ timeShort(t.create_time) }}</span>
+              </span>
             </div>
           </div>
         </div>
@@ -292,31 +497,123 @@ function showAct(name: string) {
         <div class="amy-act-list">
           <template v-for="(items, cat) in data.acts" :key="cat">
             <div v-if="items.length" class="amy-act-cat">
-              <div class="amy-act-cat-head" :style="{ color: actCategoryLabel(cat as AmyThought['category']).color }">
-                {{ actCategoryLabel(cat as AmyThought['category']).label }} · {{ items.length }} 条
+              <div class="amy-act-cat-head" :style="{ color: actCategoryLabel(cat as string).color }">
+                {{ actCategoryLabel(cat as string).label }} · {{ items.length }} 条
               </div>
-              <div
-                v-for="a in items"
-                :key="a.name"
-                class="amy-act-row"
-                @click="showAct(a.name)"
-              >
-                <span class="amy-act-name">{{ a.name }}</span>
-                <span class="amy-act-stats">
-                  <span class="amy-act-delta" :class="a.ne_delta >= 0 ? 'pos' : 'neg'">
-                    NE {{ a.ne_delta >= 0 ? '+' : '' }}{{ a.ne_delta }}
+              <!-- 最终评价词表（PFCA 收尾）：无 NE/DA 增量，只有 SC 效果；点击行 = 添加为想法 -->
+              <div v-if="cat === 'final'">
+                <div
+                  v-for="f in items as AmyFinalEvaluationEntry[]"
+                  :key="f.name"
+                  class="amy-act-row is-addable"
+                  @click="openCreateWithAct(f.name)"
+                >
+                  <span class="amy-act-name">
+                    {{ f.name }}
+                    <el-icon class="amy-act-add-ico" :size="12"><Plus /></el-icon>
                   </span>
-                  <span class="amy-act-delta" :class="a.da_delta >= 0 ? 'pos' : 'neg'">
-                    DA {{ a.da_delta >= 0 ? '+' : '' }}{{ a.da_delta }}
+                  <span class="amy-act-stats">
+                    <span class="amy-act-sc-kind" :class="`sc-${f.sc_kind}`">{{ scKindLabel(f.sc_kind) }}</span>
+                    <span class="amy-act-meta">{{ f.effect }}</span>
                   </span>
-                  <span class="amy-act-meta">max {{ a.max_stack }} · {{ durationShort(a.duration) }}</span>
-                </span>
+                </div>
+              </div>
+              <!-- 常规 ACT（NE/DA 增量 + 堆积/时长）：点击行 = 添加为想法（system 类除外） -->
+              <div v-else>
+                <div
+                  v-for="a in items as AmyActEntry[]"
+                  :key="a.name"
+                  class="amy-act-row"
+                  :class="{ 'is-addable': cat !== 'system' }"
+                  @click="cat !== 'system' && openCreateWithAct(a.name)"
+                >
+                  <span class="amy-act-name">
+                    {{ a.name }}
+                    <el-icon v-if="cat !== 'system'" class="amy-act-add-ico" :size="12"><Plus /></el-icon>
+                  </span>
+                  <span class="amy-act-stats">
+                    <span class="amy-act-delta" :class="a.ne_delta >= 0 ? 'pos' : 'neg'">
+                      NE {{ a.ne_delta >= 0 ? '+' : '' }}{{ a.ne_delta }}
+                    </span>
+                    <span class="amy-act-delta" :class="a.da_delta >= 0 ? 'pos' : 'neg'">
+                      DA {{ a.da_delta >= 0 ? '+' : '' }}{{ a.da_delta }}
+                    </span>
+                    <span class="amy-act-meta">max {{ a.max_stack }} · {{ durationShort(a.duration) }}</span>
+                  </span>
+                </div>
               </div>
             </div>
           </template>
         </div>
       </section>
     </div>
+  </el-dialog>
+
+  <!-- 最终评价登记（完整闭环：SC 涨跌 + 想法入池，时长 4 小时） -->
+  <el-dialog v-model="finalEvalDialogVisible" :title="`最终评价 · ${finalEvalForm.name}`" width="480px" append-to-body>
+    <el-form label-width="90px" @submit.prevent>
+      <el-form-item label="评价">
+        <span class="amy-act-fixed">{{ finalEvalForm.name }}</span>
+      </el-form-item>
+      <el-form-item label="事件标题">
+        <el-input v-model="finalEvalForm.title" maxlength="15" show-word-limit placeholder="本次事件简易标题（必填，≤15 字）"
+          @keyup.enter="saveFinalEval" />
+      </el-form-item>
+      <div class="amy-finale-hint">
+        登记后：SC 按评价涨跌（好 +10 / 坏 -10 / 无评价朝 40 单点抚平），想法
+        「在事件{标题} 中，{评价词}」入池（时长 4 小时）。与「新增 thought」不同，这里是完整闭环。
+      </div>
+    </el-form>
+    <template #footer>
+      <el-button @click="finalEvalDialogVisible = false">取消</el-button>
+      <el-button type="primary" :loading="saving" @click="saveFinalEval">登记</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- 新建 thought（调试/测试）：从 ACT 表行点击进入，act 已锁定 -->
+  <el-dialog v-model="createDialogVisible" :title="`新增 thought · ${createForm.act}`" width="480px" append-to-body>
+    <el-form label-width="70px" @submit.prevent>
+      <el-form-item label="act">
+        <span class="amy-act-fixed">{{ createForm.act }}</span>
+      </el-form-item>
+      <el-form-item label="描述">
+        <el-input v-model="createForm.desc" type="textarea" :rows="3" placeholder="thought 内容（必填）" />
+      </el-form-item>
+      <el-form-item label="强度">
+        <el-input-number v-model="createForm.intensity" :min="0" :max="10" :step="0.5" />
+      </el-form-item>
+      <el-form-item label="时长(s)">
+        <el-input-number v-model="createForm.duration" :min="1" :max="86400" :step="30" />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="createDialogVisible = false">取消</el-button>
+      <el-button type="primary" :loading="saving" @click="saveCreate">新增</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- 编辑 thought（调试/测试） -->
+  <el-dialog v-model="editDialogVisible" title="编辑 thought" width="480px" append-to-body>
+    <el-form label-width="70px" @submit.prevent>
+      <el-form-item label="act">
+        <el-select v-model="editForm.act" filterable allow-create default-first-option placeholder="选择或输入 act 名">
+          <el-option v-for="n in allActNames" :key="n" :label="n" :value="n" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="描述">
+        <el-input v-model="editForm.desc" type="textarea" :rows="3" />
+      </el-form-item>
+      <el-form-item label="强度">
+        <el-input-number v-model="editForm.intensity" :min="0" :max="10" :step="0.5" />
+      </el-form-item>
+      <el-form-item label="时长(s)">
+        <el-input-number v-model="editForm.duration" :min="1" :max="86400" :step="30" />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="editDialogVisible = false">取消</el-button>
+      <el-button type="primary" :loading="saving" @click="saveUpdate">保存</el-button>
+    </template>
   </el-dialog>
 </template>
 
@@ -456,6 +753,21 @@ function showAct(name: string) {
   color: var(--text-1);
   line-height: 1.5;
 }
+/* SC 轴规则提示（衰减 / 评价效果 / 抚平） */
+.amy-sc-rule {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+  padding: 6px 8px;
+  background: var(--bg-subtle);
+  border-radius: var(--radius-sm);
+  font-variant-numeric: tabular-nums;
+}
+.amy-sc-rule .pos { color: var(--accent-2); font-weight: 600; }
+.amy-sc-rule .neg { color: var(--danger);    font-weight: 600; }
 
 /* —— 状态卡片 —— */
 .amy-state-banner {
@@ -514,6 +826,10 @@ function showAct(name: string) {
   letter-spacing: 0.02em;
   text-transform: uppercase;
   margin-bottom: 8px;
+}
+/* section 头带操作按钮时，标题与按钮两端对齐 */
+.amy-section-head-ops {
+  justify-content: space-between;
 }
 .amy-prompt-body {
   margin: 0;
@@ -615,6 +931,13 @@ function showAct(name: string) {
 .amy-contrib.pos { color: var(--accent-2); }
 .amy-contrib.neg { color: var(--danger); }
 .amy-thought-time { font-family: var(--font-mono); }
+/* thought 卡片底部操作区（编辑/删除按钮 + 时间） */
+.amy-thought-ops {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
 
 /* —— ACT 表 —— */
 .amy-act-list {
@@ -635,6 +958,28 @@ function showAct(name: string) {
   margin-bottom: 6px;
   text-transform: uppercase;
 }
+.amy-add-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  cursor: default;
+}
+.amy-act-fixed {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.amy-finale-hint {
+  padding: 8px 10px;
+  margin-left: 90px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
+  background: var(--bg-subtle);
+  border-radius: 6px;
+}
 .amy-act-row {
   display: flex;
   align-items: center;
@@ -647,6 +992,24 @@ function showAct(name: string) {
   transition: background 0.1s ease;
 }
 .amy-act-row:hover { background: var(--bg-subtle); }
+.amy-act-row.is-addable {
+  cursor: pointer;
+}
+.amy-act-row.is-addable:hover {
+  background: var(--bg-active, var(--bg-subtle));
+}
+.amy-act-row.is-addable:hover .amy-act-add-ico {
+  opacity: 1;
+  transform: translateX(0);
+}
+.amy-act-add-ico {
+  vertical-align: -2px;
+  margin-left: 5px;
+  color: var(--primary);
+  opacity: 0.45;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  transform: translateX(-2px);
+}
 .amy-act-row .amy-act-name {
   flex: 1 1 auto;
   min-width: 0;
@@ -671,6 +1034,16 @@ function showAct(name: string) {
 }
 .amy-act-delta.pos { color: var(--accent-2); background: rgba(52, 211, 153, 0.12); }
 .amy-act-delta.neg { color: var(--danger);    background: rgba(239, 68, 68, 0.12); }
+/* 最终评价词表的 SC kind 徽标 */
+.amy-act-sc-kind {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.amy-act-sc-kind.sc-good { color: var(--accent-2); background: rgba(52, 211, 153, 0.12); }
+.amy-act-sc-kind.sc-bad  { color: var(--danger);    background: rgba(239, 68, 68, 0.12); }
+.amy-act-sc-kind.sc-none { color: var(--text-3);    background: var(--bg-subtle); }
 .amy-act-meta {
   font-size: 10.5px;
   color: var(--text-3);

@@ -6,6 +6,12 @@ Amy 提示词拼接引擎
 
 将情绪状态转换为可注入到 LLM 的提示词文本
 去甲肾上腺素与多巴胺双值系统
+
+情绪体系隔离（2026-09-13）：
+- 表现侧（NE/DA）：conversation / social_chat 专用，build_language_mood_prompt
+- 决策侧（SC）  ：pfca / proactive / light_agent 专用，build_decision_mood_prompt
+- 完整视图（三行）：仅供 adapt/web/amy_api 前端展示，build_mood_prompt
+两侧通过 FinalEvaluationAct 类别切分想法原因段，实现情绪体系互不可见。
 """
 
 from typing import List
@@ -13,6 +19,8 @@ from utils.logger import get_logger
 from brain.amy.constants import (
     MoodSnapshot, Thought,
     DOPAMINE_DESCRIPTIONS, NOREPINEPHRINE_DESCRIPTIONS,
+    SC_DEFAULT, sc_act_line,
+    FinalEvaluationAct,
 )
 
 logger = get_logger('amy_prompt', 'INFO')
@@ -87,25 +95,81 @@ def build_thought_summary(top_thoughts: List[Thought], prefix: str = "原因："
     body = "\n".join(lines)
     return f"{prefix}\n{body}" if prefix else body
 
+def _split_thoughts(top_thoughts: List[Thought], final_only: bool) -> List[Thought]:
+    """按 act 类别切分想法列表（情绪体系隔离的切分点）。
+
+    act 命中 FinalEvaluationAct 词表 ⇔ 属最终评价类想法（决策侧专属）。
+    final_only=True  仅保留最终评价类想法（决策侧原因段）；
+    final_only=False 仅保留非最终评价类想法（表现侧原因段：系统 act /
+    conversation·social_chat 的情感遭遇等）。
+    """
+    kept: List[Thought] = []
+    for thought in top_thoughts:
+        act = getattr(thought, "act", "") or ""
+        is_final = FinalEvaluationAct.kind_of(act) is not None
+        if is_final == final_only:
+            kept.append(thought)
+    return kept
+
 def build_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False) -> str:
-    """生成 amy 情绪描述。
+    """完整视图：三行（NE 描述 + DA 描述 + SC 行动行），仅供 adapt/web/amy_api 前端展示。
 
-    默认只输出"你当前的情绪：ne_desc。da_desc"这一行（不含原因）。
-    参数 with_reason=True 时追加原因段（仅 amy 内部或非 PFCA 调用方使用）。
+    消费方禁用本视图：表现侧（conversation/social_chat）走 build_language_mood_prompt，
+    决策侧（pfca/proactive/light_agent）走 build_decision_mood_prompt，
+    保证 pfca 与 conversation 情绪体系隔离（见 docs/api/amy.md）。
 
-    为什么不默认带原因：
-    - PFCA 的 user 消息里已经自己挑 thought 拼"因为{desc}，你的心情变为：{新感受}"
-    - 若 amy 这里再输出一份"原因：\n 在{desc}"，会出现同一 thought 被描述两次的冗余
+    SC 行按 snapshot.sc 数值从 A 组行动对应表取单条（40 输出平淡句），
+    原因段仅在 with_reason=True 时追加在末尾（全部想法，不分区）。
+    SC 值取 snapshot.sc；缺失时用 SC_DEFAULT=40 兜底渲染平淡句。
     """
     ne_desc = get_norepinephrine_desc(snapshot.norepinephrine)
     da_desc = get_dopamine_desc(snapshot.dopamine)
+    sc_val = getattr(snapshot, "sc", SC_DEFAULT)
+    sc_line = sc_act_line(sc_val)
 
-    parts = [f"【当前情绪】{ne_desc}{da_desc}"]
+    parts = [ne_desc, da_desc, sc_line]
     if with_reason:
         thought_summary = build_thought_summary(snapshot.top_thoughts)
         if thought_summary:
             parts.append(thought_summary)
     return "\n".join(parts)
 
+def build_language_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False) -> str:
+    """表现侧视图（仅 NE/DA）：conversation / social_chat 专用。
+
+    输出两行激素描述（NE 描述 + DA 描述），不含 SC 行；
+    原因段（with_reason=True 时）仅渲染非最终评价类想法
+    （系统 act / 情感遭遇），与决策侧（PFCA）完全隔离。
+    """
+    ne_desc = get_norepinephrine_desc(snapshot.norepinephrine)
+    da_desc = get_dopamine_desc(snapshot.dopamine)
+
+    parts = [ne_desc, da_desc]
+    if with_reason:
+        thought_summary = build_thought_summary(
+            _split_thoughts(snapshot.top_thoughts, final_only=False)
+        )
+        if thought_summary:
+            parts.append(thought_summary)
+    return "\n".join(parts)
+
+def build_decision_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False) -> str:
+    """决策侧视图（仅 SC）：pfca / proactive / light_agent 专用。
+
+    仅输出一行 SC 行动对应（sc_act_line，40 输出平淡句），
+    不含 NE/DA 行；原因段（with_reason=True 时）仅渲染最终评价类想法
+    （FinalEvaluationAct 词表，PFCA 收尾评价），与表现侧完全隔离。
+    """
+    sc_val = getattr(snapshot, "sc", SC_DEFAULT)
+    parts = [sc_act_line(sc_val)]
+    if with_reason:
+        thought_summary = build_thought_summary(
+            _split_thoughts(snapshot.top_thoughts, final_only=True)
+        )
+        if thought_summary:
+            parts.append(thought_summary)
+    return "\n".join(parts)
+
 def get_amy_description(snapshot: MoodSnapshot, with_reason: bool = False) -> str:
+    """完整视图包装（仅供 adapt/web/amy_api 前端展示，见 build_mood_prompt）。"""
     return build_mood_prompt(snapshot, with_reason=with_reason)

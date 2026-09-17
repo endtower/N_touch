@@ -12,6 +12,7 @@ import time
 from typing import Dict, Any
 
 from utils.logger import get_logger
+from utils.chain_context import get_current_chain_id
 from .base_truck import BaseTruck
 
 logger = get_logger('scheduled_proactive_truck', 'INFO')
@@ -71,6 +72,9 @@ class ScheduledProactiveTruck(BaseTruck):
                 "reason": "定时主动任务",
                 "wakeup_reason": "定时巡检时间到，请处理！",
                 "target_session_id": None,
+                # station 出队即生成的任务链 ID（contextvar 不会传播到
+                # proactive_core 主循环任务，需显式携带，主循环内重新 set）
+                "chain_id": get_current_chain_id(),
                 "payload": {
                     "source": "scheduled_proactive_truck",
                 },
@@ -101,15 +105,15 @@ class ScheduledProactiveTruck(BaseTruck):
             tool_result = decision_result.get("tool_result")
             formatted_message = ""
             target_session_id = ""
-            target_long_term_event_title = ""
+            target_task_title = ""
             if isinstance(tool_result, str) and tool_result.strip():
                 try:
                     queued = json.loads(tool_result)
                     if isinstance(queued, dict) and queued.get("status") == "queued":
                         task_info = (queued.get("task_info") or "").strip()
                         target_session_id = (queued.get("target_session_id") or "").strip()
-                        target_long_term_event_title = (
-                            (queued.get("target_long_term_event_title") or "").strip()
+                        target_task_title = (
+                            (queued.get("target_task_title") or "").strip()
                         )
                         if task_info:
                             formatted_message = f"【proactive 决策】\n{task_info}"
@@ -122,14 +126,14 @@ class ScheduledProactiveTruck(BaseTruck):
             if target_session_id:
                 formatted_message = f"{formatted_message}\n\n目标会话: {target_session_id}"
 
-            # 若 proactive 传入了 target_long_term_event_title，说明本次启动任务
-            # 原因是长期事件到期或提前触发。在末尾追加一条提示，要求 PFCA 在
-            # 结束阶段通知 event_register_agent 更新该事件。
-            if target_long_term_event_title:
+            # 若 proactive 传入了 target_task_title，说明本次启动任务
+            # 原因是未完成任务到期或提前触发。在末尾追加一条提示，要求 PFCA 在
+            # 结束阶段通知 task_register_agent 更新该任务。
+            if target_task_title:
                 formatted_message = (
                     f"{formatted_message}\n\n"
-                    f"本次启动任务原因为长期事件到期或提前触发，你必须在结束阶段"
-                    f"通知event_regsiter_agent更新该事件。"
+                    f"本次启动任务原因为到期任务触发（任务标题：{target_task_title}），"
+                    f"你必须在结束阶段通知task_register_agent更新该任务。"
                 )
 
             logger.info("scheduled_proactive_truck 决策 launch_pfca, station 将调 PFCA")

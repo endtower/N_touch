@@ -1,16 +1,20 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { User, ChatDotRound, UserFilled, Picture, Document, Delete } from '@element-plus/icons-vue'
+import { User, ChatDotRound, UserFilled, Picture, Document, Delete, Check } from '@element-plus/icons-vue'
 import type { UiMessage, WebSession } from '../types'
 import { chat } from '../stores/chat'
 
 const props = defineProps<{
   message: UiMessage
   activeUserId?: string | null   // 当前 active identity 的 user_id (用于判断"我扮演的角色")
+  selectMode?: boolean           // 多选模式: 点击消息=切换选中, 显示勾选框
+  selected?: boolean             // 多选模式下本条是否被选中
 }>()
 
 const emit = defineEmits<{
   'request-delete': [message_id: string]
+  'toggle-select': [message_id: string]
+  'enter-select-mode': [message_id: string]
 }>()
 
 // 是否"我扮演的角色": 消息的 user_id 与当前 active identity 一致 → 右边
@@ -41,6 +45,38 @@ function onDelete() {
   closeContextMenu()
   // 本地立即移除, 同时通知后端真删
   chat.deleteMessage({ session_id: props.message.session_id, message_id: id })
+}
+
+// 右键菜单: 进入多选模式, 预选中本条
+function onSelectMode() {
+  closeContextMenu()
+  emit('enter-select-mode', props.message.id)
+}
+
+// 多选模式下点击消息 = 切换选中.
+// 只响应实际内容区域 (气泡/头像/头部/勾选框) 的点击, 行内空白交给父级框选;
+// 按下/抬起距离超阈值视为拖拽 (可能以框选结束), 不触发点选.
+const MSG_CONTENT_SEL = '.msg-bubble, .msg-avatar, .msg-head, .msg-check'
+let rowDownPos: { x: number; y: number } | null = null
+
+function onRowPointerDown(ev: PointerEvent) {
+  if (!props.selectMode) return
+  rowDownPos = { x: ev.clientX, y: ev.clientY }
+}
+
+function onRowClick(ev: MouseEvent) {
+  if (!props.selectMode) return
+  const target = ev.target as HTMLElement | null
+  if (!target || !target.closest(MSG_CONTENT_SEL)) return
+  if (
+    rowDownPos &&
+    Math.hypot(ev.clientX - rowDownPos.x, ev.clientY - rowDownPos.y) > 6
+  ) {
+    rowDownPos = null
+    return
+  }
+  rowDownPos = null
+  emit('toggle-select', props.message.id)
 }
 
 // 全局点击/滚动时关闭菜单
@@ -154,9 +190,17 @@ const inlineParts = computed(() => parseInline(props.message.text || ''))
 
 <template>
   <div
-    :class="['msg-row', message.role, { mine: isMine }]"
+    :class="['msg-row', message.role, { mine: isMine, selectable: selectMode, selected }]"
+    :data-message-id="message.id"
+    @click="onRowClick"
+    @pointerdown="onRowPointerDown"
     @contextmenu="onContextMenu"
   >
+    <!-- 多选勾选框 -->
+    <div v-if="selectMode" :class="['msg-check', { checked: selected }]">
+      <el-icon v-if="selected" :size="12"><Check /></el-icon>
+    </div>
+
     <div :class="['msg-avatar', message.role]">
       <el-icon :size="15"><component :is="avatar" /></el-icon>
     </div>
@@ -233,11 +277,43 @@ const inlineParts = computed(() => parseInline(props.message.text || ''))
         <el-icon :size="13"><Delete /></el-icon>
         <span>删除消息</span>
       </button>
+      <button class="msg-context-menu-item" @click="onSelectMode">
+        <el-icon :size="13"><Check /></el-icon>
+        <span>多选（批量删除）</span>
+      </button>
     </div>
   </Teleport>
 </template>
 
 <style scoped>
+/* ---- 多选模式 ---- */
+.msg-row.selectable {
+  cursor: pointer;
+  user-select: none;
+}
+.msg-check {
+  flex: none;
+  align-self: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-1);
+  background: var(--bg-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  transition: background 0.12s, border-color 0.12s;
+}
+.msg-check.checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.msg-row.selected .msg-bubble {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .msg-context-menu {
   position: fixed;
   z-index: 9999;

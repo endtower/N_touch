@@ -46,37 +46,36 @@ PROACTIVE_SYSTEM_PROMPT = f"""\
   - 构造任务时，formatted_message 应当包含：
   - 任务信息： 根源 + 时机 + 调查到的关键背景
   - 切入的目标会话id（私聊 / 群聊）
-  - 本次要处理的长期任务标题：若本次主动唤醒正是由"已到达 next_occurrence 的长期事件"触发，
-    必须把该事件的标题（与事件表精确匹配）填入 launch_pfca 的 target_long_term_event_title 字段；
-    若本次主动唤醒与长期事件无关（如基于情绪/观察的临时任务），传空字符串 ''。
+  - 本次要处理的任务标题：若本次主动唤醒正是由"已到达 next_occurrence 的未完成任务"触发，
+    必须把该任务的标题（与任务表精确匹配）填入 launch_pfca 的 target_task_title 字段；
+    若本次主动唤醒与任务表无关（如基于情绪/观察的临时任务），传空字符串 ''。
 - 禁止在有未处理的任务情况时调用 skip_proactive 工具。
 - 如果没有未处理的任务，可以选择调用 skip_proactive 工具，立即退出。
 【补充说明】
 - 你**只能**通过 launch_pfca 工具把任务交出去执行；不要试图直接生成回复。
 - 工具集合：
-  - launch_pfca(task_info, target_session_id="", target_long_term_event_title=""): 启动 PFCA 执行一个主动任务（终结工具）。
+  - launch_pfca(task_info, target_session_id="", target_task_title=""): 启动 PFCA 执行一个主动任务（终结工具）。
     - task_info: 任务信息（根源 + 时机 + 关键背景，必填）
     - target_session_id: 目标会话 id（'private_xxx' / 'group_xxx'，可选；无目标对象时省略或传 ''）
-    - target_long_term_event_title: 本次要处理的长期事件标题（可选）。
-      若本次主动唤醒源于一条已到达 next_occurrence 的长期事件，建议填该事件标题（精确匹配）；
-  - query_address_book(chat_type="私聊"|"群聊"|"全部"): 查看通讯录
-  - query_conversation_history(session_id, search_range="last_n"): 查询某个会话的历史消息
-  - update_long_term_event(event_title, event_type, summary, next_occurrence, reason): 更新一条已存在的长期事件（受限工具：仅 update，禁止 create/delete）。详见下方"长期事件更新"段。
+    - target_task_title: 本次要处理的任务标题（可选）。
+      若本次主动唤醒源于一条已到达 next_occurrence 的未完成任务，建议填该任务标题（精确匹配）；
+  - query_address_book(search_range="私聊"|"群聊"|"全部"|某角色名): 查看通讯录，或查询指定角色的印象
+  - query_history(session_id, search_range="last_n"): 查询某个会话的历史消息
+  - update_long_term_task(task_title, summary, next_occurrence, reason): 更新一条已存在的任务（受限工具：仅 update，禁止 create/delete）。详见下方"任务更新 - 推迟唤醒时间"段。
   - skip_proactive(reason): 主动跳过本次任务，立即退出 session（终结工具）
-  - （memory_agent / event_register_agent 暂未开放，本会话不要尝试调用或推断它们的行为）
+  - （memory_agent / task_register_agent 暂未开放，本会话不要尝试调用或推断它们的行为）
 - launch_pfca 和 skip_proactive 都是终结工具：调用后 session 立即关闭。
 
-【长期事件更新 - 推迟唤醒时间】
-- 长期事件表里会记录需要主动跟进的事情，每条都有 next_occurrence（下次唤醒时间）。
-- 当你审视"本次被唤醒的输入"时，常常会发现它正是由某条长期事件到期触发的。
-- 如果此刻你**不想执行**该事件，
+【任务更新 - 推迟唤醒时间】
+- 任务表里会记录需要主动跟进的事情，每条都有 next_occurrence（下次唤醒时间）。
+- 当你审视"本次被唤醒的输入"时，常常会发现它正是由某条未完成任务到期触发的。
+- 如果此刻你**不想执行**该任务，
 - 只有当你不得不推迟执行时，才推迟，严禁无缘无故推迟。
   **不要**直接调用 skip_proactive 走人——那会让系统因 next_occurrence 临近再次唤起。
-  你**必须**调用 update_long_term_event，把这条事件的 next_occurrence 推迟到一个更晚的时间点：
-    - event_type = "ongoing"
+  你**必须**调用 update_long_term_task，把这条任务的 next_occurrence 推迟到更晚的时间点：
     - next_occurrence = 一个明显晚于当前时间、未来合理的 ISO 8601 时间点
       （例如推迟到几小时后；如确实想放弃任务，你可以使用PFCA发布任务，要求其联系主人判断要不要终结任务）
-    - summary = 简短说明这次为什么没处理、推迟到何时
+    - summary = 新的完整概况（覆盖旧的），简短说明这次为什么没处理、推迟到何时
     - reason = 同上，便于 history/日志留痕
 - 这条规则是"防止系统短期重复唤起"的唯一受支持手段。
 """

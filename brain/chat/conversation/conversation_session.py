@@ -15,9 +15,13 @@ logger = get_logger('ConversationSession', "DEBUG")
 class ConversationSession(HeavySession):
 
     PREFIX = 'conversation'
-    TYPING_SPEED_CHARS_PER_MINUTE = 100
+    TYPING_SPEED_CHARS_PER_MINUTE = 150
     TYPING_DELAY_PER_CHAR = 60.0 / TYPING_SPEED_CHARS_PER_MINUTE
-    MAX_TYPING_DELAY = 10.0
+
+    # 单会话累计 token 预算（熔断值，参照 token_stats.json 校准）
+    TOKEN_BUDGET = 500_000
+    # wait_and_observe 的语义就是"参数相同地反复等待"，豁免重复调用检测
+    repeat_exempt_tools = frozenset({"wait_and_observe"})
 
     def __init__(self, conversation_core, max_messages: int = 0):
         
@@ -40,7 +44,8 @@ class ConversationSession(HeavySession):
         # 循环上限（父类 should_continue 默认基于 max_rounds 判断）
         self.max_rounds = llm_config.MAX_SELF_LOOPS
         self._rounds = 0
-        # 消息发送计数（软限制，由 send_message 递增、input_manager 读取）
+        # 发送轮次计数（软限制：一次发送工具调用计 1，与拆条后的消息条数无关；
+        # 由 conversation_tool_manager 在发送成功后递增，input_manager 读取）
         self._max_messages = max_messages if max_messages > 0 else 0
         self._sent_message_count = 0
         self._initialized = True
@@ -51,21 +56,19 @@ class ConversationSession(HeavySession):
     async def _handle_tool_call(self, tool_call):
         return await self.tool_manager.handle_tool_call(tool_call)
 
-    def increment_sent_message(self) -> bool:
-        """增加已发送消息计数，并返回是否已达到限制"""
+    def increment_sent_message(self) -> None:
+        """增加已发送轮次计数（一次 send_message / send_image 工具调用计 1）"""
         self._sent_message_count += 1
-        logger.debug(f"已发送消息计数: {self._sent_message_count}/{self._max_messages}")
+        logger.debug(f"已发送轮次计数: {self._sent_message_count}/{self._max_messages}")
         if self._max_messages > 0 and self._sent_message_count >= self._max_messages:
-            logger.info(f"已达到本轮策略中计划发送的消息条目数量限制 ({self._max_messages})")
-            return True
-        return False
+            logger.info(f"已达到本轮策略中计划发送的轮次数量限制 ({self._max_messages})")
 
     def get_max_messages(self) -> int:
-        """获取当前设置的最大消息数量"""
+        """获取当前设置的最大发送轮次数量"""
         return self._max_messages
 
     def get_sent_message_count(self) -> int:
-        """获取已发送消息数量"""
+        """获取已发送轮次数量"""
         return self._sent_message_count
 
     async def _user_input(self) -> str:
@@ -95,7 +98,7 @@ class ConversationSession(HeavySession):
             {"role": "system", "content": get_full_system_prompt()}
         ] + messages
         response = await call_llm(
-            mode='basic-reason',
+            level='flash',
             messages=llm_messages,
             tools=tools,
         )

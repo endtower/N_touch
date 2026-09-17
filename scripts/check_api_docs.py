@@ -40,8 +40,10 @@ MODULE_DOC_MAP = [
     ("memory/",           "message_store.md"),
     ("brain/amy/",        "amy.md"),
     ("brain/att/",        "attention.md"),
-    ("brain/pfc/",        "pfca_chat.md"),
-    ("brain/chat/",       "pfca_chat.md"),
+    ("brain/pfc/",        "pfca.md"),
+    ("brain/chat/conversation/", "conversation.md"),
+    ("brain/chat/social_chat/",  "social_chat.md"),
+    ("brain/chat/",       "conversation.md"),  # 共享件（chat_history_manager 等）记入 conversation.md
     ("brain/hc/",         "hc.md"),
     ("brain/base/",       "infrastructure.md"),
     ("core/",             "infrastructure.md"),
@@ -50,10 +52,10 @@ MODULE_DOC_MAP = [
 
 # LLM 工具注册表文件 → 文档
 TOOL_FILES = [
-    ("brain/pfc/pfca/pfca_tools.py",                    "pfca_chat.md"),
-    ("brain/att/proactive/proactive_tools.py",          "attention.md"),
-    ("brain/chat/conversation/conversation_tool_manager.py", "pfca_chat.md"),
-    ("brain/chat/social_chat/social_chat_tool_manager.py",   "pfca_chat.md"),
+    ("brain/pfc/pfca/pfca_tools.py",                         "pfca.md"),
+    ("brain/att/proactive/proactive_tools.py",               "attention.md"),
+    ("brain/chat/conversation/conversation_tool_manager.py", "conversation.md"),
+    ("brain/chat/social_chat/social_chat_tool_manager.py",   "social_chat.md"),
 ]
 
 SOURCE_ROOTS = ["adapt", "memory", "brain", "core", "utils"]
@@ -194,7 +196,7 @@ def main() -> int:
         check("LLM 工具", item, where, doc, needle=name)
 
     print("=" * 62)
-    print("API 文档漂移校验  (规则见 AGENTS.md「文档同步义务」)")
+    print("API 文档漂移校验  (规则见 docs/README.md「文档维护规则」)")
     print("=" * 62)
 
     if not DRIFT:

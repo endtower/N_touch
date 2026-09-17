@@ -228,7 +228,7 @@ class MemoryAgent(LightweightAgent):
         """后处理：返回 LLM 最终文本。"""
         return {"content": content, "extra_info": extra_info}
 
-    async def _call_llm(self, messages: list, *, mode: str = "basic-reason",
+    async def _call_llm(self, messages: list, *, level: str = "flash",
                         tool_choice: Optional[str] = None,
                         system_prompt: Optional[str] = None, **kwargs):
         """统一 LLM 调用：走 call_llm。"""
@@ -237,7 +237,7 @@ class MemoryAgent(LightweightAgent):
         sp = system_prompt if system_prompt is not None else self.get_system_prompt()
         full_messages = [{"role": "system", "content": sp}] + messages
         return await call_llm(
-            mode=mode,
+            level=level,
             messages=full_messages,
             tools=self.get_available_tools(),
         )
@@ -340,7 +340,7 @@ class MemoryAgent(LightweightAgent):
 
         # 三段式骨架：前处理 → LLM 循环 → 后处理
         processed_input = self._preprocess(user_message)
-        loop_result = await self._llm_loop(processed_input, mode='basic-reason')
+        loop_result = await self._llm_loop(processed_input)
         final_content = loop_result.get("content", "")
 
         # 工具调用全部结束后，重新拉取一次实体最新信息写入 temporary_memory。
@@ -368,18 +368,16 @@ class MemoryAgent(LightweightAgent):
         if not entity_uuid or not formatted_info:
             return
 
-        try:
-            from brain.hc.temporary_memory import get_temporary_memory
-            get_temporary_memory().add(
-                formatted_info,
-                identifier=entity_uuid,
-            )
-            logger.info(
-                f"[MemoryAgent] 已将修改后的实体最新信息写入临时记忆: "
-                f"identifier={entity_uuid}"
-            )
-        except Exception as e:
-            logger.warning(f"[MemoryAgent] 刷新临时记忆失败: {e}")
+        # 写入临时记忆失败直接上抛崩溃阻断（硬约定 #4），不吞
+        from brain.hc.temporary_memory import get_temporary_memory
+        get_temporary_memory().add(
+            formatted_info,
+            identifier=entity_uuid,
+        )
+        logger.info(
+            f"[MemoryAgent] 已将修改后的实体最新信息写入临时记忆: "
+            f"identifier={entity_uuid}"
+        )
 
     async def _first_impression_search(self, session_id: str) -> tuple:
         """根据 session_id 自动拉取目标节点信息。返回 (impression_str, target_uuid)。"""

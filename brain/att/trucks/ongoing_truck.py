@@ -1,14 +1,14 @@
 """
-OngoingTruck - 进行中事件卡车
+OngoingTruck - 进行中任务卡车
 
 功能：
-- 定期检查进行中的长期事件
-- 根据事件的下次触发时间判断是否应该提醒
+- 定期检查进行中的未完成任务
+- 根据任务的下次触发时间判断是否应该提醒
 - 触发后投递到 proactive core（att -> proactive -> pfca -> conversation）
 - 与 station 进行通信
 
-新存储格式：
-- event_type = 'ongoing' 表示进行中的事件
+存储格式（任务表）：
+- status = 'active' 表示进行中的任务
 - next_occurrence 存储下次触发时间（ISO 8601格式）
 """
 
@@ -18,13 +18,14 @@ from typing import Optional, Dict, Any
 import time
 from datetime import datetime
 from utils.logger import get_logger
+from utils.chain_context import get_current_chain_id
 from .base_truck import BaseTruck
 
 logger = get_logger(__name__, "INFO")
 
 
 class OngoingTruck(BaseTruck):
-    """进行中事件卡车 - 使用新事件存储格式"""
+    """进行中任务卡车 - 基于任务表"""
 
     def __init__(self):
         super().__init__("ongoing_truck")
@@ -72,14 +73,14 @@ class OngoingTruck(BaseTruck):
         while self.state != "stopped":
             logger.debug(f"主循环迭代开始，当前状态: {self.state}")
 
-            triggered_events = await self.get_triggered_events()
+            triggered_tasks = await self.get_triggered_tasks()
 
-            if triggered_events:
-                logger.info(f"检测到{len(triggered_events)}个触发事件，准备提醒station")
+            if triggered_tasks:
+                logger.info(f"检测到{len(triggered_tasks)}个触发任务，准备提醒station")
                 await self.remind_station()
                 logger.debug("提醒station完成")
             else:
-                logger.debug("进行中事件检查完成，无触发事件")
+                logger.debug("进行中任务检查完成，无触发任务")
 
             await self.cycle_control()
             logger.debug("循环控制执行完成")
@@ -93,70 +94,65 @@ class OngoingTruck(BaseTruck):
         await super().cycle_control(total_sleep_time)
         logger.debug("循环控制完成")
 
-    async def get_triggered_events(self):
-        """获取需要触发的事件 - 仅触发已到或超过触发时间的最早事件"""
-        try:
-            from brain.hc.database.event import EventOperations
-            event_ops = EventOperations()
-            event_ids = await event_ops.get_ongoing_events(limit=50)
+    async def get_triggered_tasks(self):
+        """获取需要触发的任务 - 仅触发已到或超过触发时间的最早任务
 
-            if not event_ids:
-                return []
+        拉取失败直接上抛崩溃阻断（按 user_rules，不 try-ex 静默跳过）。"""
+        from brain.hc.database.task import TaskOperations
+        task_ops = TaskOperations()
+        task_ids = await task_ops.get_active_tasks(limit=50)
 
-            current_time = datetime.now()
-            triggered_event = None
-            earliest_time = None
-
-            for event_id in event_ids:
-                event = await self._get_event(event_ops, event_id)
-                if not event:
-                    continue
-
-                next_occurrence = event.get("next_occurrence")
-                if not next_occurrence:
-                    continue
-
-                next_time = datetime.fromisoformat(next_occurrence.replace('Z', '+00:00'))
-
-                # 只触发已到或超过触发时间的事件
-                if current_time >= next_time:
-                    if triggered_event is None or next_time < earliest_time:
-                        triggered_event = event
-                        earliest_time = next_time
-
-            if triggered_event:
-                logger.info(f"事件触发: {triggered_event.get('title')} (next_occurrence: {triggered_event.get('next_occurrence')})")
-                return [triggered_event]
-
-            logger.debug("进行中事件检查完成，无触发事件")
+        if not task_ids:
             return []
 
-        except Exception as e:
-            logger.error(f"获取触发事件失败: {e}")
-            return []
+        current_time = datetime.now()
+        triggered_task = None
+        earliest_time = None
 
-    async def _get_event(self, event_ops, event_id):
-        """获取单个事件详情"""
-        try:
-            rec = await event_ops.get_event_by_id(event_id)
-            if not rec:
-                return None
-            return {
-                "event_id": rec.get("event_id"),
-                "title": rec.get("title"),
-                "summary": rec.get("summary"),
-                "next_occurrence": rec.get("next_occurrence"),
-                "start_time": rec.get("start_time")
-            }
-        except Exception as e:
-            logger.error(f"获取事件详情失败: {e}")
+        for task_id in task_ids:
+            task = await self._get_task(task_ops, task_id)
+            if not task:
+                continue
+
+            next_occurrence = task.get("next_occurrence")
+            if not next_occurrence:
+                continue
+
+            next_time = datetime.fromisoformat(next_occurrence.replace('Z', '+00:00'))
+
+            # 只触发已到或超过触发时间的任务
+            if current_time >= next_time:
+                if triggered_task is None or next_time < earliest_time:
+                    triggered_task = task
+                    earliest_time = next_time
+
+        if triggered_task:
+            logger.info(f"任务触发: {triggered_task.get('title')} (next_occurrence: {triggered_task.get('next_occurrence')})")
+            return [triggered_task]
+
+        logger.debug("进行中任务检查完成，无触发任务")
+        return []
+
+    async def _get_task(self, task_ops, task_id):
+        """获取单个任务详情
+
+        获取失败直接上抛崩溃阻断（按 user_rules，不 try-ex 静默跳过）。"""
+        rec = await task_ops.get_task_by_id(task_id)
+        if not rec:
             return None
+        return {
+            "task_id": rec.get("task_id"),
+            "title": rec.get("title"),
+            "summary": rec.get("summary"),
+            "next_occurrence": rec.get("next_occurrence"),
+            "start_time": rec.get("start_time")
+        }
 
     async def get_truck_messages(self):
         """获取 truck 消息
 
         设计意图：
-        - 校验阶段：get_triggered_events() 拿到事件
+        - 校验阶段：get_triggered_tasks() 拿到任务
         - 决策阶段：把 task 投递到 proactive_core 并 await session 跑完
           （proactive_core.feed_proactive_task 现在会阻塞到 session 退出才返回）
         - 路由阶段：根据 proactive 的 decision_result 决定返回什么
@@ -167,17 +163,17 @@ class OngoingTruck(BaseTruck):
           - 返回 None → 不调 PFCA, 直接恢复 truck
           - 返回 dict  → 调 PFCA, 完成后恢复 truck
         """
-        logger.debug("开始获取truck事件")
-        triggered_events = await self.get_triggered_events()
-        logger.debug(f"获取事件完成，触发事件数: {len(triggered_events)}")
+        logger.debug("开始获取truck任务")
+        triggered_tasks = await self.get_triggered_tasks()
+        logger.debug(f"获取任务完成，触发任务数: {len(triggered_tasks)}")
 
-        if not triggered_events:
-            logger.debug("没有触发事件，返回None")
+        if not triggered_tasks:
+            logger.debug("没有触发任务，返回None")
             return None
 
-        triggered = triggered_events[0]
+        triggered = triggered_tasks[0]
 
-        # === 把触发事件投递到 proactive_core 并等它决策 ===
+        # === 把触发任务投递到 proactive_core 并等它决策 ===
         decision_result: Optional[Dict[str, Any]] = None
         try:
             from brain.att.proactive.proactive_core import get_proactive_core
@@ -187,12 +183,15 @@ class OngoingTruck(BaseTruck):
                 await core.start()
                 logger.info("proactive core 启动 (lazy)")
             task_draft = {
-                "intent": "ongoing_event",
-                "reason": f"ongoing_truck 检测到事件 '{triggered.get('title')}' 到达 next_occurrence",
-                "wakeup_reason": "存在未完成的事件，请处理！",
+                "intent": "ongoing_task",
+                "reason": f"ongoing_truck 检测到任务 '{triggered.get('title')}' 到达 next_occurrence",
+                "wakeup_reason": "存在未完成的任务，请处理！",
                 "target_session_id": None,
+                # station 出队即生成的任务链 ID（contextvar 不会传播到
+                # proactive_core 主循环任务，需显式携带，主循环内重新 set）
+                "chain_id": get_current_chain_id(),
                 "payload": {
-                    "event": triggered,
+                    "task": triggered,
                     "source": "ongoing_truck",
                 },
             }
@@ -224,7 +223,7 @@ class OngoingTruck(BaseTruck):
             return None
 
         # === proactive 决定调 launch_pfca: 返回消息让 station 调 PFCA ===
-        formatted_message = await self.format_ongoing_events(triggered_events)
+        formatted_message = await self.format_ongoing_tasks(triggered_tasks)
 
         # 把 proactive 决策里的 task_info / target_session_id 合并进
         # formatted_message：这是 PFCA 工厂收的 user content。
@@ -253,7 +252,7 @@ class OngoingTruck(BaseTruck):
                 else:
                     logger.info(
                         "proactive 决策 launch_pfca 但 tool_result 非 queued payload, "
-                        "station 仅按事件格式化消息调 PFCA"
+                        "station 仅按任务格式化消息调 PFCA"
                     )
             except (ValueError, TypeError):
                 # 兼容老格式（直接执行 PFCA 时的 "PFCA 处理成功=..."）
@@ -264,24 +263,24 @@ class OngoingTruck(BaseTruck):
 
         return {
             "formatted_message": formatted_message,
-            "raw_sessions": triggered_events,
+            "raw_sessions": triggered_tasks,
             "decision": decision_result,
         }
 
-    async def format_ongoing_events(self, events):
-        """格式化事件信息 - 使用通用的格式化方法"""
-        if not events:
-            return "暂无进行中的事件"
+    async def format_ongoing_tasks(self, tasks):
+        """格式化任务信息 - 使用通用的格式化方法"""
+        if not tasks:
+            return "暂无进行中的任务"
 
-        from brain.hc.database.event import EventOperations
-        event_ops = EventOperations()
+        from brain.hc.database.task import TaskOperations
+        task_ops = TaskOperations()
 
         lines = ["你想起来有一件事还没有完成。"]
 
-        for event in events:
-            event_id = event.get("event_id")
-            if event_id:
-                formatted_event = await event_ops.format_event_by_id(event_id)
-                lines.append(formatted_event)
+        for task in tasks:
+            task_id = task.get("task_id")
+            if task_id:
+                formatted_task = await task_ops.format_task_by_id(task_id)
+                lines.append(formatted_task)
 
         return "\n".join(lines)
