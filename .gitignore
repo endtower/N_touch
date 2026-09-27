@@ -152,6 +152,9 @@ backups/
 # LLM 速度基准脚本（源码含 API Key）
 scripts/benchmark_llm_speed.py
 
+# 全部 docs（涉隐私，仅本地保存，不入库）
+docs/
+
 # AI tooling (specs / plans)
 .trae/
 .zcode/
