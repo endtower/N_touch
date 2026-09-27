@@ -28,7 +28,6 @@ from aiohttp import web
 
 from brain.hc.database.core import get_memory_db
 from brain.hc.database.task import TaskOperations, TASK_STATUS_ACTIVE, TASK_STATUS_COMPLETED
-from brain.hc.database.vector_store import get_vector_store
 from utils.logger import get_logger
 
 logger = get_logger(__name__, "DEBUG")
@@ -47,7 +46,7 @@ def _safe_int(s: Optional[str], default: int) -> int:
 
 _TASK_FIELDS = (
     "task_id", "title", "status", "summary",
-    "next_occurrence", "is_vectorized",
+    "next_occurrence",
     "start_time", "end_time", "updated_at",
 )
 
@@ -221,12 +220,11 @@ async def handle_update_task(request: web.Request) -> web.Response:
         db = get_memory_db()
         conn = await db._ensure_connection()
 
-        cur = await conn.execute("SELECT title, summary FROM tasks WHERE task_id=?", (task_id,))
+        cur = await conn.execute("SELECT title FROM tasks WHERE task_id=?", (task_id,))
         rec = await cur.fetchone()
         if rec is None:
             return web.json_response({"error": f"Task {task_id} 不存在"}, status=404)
         current_title = rec["title"] or ""
-        current_summary = rec["summary"] or ""
 
         non_title_kwargs = {k: v for k, v in kwargs.items() if k != "title"}
         new_title = kwargs.get("title")
@@ -250,28 +248,8 @@ async def handle_update_task(request: web.Request) -> web.Response:
                 await conn.execute("UPDATE tasks SET title=?, updated_at=? WHERE task_id=?", (new_title, now, task_id))
             await conn.commit()
 
-        new_summary = kwargs.get("summary")
-        if new_summary is not None and new_summary != current_summary:
-            vector_to_set: Optional[List[float]] = None
-            try:
-                vector_store = get_vector_store()
-                vector_to_set = vector_store.generate_vector(new_summary)
-            except Exception as e:
-                logger.warning(f"重生成 summary_vector 失败: {e}")
-            from brain.hc.database.core import serialize_vector
-            if vector_to_set:
-                if user_set_updated_at:
-                    await conn.execute("UPDATE tasks SET summary_vector=?, is_vectorized=1 WHERE task_id=?", (serialize_vector(vector_to_set), task_id))
-                else:
-                    now = datetime.now().isoformat()
-                    await conn.execute("UPDATE tasks SET summary_vector=?, is_vectorized=1, updated_at=? WHERE task_id=?", (serialize_vector(vector_to_set), now, task_id))
-            else:
-                if user_set_updated_at:
-                    await conn.execute("UPDATE tasks SET summary_vector=NULL, is_vectorized=0 WHERE task_id=?", (task_id,))
-                else:
-                    now = datetime.now().isoformat()
-                    await conn.execute("UPDATE tasks SET summary_vector=NULL, is_vectorized=0, updated_at=? WHERE task_id=?", (now, task_id))
-            await conn.commit()
+        # 任务不落向量（2026-09-19）：summary 变化仅覆盖概况，无需重生成
+        # summary_vector（无语义检索消费方），updated_at 由 update_task 处理
 
         cur = await conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,))
         rec = await cur.fetchone()

@@ -10,9 +10,8 @@ import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
-from .core import get_memory_db, serialize_vector, deserialize_vector, cosine_similarity
+from .core import get_memory_db
 from .common import generate_timestamp_id
-from .vector_store import get_vector_store
 from utils.logger import get_logger
 
 logger = get_logger(__name__, "DEBUG")
@@ -41,17 +40,14 @@ class Impression:
         self.db = get_memory_db()
 
     async def create_impression(self, content: str, owner_uuid: str) -> str:
-        """创建印象（覆盖语义，写入 owner 的 impression 字段）。"""
+        """创建印象（覆盖语义，写入 owner 的 impression 字段）。
+
+        印象无独立向量列：owner 行的 vector 由 update_character_vector /
+        update_group_vector 拼接全量信息后统一生成，此处不重复向量化。
+        """
         from datetime import datetime
         current_time = datetime.now().isoformat()
         impression_id = generate_timestamp_id("Impression")
-
-        vector = None
-        try:
-            vector_store = get_vector_store()
-            vector = vector_store.generate_vector(content)
-        except Exception as e:
-            logger.error(f"生成印象向量失败: {str(e)}")
 
         conn = await self.db._ensure_connection()
         table = await _resolve_owner_table(conn, owner_uuid)
@@ -85,13 +81,6 @@ class Impression:
         """
         from datetime import datetime
         current_time = datetime.now().isoformat()
-
-        vector = None
-        try:
-            vector_store = get_vector_store()
-            vector = vector_store.generate_vector(new_content)
-        except Exception as e:
-            logger.error(f"生成印象向量失败: {str(e)}")
 
         conn = await self.db._ensure_connection()
         # 找到拥有该印象的 owner（通过 impression_id 前缀匹配不可靠，改为遍历）

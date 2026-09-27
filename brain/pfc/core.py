@@ -9,10 +9,121 @@ import asyncio
 from typing import Any, Dict, Optional
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
+from utils.chain_context import (
+    generate_chain_id,
+    set_chain_context,
+    reset_chain_context,
+)
 from brain.pfc.pfca.pfca_core import get_pfca_instance
 from brain.hc.global_session_state import get_global_session_state
 
 logger = get_logger(__name__, "INFO")
+
+
+@async_handle_errors()
+async def run_pfc_cycle(
+    initial_state: str,
+    initial_purpose: str,
+    current_session: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """PFCA(行动) ↔ Reflection(反思) 链式接力协调器（2026-09-23 接入）。
+
+    允许两类双向接力：
+    - PFCA `terminate` 第二次确认调用时可带 enter_reflection=true + reflection_purpose，
+      结束本轮行动后自动进入反思腿；
+    - Reflection `finalize_reflection` 收尾时可带 enter_action=true + action_purpose，
+      结束本轮反思后自动进入行动腿（新一轮 PFCA）。
+
+    接力请求经 GlobalSessionState._data["pfc_handoff"] 传递：工具写入、
+    本协调器在每段会话结束后消费，实现 "行动 → 反思 → 行动 → …" 任意链长。
+
+    事件链管理（保守思路，2026-09-23）：
+    - 每条 action 腿 = 一条独立事件链（全新 chain_id + 切换 contextvar），
+      杜绝"同一事件链被多次 finalize_chain"的笔记混乱；
+    - 首段 action 腿若由 station 预开链（PFCA 首触发），复用该链、不代管收尾；
+      其余接力 action 腿一律先收尾残留旧链，再新开独立链并在腿结束后收尾；
+    - reflection 腿不依赖事件链（反思笔记不经过事件链缓存，与事件链解耦），
+      与 reflection truck 行为一致。
+
+    Args:
+        initial_state: 首段会话类型，"action"（PFCA）或 "reflection"（Reflection）。
+        initial_purpose: 首段会话的目的。
+        current_session: 首段 action 腿的会话上下文（含 session_id）；接力腿无上下文传 None。
+
+    Returns:
+        最后一段会话的 session_result。
+    """
+    from brain.pfc.reflection.reflection_core import get_reflection_instance
+
+    focus_state = get_global_session_state()
+
+    state = initial_state
+    purpose = initial_purpose
+    session_ctx = current_session
+    result = None
+    leg_index = 0
+    # 接力深度护栏（2026-09-23）：防止 LLM 病理性地在 行动↔反思 间无限循环，
+    # 挂死 station 处理队列。超限属状态异常，直接上抛崩溃阻断（硬约定 #4）。
+    max_legs = 10
+
+    while state:
+        max_legs -= 1
+        if max_legs < 0:
+            raise RuntimeError(
+                "PFC 链式接力超过上限（行动↔反思循环疑似失控），崩溃阻断"
+            )
+        if state == "action":
+            # action 腿：PFCA terminate 落库依赖记事本缓存文档，必须处于活动事件链内。
+            # - 首腿且链已活动（station 预开）：复用，不代管；
+            # - 无活动链（reflection truck 接力路径）：独立新开链；
+            # - 接力腿且残留 station 首腿链：先收尾旧链再新开独立链，
+            #   保证每条 action 腿各自 finalize，互不复用缓存文档。
+            chain_owned_by_cycle = False
+            chain_token = None
+            if not focus_state.is_event_chain_active():
+                new_chain_id = generate_chain_id()
+                chain_token = set_chain_context(new_chain_id)
+                focus_state.start_new_event_chain(
+                    purpose or "",
+                    chain_id=new_chain_id,
+                )
+                chain_owned_by_cycle = True
+            elif leg_index > 0:
+                focus_state.end_event_chain()
+                new_chain_id = generate_chain_id()
+                chain_token = set_chain_context(new_chain_id)
+                focus_state.start_new_event_chain(
+                    purpose or "",
+                    chain_id=new_chain_id,
+                )
+                chain_owned_by_cycle = True
+            try:
+                result = await get_pfca_instance().start(
+                    purpose=purpose, current_session=session_ctx
+                )
+            finally:
+                # 本协调器新开的事件链在腿结束后收尾（未真正结束路径缓存丢弃）
+                if chain_owned_by_cycle and focus_state.is_event_chain_active():
+                    focus_state.end_event_chain()
+                if chain_token is not None:
+                    reset_chain_context(chain_token)
+            session_ctx = None  # 接力腿无原始会话上下文
+        elif state == "reflection":
+            result = await get_reflection_instance().start(
+                purpose=purpose, current_session=None
+            )
+        else:
+            raise ValueError(f"未知 PFC 接力状态: {state!r}")
+
+        leg_index += 1
+        # 消费接力请求（terminate / finalize_reflection 写入）；无则链结束
+        handoff = focus_state._data.pop("pfc_handoff", None)
+        if not handoff:
+            break
+        state = handoff["state"]
+        purpose = handoff["purpose"]
+
+    return result
 
 
 @async_handle_errors()
@@ -81,9 +192,15 @@ async def async_process_from_att_factory(
     # 4. 运行 pfca 实例（输入显式传入，首条消息由 start() 内部准备）
     #    is_task_running 必须 try/finally 复位：任何异常/取消路径残留 True，
     #    会让后续 PFCA 请求被"已有pfca任务在运行"永久拒绝（致命静默）。
+    #    经 run_pfc_cycle 协调器运行：PFCA terminate 可选接力进入反思（enter_reflection），
+    #    反思 finalize 可选接力回到行动（enter_action），构成 行动↔反思 链式会话。
     pfca_instance.is_task_running = True
     try:
-        processed_result = await pfca_instance.start(message, session_context)
+        processed_result = await run_pfc_cycle(
+            initial_state="action",
+            initial_purpose=message,
+            current_session=session_context,
+        )
     finally:
         pfca_instance.is_task_running = False
 

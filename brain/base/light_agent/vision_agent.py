@@ -25,11 +25,9 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.append(str(_PROJECT_ROOT))
 
-import openai
-
 from brain.base.light_agent.lightweight_agent import LightweightAgent
 from utils.logger import get_logger
-from config.settings import VisionConfig, ModelConfig
+from config.llm_settings import VisionConfig
 
 logger = get_logger(__name__, "DEBUG")
 
@@ -52,8 +50,11 @@ class VisionAgent(LightweightAgent):
 
     继承 `LightweightAgent`，按五段式骨架组织：
     - 前处理 `_preprocess`：解析源图、转 data_url、构造 user 消息、注入 _current_source
-    - LLM 循环 `_llm_loop`：复用父类，由 `_call_llm` 覆盖走视觉模型
+    - LLM 循环 `_llm_loop`：复用父类，由 `_call_llm` 覆盖走 vision 等级模型
     - 后处理 `_postprocess`：从循环产出的工具结果整理最终文案
+
+    事件链上下文保留：history_prefix="vision"，经父类 _llm_loop 落盘
+    event_chains/{chain_id}/vision_{HHMMSS}.json（前端 /context 以 kind=vision 展示）。
 
     提供给 LLM 的工具（schema 由 get_available_tools() 暴露）：
       * save_image          ：保存普通图片（title / description / mood 必填；源图锁定 _current_source）
@@ -61,9 +62,11 @@ class VisionAgent(LightweightAgent):
       * adjust_sticker      ：修改最近保存/调整过的表情包及其同名 .json（sticker_title / description / mood 必填）
       * delete_sticker      ：删除最近保存/调整过的表情包及其同名 .json（无参）
 
-    不暴露给 LLM 的辅助工具（仅供上层 conversation_tool_manager 直接 await）：
-      * list_stickers       ：列出表情包库（keyword 可选）
+    表情包库的列举 / 检索不在此处：统一走上层 ToolVision.vision_agent 的
+      「向量比对」（向量检索），本 agent 只负责单张图片的识图与保存。
     """
+
+    history_prefix: str = "vision"
 
     # ===================== 1. 前处理 =====================
     def _preprocess(self, query: str) -> Any:
@@ -152,7 +155,7 @@ class VisionAgent(LightweightAgent):
         self._input_hint = additional_hint
         try:
             processed_input = self._preprocess(image_path)
-            loop_result = await self._llm_loop(processed_input)
+            loop_result = await self._llm_loop(processed_input, level="vision")
             content = loop_result.get("content", "")
             extra_info = loop_result.get("extra_info")
             return self._postprocess(content, extra_info)
@@ -162,23 +165,25 @@ class VisionAgent(LightweightAgent):
             self._input_hint = None
 
     # ===================== 视觉模型专用 LLM 调用（覆盖父类默认桥接） =====================
-    async def _call_llm(self, messages: list, *, level: str = "flash",
+    async def _call_llm(self, messages: list, *, level: str = "vision",
                         tool_choice: Optional[str] = None,
                         system_prompt: Optional[str] = None, **kwargs):
-        """识图专用 LLM 调用：走 ModelConfig.VISION 视觉模型（opencode 接入），思考统一开启。"""
+        """识图专用 LLM 调用：走 vision 等级（LLMSettings.VISION，当前 = deepseek-flash）。
+
+        统一经 utils.llm_client_manager 的异步桥接（不再自建同步 openai 客户端）：
+        接入点、思考开关、token 统计与全系统其它 LLM 调用保持一致；vision 位与
+        flash 同走 DeepSeek 官方接入点（deepseek-flash 原生支持图像理解）。
+        """
+        from utils.llm_client_manager import call_llm
+
         sp = system_prompt if system_prompt is not None else self.get_system_prompt()
         full_messages = [{"role": "system", "content": sp}] + messages
 
-        sync_client = openai.OpenAI(
-            api_key=ModelConfig.API_KEY,
-            base_url=ModelConfig.BASE_URL,
-        )
-        return sync_client.chat.completions.create(
-            model=ModelConfig.VISION,
-            messages=full_messages,
+        return await call_llm(
+            level,
+            full_messages,
             tools=self.get_available_tools(),
-            tool_choice="auto",
-            extra_body={"thinking": {"type": "enabled" if ModelConfig.THINKING else "disabled"}},
+            tool_choice=tool_choice or "auto",
         )
 
     # ===================== System Prompt =====================
@@ -206,8 +211,8 @@ description中必须包含对图片内容的详细描述，文字需要复述原
     def _initialize_tool_functions(self) -> Dict[str, Any]:
         """返回 LLM 通过 function-calling 可调的 4 个工具映射。
 
-        `list_stickers` 不在此处 —— 它只供上层 conversation_tool_manager
-        单独 await 调用，不暴露给 LLM。
+        表情包库的列举 / 检索不在此处 —— 走上层 ToolVision.vision_agent 的
+        「向量比对」（向量检索），不暴露给本 agent。
         """
         return {
             "save_image": self.save_image,

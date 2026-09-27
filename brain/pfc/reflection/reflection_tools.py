@@ -4,23 +4,39 @@
 reflection模块的工具定义与处理（针对反思场景重新设计）
 
 与 pfca_tools 的定位差异：
-- pfca 是行动调度器：工具面向"对外行动"（启动对话 agent、调度决策 agent）。
+- pfca 是行动调度器：工具面向"对外行动"（启动对话 agent、召唤内心人格）。
 - reflection 是内省复盘器：工具面向"回顾事实 → 检验认知 → 落地结论"，
   不包含任何对外行动类工具（无 conversation_agent / social_chat_agent /
-  advanced_decision_agent）；印象修正与任务登记也不由反思直接执行
-  （memory_agent / task_register_agent 已于 2026-09-15 移出反思工具集）。
+  inner_persona_agent）；任务裁决独占于 quest agent，反思仅可经
+  quest_agent 联系通道转交，2026-09-18 接入。
 
 工具集（schema 与实现尽量收口于 brain/base/common_ways，本模块只留反思专属工具）：
 1. query_history / query_address_book（复用 ToolSocial）：回看聊天记录核实事实、
    查询通讯录/角色印象检验认知偏差；consumer_id 默认 None＝纯只读，不推进任何未读游标。
-2. list_notes / query_note（复用 ToolHC）：查阅记事本活动池笔记，验证历史经验。
-3. finalize_reflection（反思专属，2026-09-16）：一次性收尾工具，自动完成笔记消费闭环——
-   归档全部已落库笔记（按落库时间移入 notes/archive/<YYYY-MM>/ 并退出活动池，
-   未转化为实际信息者视为自动丢弃）→ 创建本轮反思的新笔记（source="reflection"，
-   独立落库不经过事件链缓存，立即进入活动池）→ summary 写入短期记忆并结束会话。
-   （自 create_new_note / archive_notes / terminate 三工具融合而来，归档不再由
-   LLM 手动调用，避免漏归档/顺序颠倒。）
-4. upsert_bequest / delete_bequest（收口于 ToolBequest）：话术经验的登记（创建/覆盖）与删除。
+2. memory_agent（复用 ToolPersistent，2026-09-20 重新接入）：反思复盘中发现
+   对目标的基础信息印象存在偏差/更新时，经通用层修正印象（写入短期记忆与通讯录）。
+3. list_notes / query_note（复用 ToolHC）：查阅记事本活动池笔记，验证历史经验。
+4. finalize_reflection（反思专属，2026-09-16；2026-09-23 收口）：一次性收尾工具，
+   只做一件事——结束会话；可选接力 enter_action 进入行动状态（由 run_pfc_cycle
+   消费 pfc_handoff）。summary 写入与笔记整理（归档/建新笔记）均从收尾中移除：
+   归档由 archive_notes 工具由 LLM 自主决定何时执行，不再随收尾自动发生。
+5. archive_notes（反思专属，2026-09-23 拆出）：一次性归档全部已落库笔记（不自动
+   写纪要）；如需留档由反思系统经 create_reflection_note 自行撰写。
+6. create_reflection_note（反思专属，2026-09-23 新增）：落库一篇反思留档——
+   输入 items 生成条目，标题自动生成为「<落库时间>的反思留档」；整篇
+   （标题+条目+总结）硬性少于 150 字（notepad.REFLECTION_NOTE_MAX_CHARS），
+   超出自动截断不驳回。
+7. append_task_log / query_task_status（复用 ToolTask，2026-09-18 接入）：查询当前
+   任务状态；反思中与任务相关的观察/结论，以记录级笔记追加给对应任务，等待
+   quest agent 整理归位（反思自身不做任务裁决：不立项、不改阶段、不完结）。
+8. quest_agent（复用 ToolTask，2026-09-18 接入）：联系 quest agent 的入口通道——
+   转交一段内容请它裁决（审批推进 / 登记任务 / 修订任务）；是否立项、能否推进
+   由 quest agent 独立裁决，反思不持有裁决权。
+9. query_bequest / query_decision_bequest / upsert_bequest / delete_bequest
+   （收口于 ToolBequest）：经验库分两类——「话术」经验（发言/回复技巧）与
+   「决策」经验（一种过往的面对某种情景的广泛思路，2026-09-24 新增）；
+   两类各自按语义相似度检索，增删经 category 参数（中文枚举）定向。
+   决策经验检索未取得结果时，返回结果会提示向主人请教学习经验（不设相似度阈值）。
 
 会话标识统一使用 session_id，格式为 "type_id"，例如 "private_1234567890" / "group_198431299"。
 """
@@ -29,7 +45,7 @@ import json
 from typing import Dict, Any, List
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
-from brain.base import ToolManager, ToolHC, ToolBequest, ToolSocial
+from brain.base import ToolManager, ToolHC, ToolBequest, ToolSocial, ToolTask, ToolPersistent
 from brain.hc.global_session_state import get_global_session_state
 
 
@@ -52,56 +68,98 @@ class Reflection_tool_manager(ToolManager):
         # query_history / query_address_book 的 schema 与实现统一复用 ToolSocial
         # （consumer_id 默认 None＝纯只读，不推进任何未读游标）；list_notes /
         # query_note schema 复用 ToolHC 通用版；finalize_reflection 为反思专属
-        # 收尾工具（笔记消费闭环 + 退出，schema 与实现均在本模块）。
+        # 收尾工具（结束会话 + 可选行动接力，schema 与实现均在本模块）。
         return [
             ToolSocial.get_query_history_tool_schema(),
             ToolSocial.get_query_address_book_tool_schema(),
+            # memory_agent（复用 ToolPersistent，2026-09-20 接入：复盘发现印象偏差时
+            # 经通用层修正记忆——session 会话印象 / mentioned_person 被提及人物）
+            ToolPersistent.get_memory_agent_tool_schema(),
             ToolHC.get_list_notes_tool_schema(),
             ToolHC.get_query_note_tool_schema(),
             {
                 "type": "function",
                 "function": {
-                    "name": "finalize_reflection",
+                    "name": "archive_notes",
                     "description": (
-                        "结束本轮反思（一次性收尾，反思的最后一步）：自动完成三件事——"
-                        "①将全部已落库笔记按落库时间移入按月归档文件夹并退出活动池"
-                        "（凡未转化为实际信息的笔记随归档视为自动丢弃，归档自动执行，"
-                        "无需手动调用）；②创建本轮反思的新笔记并落库、立即进入活动池"
-                        "（作为下次唤醒时的活动笔记）；③将 summary 写入短期记忆并结束"
-                        "反思会话。请在确认所有结论（如话术经验登记）均已落地后再调用，"
-                        "调用后反思即结束，不可继续使用其他工具。"
+                        "归档全部已落库笔记："
+                        "按落库时间把全部笔记移入按月归档文件夹并退出活动池，"
+                        "凡未转化为实际信息的笔记随归档视为自动丢弃。"
+                        "本工具不写纪要；如需留档请随后调用 create_reflection_note 自行撰写。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_reflection_note",
+                    "description": (
+                        "落库一篇反思留档：输入提炼后的 items 生成条目，"
+                        "标题自动生成为「<落库时间>的反思留档」，无需提供。"
+                        "整篇（标题+全部条目）硬性少于150字，超出部分自动截断，"
+                        "条目按输入顺序依次保留。"
                     ),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "title": {
-                                "type": "string",
-                                "description": "新笔记标题（简洁概括主题）。"
-                            },
                             "items": {
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": (
-                                    "提炼后的条目列表，每条 40 字以内——一句以后能直接复用的话，"
-                                    "只记规则（遇到什么情况→怎么做），不记事件经过与对话复述。"
-                                ),
-                            },
-                            "summary": {
-                                "type": "string",
-                                "description": (
-                                    "本次反思的总结（一语两用）：完整前因后果、判断失误/验证、"
-                                    "得出的教训（需包含具体人物名称）；随新笔记落库存档，"
-                                    "同时写入短期记忆供下次唤醒快速回顾。"
+                                    "提炼条目列表，每条一句原则/规律/结论，"
+                                    "按输入顺序依次保留（超出整篇150字预算的部分被截断丢弃）"
                                 ),
                             },
                         },
-                        "required": ["title", "items", "summary"]
+                        "required": ["items"],
                     }
                 }
             },
-            # 话术经验登记/删除（schema 与实现统一收口于 ToolBequest，2026-09-15）
+            {
+                "type": "function",
+                "function": {
+                    "name": "finalize_reflection",
+                    "description": (
+                        "结束本轮反思"
+                        "可以选择直接进入行动状态，与其他人聊天、执行任务或行动 "
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "enter_action": {
+                                "type": "boolean",
+                                "description": (
+                                    "可选。是否在本次反思结束后进入行动状态，行动阶段可以与其他人物角色展开聊天行动等。"
+                                    "设为 true 时必须同时提供 action_purpose。"
+                                )
+                            },
+                            "action_purpose": {
+                                "type": "string",
+                                "description": (
+                                    "可选。进入行动的目的："
+                                    "下一轮行动要做什么、要推进什么事务或验证什么，将作为新一轮 PFCA 会话的首条输入。"
+                                )
+                            },
+                        },
+                    }
+                }
+            },
+            # 经验检索/登记/删除（schema 与实现统一收口于 ToolBequest，2026-09-15；
+            # 2026-09-24 增加查询决策经验）
+            ToolBequest.get_query_bequest_tool_schema(),
+            ToolBequest.get_query_decision_bequest_tool_schema(),
             ToolBequest.get_upsert_bequest_tool_schema(),
             ToolBequest.get_delete_bequest_tool_schema(),
+            # 通用级任务工具（2026-09-18 接入：查询任务状态 + 给任务添加笔记；
+            # 裁决级 create_task / update_task_status 仍私有于 QuestAgent，不对反思开放）
+            *ToolTask.get_task_tool_schemas(),
+            # quest_agent 联系通道（2026-09-18 接入：直接联系 quest agent，转交内容
+            # 由其裁决——审批推进 / 登记任务 / 修订任务；反思不持有裁决权）
+            ToolTask.get_quest_agent_tool_schema(),
         ]
 
     def __init__(self):
@@ -111,11 +169,22 @@ class Reflection_tool_manager(ToolManager):
         self.tool_functions = {
             "query_history": ToolSocial.query_history,
             "query_address_book": ToolSocial.query_address_book,
+            # memory_agent 直接引用 ToolPersistent 类方法（schema 与实现同源）
+            "memory_agent": ToolPersistent.memory_agent,
+            "archive_notes": self.archive_notes,
+            "create_reflection_note": self.create_reflection_note,
             "finalize_reflection": self.finalize_reflection,
             "query_note": self.query_note,
             "list_notes": self.list_notes,
             "upsert_bequest": self.upsert_bequest,
             "delete_bequest": self.delete_bequest,
+            "query_bequest": self.query_bequest,
+            "query_decision_bequest": self.query_decision_bequest,
+            # 通用级任务工具（直接引用 ToolTask 类方法）
+            "append_task_log": ToolTask.append_task_log,
+            "query_task_status": ToolTask.query_task_status,
+            # quest_agent 联系通道（直接引用 ToolTask 类方法）
+            "quest_agent": ToolTask.quest_agent,
         }
 
     @async_handle_errors()
@@ -196,60 +265,112 @@ class Reflection_tool_manager(ToolManager):
         （标题/触发原因摘要/落库时间/记录条数；为 query_note 提供标题来源）。"""
         return await ToolHC.list_notes()
 
-    async def upsert_bequest(self, title: str, summary: str) -> Dict[str, Any]:
-        """登记话术经验（创建/覆盖），委托通用 ToolBequest.upsert_bequest。
-        按 title 精确匹配定位：命中则覆盖内容，否则新建；裁决逻辑（登记什么、
-        如何措辞）由反思会话本身负责，本方法只做落库执行。
-        category 固定 'speech'（话术专用），工具不暴露分类参数。"""
-        return await ToolBequest.upsert_bequest(title=title, summary=summary)
+    async def query_bequest(self, query: str, top_k: int = 3) -> Dict[str, Any]:
+        """查询话术经验（按语义相似度检索），委托通用 ToolBequest.query_bequest。
+        输入当前处境 / 想表达的意思，返回最相似的经验（标题 + 内容 + 相似度）；
+        复盘时供反思会话对照既往话术、验证或提炼结论。"""
+        return await ToolBequest.query_bequest(query=query, top_k=top_k)
 
-    async def delete_bequest(self, title: str) -> Dict[str, Any]:
-        """删除话术经验（按 title 精确匹配），委托通用 ToolBequest.delete_bequest。
-        何时删除（经验被认为不恰当）由反思会话裁决，本方法只做落库执行。"""
-        return await ToolBequest.delete_bequest(title=title)
+    async def query_decision_bequest(self, query: str, top_k: int = 3) -> Dict[str, Any]:
+        """查询决策经验（按语义相似度检索），委托通用 ToolBequest.query_decision_bequest。
+        决策经验是一种过往的面对某种情景的广泛思路；输入当前面临的情景或要做的
+        判断，返回最相似的思路（标题 + 内容 + 相似度）。未取得任何经验（结果为空）
+        时，返回结果含 hint：可向主人请教、学习经验。"""
+        return await ToolBequest.query_decision_bequest(query=query, top_k=top_k)
 
-    async def finalize_reflection(self, title: str, items: List[str], summary: str) -> str:
-        """结束本轮反思（一次性收尾）——笔记消费闭环与退出动作的融合端。
+    async def upsert_bequest(
+        self, title: str, summary: str, category: str = "话术"
+    ) -> Dict[str, Any]:
+        """登记经验（创建/覆盖），委托通用 ToolBequest.upsert_bequest。
+        按 title + category 精确匹配定位：命中则覆盖内容，否则新建；裁决逻辑（登记什么、
+        如何措辞、归入哪一类）由反思会话本身负责，本方法只做落库执行。
+        category 为中文枚举「话术」/「决策」，缺省「话术」。"""
+        return await ToolBequest.upsert_bequest(title=title, summary=summary, category=category)
 
-        自动按序执行（任一步失败即中断上抛：参数错误回 LLM 自纠，系统级错误
-        崩溃阻断；已完成的归档/落库状态保留，修正后重试幂等无害）：
-        1. 自动归档：全部已落库笔记按落库时间移入 notes/archive/<YYYY-MM>/，
-           退出活动池；未转化为实际信息的笔记随归档视为自动丢弃。
-        2. 创建新笔记：本轮提炼条目（source="reflection"）独立落库，立即进入
-           活动池，作为下次唤醒时的活动笔记。
-        3. 总结写入短期记忆 + 设置退出标志，结束会话。
+    async def delete_bequest(self, title: str, category: str = "话术") -> Dict[str, Any]:
+        """删除经验（按 title + category 精确匹配），委托通用 ToolBequest.delete_bequest。
+        何时删除（经验被认为不恰当）由反思会话裁决，本方法只做落库执行。
+        category 为中文枚举「话术」/「决策」，缺省「话术」。"""
+        return await ToolBequest.delete_bequest(title=title, category=category)
+
+    async def archive_notes(self) -> str:
+        """一次性归档全部已落库笔记（2026-09-23 拆出）。
+
+        执行序（任一步失败直接上抛崩溃阻断，不吞）：
+        archive_all 按落库时间把全部笔记移入 notes/archive/<YYYY-MM>/
+        并退出活动池，未转化为实际信息者视为自动丢弃。
+
+        本工具不写纪要：留档由反思系统自行调用 create_reflection_note
+        撰写（内容裁决权在反思会话）。
+
+        Returns:
+            str: 归档结果（逐篇标题 + 归档路径），并附留档提示。
         """
         from brain.hc.shortlight import get_shortlight_notepad
-        from brain.hc.temporary_memory import get_temporary_memory
+
+        notepad = get_shortlight_notepad()
+
+        archived = await notepad.archive_all()
+        if not archived:
+            return "活动池为空，无笔记可归档。"
+
+        lines = [f"已归档 {len(archived)} 篇旧笔记（未转化为实际信息者视为自动丢弃）："]
+        for r in archived:
+            lines.append(f"- {r['title']}（{r['file']} → {r['dest']}）")
+        lines.append("如需留档，请调用 create_reflection_note 自行撰写反思留档（整篇须少于150字）。")
+        return "\n".join(lines)
+
+    async def create_reflection_note(self, items: List[str]) -> str:
+        """落库一篇反思留档（2026-09-23 新增）。
+
+        标题自动生成为「<落库时间>的反思留档」，items 依序成为条目；
+        整篇（标题+全部条目）硬性少于 150 字（notepad.REFLECTION_NOTE_MAX_CHARS），
+        超出部分自动截断不驳回；items 为空或清洗后无有效条目抛 ValueError
+        （走 LLM 自纠通道）。落库细节由 notepad.create_document 收口。
+        """
+        from brain.hc.shortlight import get_shortlight_notepad
+
+        notepad = get_shortlight_notepad()
+        name = await notepad.create_document(notes=items)
+        return f"反思留档已落库：{name}（标题自动生成，整篇少于150字，超出部分已截断）"
+
+    async def finalize_reflection(self, enter_action: bool = False,
+                                  action_purpose: str = "") -> str:
+        """结束本轮反思（一次性收尾）——退出 + 可选行动接力。
+
+        自动按序执行（任一步失败即中断上抛：参数错误回 LLM 自纠，系统级错误
+        崩溃阻断）：
+        1. 设置退出标志，结束会话。
+        2. 可选接力：enter_action=true 时登记行动接力请求（由 core.py run_pfc_cycle
+           消费），反思结束后启动新一轮 PFCA 会话，把反思结论转化为行动。
+
+        注意：笔记归档/创建已从收尾中拆出（archive_notes 工具由 LLM 自主调用），
+        本工具不再自动整理笔记、不再写短期记忆总结；需要归档旧笔记请在调用本工具
+        前先调 archive_notes。
+        """
         from brain.pfc.reflection.reflection_core import get_reflection_instance
 
-        # 1. 自动归档全部旧笔记
-        archived = await get_shortlight_notepad().archive_all()
+        # 参数校验前置（在任何副作用之前）：enter_action=true 时 action_purpose
+        # 必填，缺失属参数错误，抛 ValueError 交 LLM 自纠（_safe_execute 可恢复
+        # 错误通道）。
+        if enter_action:
+            if not (action_purpose or "").strip():
+                raise ValueError("enter_action=true 时必须提供 action_purpose")
 
-        # 2. 创建本轮反思的新笔记（title 空/条目空/单条超 40 字由 notepad 抛 ValueError 回 LLM 自纠）
-        name = await get_shortlight_notepad().create_document(
-            title=title,
-            notes=items,
-            summary=summary,
-        )
-
-        # 3. 总结写入短期记忆并退出（关键闭环，失败直接上抛崩溃阻断，不吞）
-        get_temporary_memory().add(summary)
         reflection_core = get_reflection_instance()
         await reflection_core.stop(exit_reason="reflection_done")
 
-        logger.info(
-            f"反思收尾完成: 归档 {len(archived)} 篇旧笔记, 新笔记 {name}, 退出标志已设置"
-        )
-        lines = [
-            f"反思已结束：归档旧笔记 {len(archived)} 篇"
-            f"（未转化为实际信息者视为自动丢弃），"
-            f"新笔记已创建并落库：{name}（{len(items)} 条记录），"
-            f"summary 已写入短期记忆。"
-        ]
-        for r in archived:
-            lines.append(f"- 归档: {r['title']}（{r['file']} → {r['dest']}）")
-        return "\n".join(lines)
+        # 可选接力：反思结束后进入行动状态（由 core.py run_pfc_cycle 消费）
+        if enter_action:
+            purpose = (action_purpose or "").strip()
+            get_global_session_state()._data["pfc_handoff"] = {
+                "state": "action",
+                "purpose": purpose,
+            }
+            logger.info("finalize_reflection 已登记行动接力，反思结束后进入行动状态")
+
+        logger.info("反思收尾完成: 退出标志已设置")
+        return "反思已结束。"
 
 
 # 全局Reflection工具管理器实例，延迟初始化

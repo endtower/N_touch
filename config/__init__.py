@@ -4,5 +4,6 @@
 """
 
 # 导出配置模块的主要内容
+from .llm_settings import *
 from .settings import *
 from .truck_settings import *

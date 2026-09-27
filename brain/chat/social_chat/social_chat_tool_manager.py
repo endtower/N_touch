@@ -93,8 +93,8 @@ class SocialChatToolManager(ToolManager):
             "set_send_mode": self.set_send_mode,
             "transfer_back": self.transfer_back,
             "wait_and_observe": self.wait_and_observe,  # 包装：固定传 master_session_id
-            "call_vision_agent": self.call_vision_agent,
-            "list_stickers": self.list_stickers,
+            "vision_agent": self.vision_agent,
+            "vision_agent_adjust": self.vision_agent_adjust,
             "experience_agent": self.experience_agent,
             "emotional_judgment": self.emotional_judgment,
             "record_to_notepad": self.record_to_notepad,
@@ -179,16 +179,33 @@ class SocialChatToolManager(ToolManager):
     # 通用工具（common_ways）：与 conversation 平级，直接委托共享实现
     # ============================================================
 
-    async def call_vision_agent(self, image_filename: str, context_hint: str = None) -> str:
-        """识图工具（委托通用 ToolVision.call_vision_agent，返回其 content 文案）。"""
-        from brain.base import ToolVision
-        result = await ToolVision.call_vision_agent(image_filename, context_hint)
-        return result.get("content") or "vision agent 未返回任何信息。"
+    async def vision_agent(self, type: str, context: str = "") -> str:
+        """视觉查询工具，委托通用 ToolVision.vision_agent。
 
-    async def list_stickers(self, keyword: str = "") -> str:
-        """查询已保存的表情包库（委托通用 ToolVision.list_stickers）。"""
+        type 取「向量比对」（context=期望用途的表情包描述）/「识别图片」（context=图片标题/名称）。
+        """
         from brain.base import ToolVision
-        return await ToolVision.list_stickers(keyword=keyword)
+        return await ToolVision.vision_agent(type=type, context=context)
+
+    async def vision_agent_adjust(
+        self,
+        type: str,
+        target: str,
+        new_title: str = "",
+        summary: str = "",
+    ) -> str:
+        """表情包管理工具，委托通用 ToolVision.vision_agent_adjust。
+
+        type 取「保存」/「删除」/「修改」；target 传图片原标题或名称；
+        summary（简介）保存与修改必填、删除可留空。
+        """
+        from brain.base import ToolVision
+        return await ToolVision.vision_agent_adjust(
+            type=type,
+            target=target,
+            new_title=new_title,
+            summary=summary,
+        )
 
     async def experience_agent(self, scenario: str) -> str:
         """经验 agent（social_chat 自有包装，与 conversation 平级）。
@@ -278,18 +295,37 @@ class SocialChatToolManager(ToolManager):
             "function": {
                 "name": "query_history",
                 "description": (
-                    "主动查询工作会话最近的消息。"
-                    "默认 last_n 形式。返回的消息按时间正序排列。"
+                    "查询工作会话的历史消息。返回按时间正序、带序号(#seq)与"
+                    "时间戳的消息列表。两种拉取模式二选一：看最近反应用 "
+                    "search_range（数量模式）；看某段时间的记录用 time_range"
+                    "（时间范围模式，传入后忽略 search_range）；"
+                    "可选 speaker 只看目标人物的发言。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "search_range": {
                             "type": "string",
-                            "description": "格式 'last_n'，n 为消息条数，例如 'last_10'。",
+                            "description": (
+                                "数量模式拉取条数：'last_n' 表示最新 n 条（如 'last_20'，默认 last_20），"
+                                "'all' 表示尽量多拉（上限 100 条）。传了 time_range 时忽略本参数。"
+                            ),
+                        },
+                        "time_range": {
+                            "type": "string",
+                            "description": (
+                                "时间范围模式：相对时长如 '30m' / '2h' / '3d'（最近该时段），"
+                                "或绝对区间 'YYYY-MM-DD HH:MM~YYYY-MM-DD HH:MM'（一端可省略）。"
+                            ),
+                        },
+                        "speaker": {
+                            "type": "string",
+                            "description": (
+                                "可选，筛选目标人物的发言：只返回该人物发出的消息"
+                                "（名字模糊匹配，可与数量 / 时间范围组合）。"
+                            ),
                         }
                     },
-                    "required": ["search_range"],
                 },
             },
         })
@@ -413,8 +449,8 @@ class SocialChatToolManager(ToolManager):
         tools.append(ToolHandlers.get_wait_and_observe_tool_schema())
 
         from brain.base import ToolVision
-        tools.append(ToolVision.get_call_vision_agent_tool_schema())
-        tools.append(ToolVision.get_list_stickers_tool_schema())
+        tools.append(ToolVision.get_vision_agent_tool_schema())
+        tools.append(ToolVision.get_vision_agent_adjust_tool_schema())
 
         tools.append({
             "type": "function",
@@ -553,17 +589,24 @@ class SocialChatToolManager(ToolManager):
 
         return f"已发送给主人，当前时间 {datetime.now().strftime('%H:%M:%S')}"
 
-    async def query_history(self, search_range: str) -> str:
-        """查工作会话最近的消息（委托通用 ToolSocial.query_history，路由固定到工作会话）。
+    async def query_history(
+        self,
+        search_range: str = "last_20",
+        time_range: Optional[str] = None,
+        speaker: Optional[str] = None,
+    ) -> str:
+        """查工作会话的历史消息（委托通用 ToolSocial.query_history，路由固定到工作会话）。
 
         consumer_id 传 CONVERSATION_CONSUMER_ID：social_chat 与 conversation 共用游标，
-        LLM 已读到的消息 conversation 不会重复拉取（读最近 N 条 + 格式化原语
-        由 ToolSocial 统一收口，不再越层依赖 PFCA 工具管理器单例）。
+        LLM 已读到的消息 conversation 不会重复拉取。游标仅在"无 speaker、无 time_range
+        的最新拉取"时推进——人物筛选/时间范围查询 LLM 未看全最新消息，不代为标已读。
         """
         from brain.base import ToolSocial, CONVERSATION_CONSUMER_ID
         return await ToolSocial.query_history(
             session_id=self.social_chat_core.working_session_id,
             search_range=search_range,
+            time_range=time_range,
+            speaker=speaker,
             consumer_id=CONVERSATION_CONSUMER_ID,
         )
 

@@ -11,11 +11,9 @@
 事件链是"一次完整处理周期"的边界语义，游标替代不了。
 """
 
-import asyncio
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from config.settings import ChatConfig
 from utils.logger import setup_logging
 
 logger = setup_logging(__name__, log_level="INFO")
@@ -97,8 +95,6 @@ class EventChainMixin:
         self._notify("event_chain", active=False)
         # 事件链结束钩子：各子类（如 FrontendBroadcastMixin）在此实现自己的后处理
         self._on_event_chain_end()
-        # 事件链收尾：触发 bequest 经验登记（责任从 PFCA 收尾移至事件链收尾）
-        self._trigger_bequest_learning()
         # 事件链收尾：丢弃记事本缓存文档（真正结束路径已在 terminate 落库；
         # 熔断/强停等未真正结束路径不落库，缓存丢弃）
         from brain.hc.shortlight import get_shortlight_notepad
@@ -108,51 +104,6 @@ class EventChainMixin:
             f"事件链已结束并持久化: {file_path}，"
             f"持续时间: {datetime.fromtimestamp(current_time) - datetime.fromtimestamp(start_time)}"
         )
-
-    def _trigger_bequest_learning(self) -> None:
-        """事件链结束时触发 bequest 经验登记（异步调度，不阻塞事件链结束）。
-
-        一次完整处理周期（事件链）结束时，统一登记该周期内各会话产生的
-        情绪结果经验；责任从 PFCA 收尾移至事件链收尾。
-
-        紧急关闭：bequest 经验登记存在静默报错，现由 ChatConfig.BEQUEST_LEARNING_ENABLED
-        总控（默认关闭），需要恢复时置 True 或设置环境变量 ABYSS_BEQUEST_LEARNING=1。
-        """
-        if not ChatConfig.BEQUEST_LEARNING_ENABLED:
-            logger.warning("bequest 经验登记已关闭（BEQUEST_LEARNING_ENABLED=False），跳过登记")
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug("无运行中的事件循环，跳过 bequest 经验登记")
-            return
-        self._bequest_task = loop.create_task(self._run_bequest_learning())
-
-    async def await_bequest_learning(self) -> None:
-        """等待 bequest 经验登记任务完成（测试环境在隔离作用域退出前调用）。"""
-        task = getattr(self, "_bequest_task", None)
-        if task is not None:
-            await task
-            self._bequest_task = None
-
-    async def _run_bequest_learning(self) -> None:
-        """异步执行 bequest 经验登记（fire-and-forget 任务体）。
-
-        失败语义：经验登记属重大关键链路，任何异常就地打印完整堆栈并
-        崩溃阻断（os._exit(1)，依赖 supervisor 重启）；不回灌、不吞错、不继续，
-        防止错误扩大蔓延（对齐项目崩溃语义约定）。
-        """
-        import os
-        import traceback
-        from brain.base.light_agent.bequest_agent import BequestAgent
-        try:
-            agent = BequestAgent()
-            await agent.run_all()
-        except Exception as e:
-            logger.critical(
-                f"bequest 经验登记失败，触发崩溃阻断: {e}\n{traceback.format_exc()}"
-            )
-            os._exit(1)
 
     def is_event_chain_active(self) -> bool:
         """事件链是否处于活动状态"""

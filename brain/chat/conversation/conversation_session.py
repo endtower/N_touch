@@ -6,7 +6,7 @@ from brain.chat.chat_history_manager import get_history_manager
 from brain.chat.conversation.conversation_input_manager import get_conversation_input_manager
 from brain.chat.conversation.conversation_prompt import get_full_system_prompt
 from brain.chat.conversation.conversation_tool_manager import ConversationToolManager
-from config.settings import llm_config
+from config.llm_settings import llm_config
 from utils.llm_client_manager import call_llm
 
 logger = get_logger('ConversationSession', "DEBUG")
@@ -98,7 +98,7 @@ class ConversationSession(HeavySession):
             {"role": "system", "content": get_full_system_prompt()}
         ] + messages
         response = await call_llm(
-            level='flash',
+            level='conversation',
             messages=llm_messages,
             tools=tools,
         )

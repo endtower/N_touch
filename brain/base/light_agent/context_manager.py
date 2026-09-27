@@ -2,7 +2,9 @@
 """
 通用上下文管理器（AgentContextManager）。
 
-为 advance agent（opinion / reorganize / judgment）统一装配 LLM user 上下文，
+为 light_agent 统一装配 LLM user 上下文（**当前无生产消费方**：persona_agent
+2026-09-22 起不再做 user 消息再构造，改为「传入消息 + 匹配到的经验」直接拼接；
+本模块现仅由 tests/smoke_sc_axis.py 消费，用于校验 AMY 决策侧情绪出口契约），
 采用「类 input manager」的槽位 + provider 模式（参照 pfca_input_manager 的
 _blocks dict + _compile 空段过滤）：
 - add_block：静态槽位，按添加顺序聚合。

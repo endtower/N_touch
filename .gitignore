@@ -138,9 +138,19 @@ config/settings.py
 config/role_settings.py
 config/adapt_settings.py
 config/truck_settings.py
+config/llm_settings.py
 brain/hc/database/default_initializer.py
 /tests/
 _tmp_*
+
+# 人格注册表（含人格内核提示词，涉隐私）
+brain/base/persona/persona_registry.py
+
+# 运行时备份（含 memory.db / chat_history.db / 私聊笔记快照）
+backups/
+
+# LLM 速度基准脚本（源码含 API Key）
+scripts/benchmark_llm_speed.py
 
 # AI tooling (specs / plans)
 .trae/

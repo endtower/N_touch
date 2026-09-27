@@ -92,6 +92,8 @@ def get_active_chain_ids() -> Set[str]:
 
 
 # HistoryManager 前缀 -> 前端 kind（/context API 的 kind 命名）
+# quest 非本基类子类，但 QuestAgent 复用本表的广播 kind 映射；
+# light agent 系（persona / vision / bequest / memory）前缀经父类 _llm_loop 落盘
 _PREFIX_TO_KIND = {
     'conversation': 'chat',
     'observe': 'chat',
@@ -99,6 +101,18 @@ _PREFIX_TO_KIND = {
     'pfca': 'pfca',
     'proactive': 'proactive',
     'social_chat': 'social_chat',
+    'quest': 'quest',
+    'persona': 'persona',
+    # 人格粒度动态前缀（PersonaAgent.history_prefix = persona_{persona_id}）：
+    # 同一链下每格独立 kind，前端一眼区分是哪个格
+    'persona_assistant': 'persona_assistant',
+    'persona_normal': 'persona_normal',
+    'persona_attack': 'persona_attack',
+    'vision': 'vision',
+    # 历史存档兼容：bequest agent 已于 2026-09-24 删除，仅老链文件仍用该前缀
+    'bequest': 'bequest',
+    'memory': 'memory',
+    'light_agent': 'light_agent',
 }
 
 

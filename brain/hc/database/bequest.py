@@ -2,7 +2,11 @@
 """
 嘱托/经验操作类（SQLite）
 
-经验是独立表，固定为话术专用（category = 'speech'，建表默认值，写入不再传分类参数）。
+经验是独立表，支持两类经验（category 字段，2026-09-24 起不再固定话术专用）：
+- 'speech'：话术经验（发言/回复技巧），存量默认类别；
+- 'decision'：决策经验（面对某种情景的广泛思路）。
+写入与检索均按 category 定向：create/search/定位/删除支持 category 参数，
+缺省 'speech' 保持存量调用方行为不变。
 """
 
 from datetime import datetime
@@ -17,43 +21,46 @@ logger = get_logger(__name__, "DEBUG")
 
 
 class BequestOperations:
-    """嘱托/经验操作类（纯异步；话术专用，category 固定 'speech'）"""
+    """嘱托/经验操作类（纯异步；两类经验：'speech' 话术 / 'decision' 决策）"""
 
     def __init__(self):
         self.db = get_memory_db()
 
-    async def get_bequest_id_by_title(self, title: str) -> Optional[str]:
-        """通过 title 精确查找经验。"""
+    async def get_bequest_id_by_title(self, title: str, category: str = "speech") -> Optional[str]:
+        """通过 title 精确查找经验（限定类别，speech/decision 各自独立命名空间）。"""
         if not title:
             return None
         conn = await self.db._ensure_connection()
-        cur = await conn.execute("SELECT bequest_id FROM bequests WHERE title=? LIMIT 1", (title,))
+        cur = await conn.execute(
+            "SELECT bequest_id FROM bequests WHERE title=? AND category=? LIMIT 1",
+            (title, category),
+        )
         row = await cur.fetchone()
         return row["bequest_id"] if row else None
 
-    async def create_bequest(self, title: str, summary: str) -> str:
-        """创建话术经验（category 固定 'speech'）。"""
+    async def create_bequest(self, title: str, summary: str, category: str = "speech") -> str:
+        """创建经验（category 缺省 'speech'，决策经验传 'decision'）。"""
         current_time = datetime.now().isoformat()
         bequest_id = generate_timestamp_id("Bequest")
 
         vector_store = get_vector_store()
-        title_vector = vector_store.generate_vector(title) if title else None
+        title_vector = await vector_store.generate_vector(title) if title else None
 
         conn = await self.db._ensure_connection()
         await conn.execute(
             """INSERT INTO bequests (bequest_id, title, summary, category,
                title_vector, is_vectorized, start_time, updated_at)
-               VALUES (?, ?, ?, 'speech', ?, ?, ?, ?)""",
-            (bequest_id, title, summary,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (bequest_id, title, summary, category,
              serialize_vector(title_vector), 1 if title_vector else 0,
              current_time, current_time),
         )
         await conn.commit()
         return bequest_id
 
-    async def update_bequest(self, title: str, **kwargs) -> bool:
-        """更新经验（通过 title 定位）。"""
-        bequest_id = await self.get_bequest_id_by_title(title)
+    async def update_bequest(self, title: str, category: str = "speech", **kwargs) -> bool:
+        """更新经验（通过 title + category 定位）。"""
+        bequest_id = await self.get_bequest_id_by_title(title, category=category)
         if not bequest_id:
             return False
 
@@ -69,7 +76,7 @@ class BequestOperations:
                 params.append(value)
                 if key == 'title':
                     vector_store = get_vector_store()
-                    title_vector = vector_store.generate_vector(value) if value else None
+                    title_vector = await vector_store.generate_vector(value) if value else None
                     set_clauses.append("title_vector=?")
                     params.append(serialize_vector(title_vector))
                     set_clauses.append("is_vectorized=?")
@@ -87,7 +94,7 @@ class BequestOperations:
     async def update_bequest_by_id(self, bequest_id: str, **kwargs) -> bool:
         """更新经验（通过 bequest_id 定位），供前端内联编辑使用。
 
-        可改字段: title / summary（category 固定 'speech'，不开放修改）。
+        可改字段: title / summary（category 不开放修改，按原类别保留）。
         标题变更时重新生成 title_vector 并更新 is_vectorized。
         返回是否找到并成功更新。
         """
@@ -113,7 +120,7 @@ class BequestOperations:
                 params.append(value)
                 if key == "title":
                     vector_store = get_vector_store()
-                    title_vector = vector_store.generate_vector(value) if value else None
+                    title_vector = await vector_store.generate_vector(value) if value else None
                     set_clauses.append("title_vector=?")
                     params.append(serialize_vector(title_vector))
                     set_clauses.append("is_vectorized=?")
@@ -127,12 +134,26 @@ class BequestOperations:
         await conn.commit()
         return True
 
-    async def delete_bequest_by_title(self, title: str) -> bool:
-        """删除经验（通过 title 定位）。"""
-        bequest_id = await self.get_bequest_id_by_title(title)
+    async def delete_bequest_by_title(self, title: str, category: str = "speech") -> bool:
+        """删除经验（通过 title + category 定位）。"""
+        bequest_id = await self.get_bequest_id_by_title(title, category=category)
         if not bequest_id:
             return False
         conn = await self.db._ensure_connection()
+        await conn.execute("DELETE FROM bequests WHERE bequest_id=?", (bequest_id,))
+        await conn.commit()
+        return True
+
+    async def delete_bequest_by_id(self, bequest_id: str) -> bool:
+        """删除经验（通过 bequest_id 定位，供前端内联删除使用）。"""
+        if not bequest_id:
+            return False
+        conn = await self.db._ensure_connection()
+        cur = await conn.execute(
+            "SELECT bequest_id FROM bequests WHERE bequest_id=?", (bequest_id,)
+        )
+        if await cur.fetchone() is None:
+            return False
         await conn.execute("DELETE FROM bequests WHERE bequest_id=?", (bequest_id,))
         await conn.commit()
         return True
@@ -141,22 +162,27 @@ class BequestOperations:
         self,
         query_text: str,
         top_k: int = 5,
+        category: str = "speech",
     ) -> List[Tuple[str, float]]:
         """根据查询文本进行向量相似度搜索，返回最相似的 (bequest_id, 相似度) 列表。
 
+        按 category 定向检索（speech/decision 互不串扰），缺省 'speech'
+        保持存量调用方行为不变。
         返回分数供调用方落日志与后续阈值调参。
         """
         if not query_text:
             raise ValueError("查询文本不能为空")
 
         vector_store = get_vector_store()
-        query_vector = vector_store.generate_vector(query_text)
+        query_vector = await vector_store.generate_vector(query_text)
         if not query_vector:
             return []
 
         conn = await self.db._ensure_connection()
         cur = await conn.execute(
-            "SELECT bequest_id, title, title_vector FROM bequests WHERE is_vectorized=1"
+            "SELECT bequest_id, title, title_vector FROM bequests "
+            "WHERE is_vectorized=1 AND category=?",
+            (category,),
         )
         rows = await cur.fetchall()
 
@@ -169,6 +195,69 @@ class BequestOperations:
 
         results.sort(key=lambda x: x[1], reverse=True)
         return [(bequest_id, sim) for bequest_id, sim in results[:top_k]]
+
+    async def backfill_missing_vectors(self) -> int:
+        """为所有缺失向量的经验补算 title_vector（一键回填存量数据）。
+
+        仅处理 is_vectorized=0 且 title 非空的行，逐条生成并立即提交；
+        嵌入调用失败直接上抛崩溃阻断（按 user_rules），已处理行不回滚，重跑可续。
+        返回本次补算条数。
+        """
+        conn = await self.db._ensure_connection()
+        cur = await conn.execute(
+            "SELECT bequest_id, title FROM bequests WHERE is_vectorized=0 AND title != ''"
+        )
+        rows = await cur.fetchall()
+
+        vector_store = get_vector_store()
+        count = 0
+        for r in rows:
+            vector = await vector_store.generate_vector(r["title"], target="bequest")
+            if not vector:
+                raise RuntimeError(
+                    "向量嵌入功能未启用（ENABLE_VECTOR_EMBEDDING=False），无法回填"
+                )
+            await conn.execute(
+                "UPDATE bequests SET title_vector=?, is_vectorized=1 WHERE bequest_id=?",
+                (serialize_vector(vector), r["bequest_id"]),
+            )
+            await conn.commit()
+            count += 1
+            logger.info(f"[向量回填] {r['bequest_id']} {r['title']!r} 维度={len(vector)}")
+        return count
+
+    async def regenerate_all_vectors(self) -> int:
+        """清空并重建全部经验的 title_vector（嵌入模型切换/维度变更后一键重建）。
+
+        逐条重算并原子覆写：旧向量保留到新向量成功生成为止（避免整体清空后
+        API 失败导致全库裸奔）；title 为空的行直接置空向量。
+        嵌入调用失败直接上抛崩溃阻断（按 user_rules），已处理行不回滚，重跑可续。
+        返回重建条数（含置空的空标题行）。
+        """
+        conn = await self.db._ensure_connection()
+        cur = await conn.execute("SELECT bequest_id, title FROM bequests")
+        rows = await cur.fetchall()
+
+        vector_store = get_vector_store()
+        count = 0
+        for r in rows:
+            vector = (
+                await vector_store.generate_vector(r["title"], target="bequest")
+                if r["title"] else None
+            )
+            if r["title"] and not vector:
+                raise RuntimeError(
+                    "向量嵌入功能未启用（ENABLE_VECTOR_EMBEDDING=False），无法重建"
+                )
+            await conn.execute(
+                "UPDATE bequests SET title_vector=?, is_vectorized=? WHERE bequest_id=?",
+                (serialize_vector(vector), 1 if vector else 0, r["bequest_id"]),
+            )
+            await conn.commit()
+            count += 1
+            dim = len(vector) if vector else 0
+            logger.info(f"[向量重建] {r['bequest_id']} {r['title']!r} 维度={dim}")
+        return count
 
     async def get_bequest_by_id(self, bequest_id: str) -> Optional[Dict]:
         """获取单个经验的原始数据字典。"""
@@ -189,42 +278,6 @@ class BequestOperations:
             "category": row["category"],
             "start_time": row["start_time"],
         }
-
-    async def format_bequest_by_id(self, bequest_id: str) -> str:
-        """格式化单个经验信息（合并 format_bequest_by_title）。"""
-        if not bequest_id:
-            return "未指定嘱托ID"
-        bequest = await self.get_bequest_by_id(bequest_id)
-        if not bequest:
-            return f"未找到嘱托ID为「{bequest_id}」的嘱托"
-        return self._format_bequest(bequest)
-
-    async def format_bequest_by_title(self, title: str) -> str:
-        """按标题格式化经验信息。"""
-        if not title:
-            return "未指定嘱托标题"
-        bequest_id = await self.get_bequest_id_by_title(title)
-        if not bequest_id:
-            return f"未找到标题为「{title}」的嘱托"
-        bequest = await self.get_bequest_by_id(bequest_id)
-        return self._format_bequest(bequest)
-
-    def _format_bequest(self, bequest: Dict) -> str:
-        """格式化单个经验字典。"""
-        formatted_output = []
-        formatted_output.append(f"名称：{bequest.get('title', '未知标题')}")
-        formatted_output.append(f"嘱托内容：{bequest.get('summary', '无')}")
-
-        start_time = bequest.get("start_time", "")
-        if start_time:
-            try:
-                formatted_output.append(
-                    f"创建时间：{datetime.fromisoformat(start_time).strftime('%Y-%m-%d %H:%M')}"
-                )
-            except ValueError:
-                pass
-
-        return "\n".join(formatted_output)
 
     async def clear_database(self):
         """清空所有经验。"""

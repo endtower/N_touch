@@ -84,7 +84,7 @@ class ToolHC(ToolHandlers):
                     "properties": {
                         "text": {
                             "type": "string",
-                            "description": "观察素材（纯文本40字以内），以对方为主体。",
+                            "description": "观察素材（纯文本60字以内），以对方为主体。",
                         },
                         "usage": {
                             "type": "string",
@@ -113,7 +113,7 @@ class ToolHC(ToolHandlers):
                     "properties": {
                         "text": {
                             "type": "string",
-                            "description": "观察素材（纯文本，40 字以内），以对方为主体。",
+                            "description": "观察素材（纯文本，60 字以内），以对方为主体。",
                         },
                         "usage": {
                             "type": "string",
@@ -191,7 +191,9 @@ class ToolHC(ToolHandlers):
             for idx, note in enumerate(notes, 1):
                 usage = (note.get("usage") or "").strip()
                 scene = f"（场景：{usage}）" if usage else ""
-                lines.append(f"{idx}. [{note.get('record_time', '')}] {note.get('text', '')}{scene}")
+                # 不展示条目级时间戳（冗余无意义），时间信息统一由上方
+                # 文档级 begin_time → finalize_time 承载
+                lines.append(f"{idx}. {note.get('text', '')}{scene}")
         else:
             lines.append("记录：无")
         return "\n".join(lines)

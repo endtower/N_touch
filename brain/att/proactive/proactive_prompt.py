@@ -60,10 +60,10 @@ PROACTIVE_SYSTEM_PROMPT = f"""\
     - target_task_title: 本次要处理的任务标题（可选）。
       若本次主动唤醒源于一条已到达 next_occurrence 的未完成任务，建议填该任务标题（精确匹配）；
   - query_address_book(search_range="私聊"|"群聊"|"全部"|某角色名): 查看通讯录，或查询指定角色的印象
-  - query_history(session_id, search_range="last_n"): 查询某个会话的历史消息
+  - query_history(session_id, search_range, time_range, speaker): 查询某个会话的历史消息（带序号#seq 与时间戳；search_range 按数量拉取支持 last_n/all，time_range 按时间范围拉取如 '2h' 或绝对区间，speaker 筛选目标人物的发言）
   - update_long_term_task(task_title, summary, next_occurrence, reason): 更新一条已存在的任务（受限工具：仅 update，禁止 create/delete）。详见下方"任务更新 - 推迟唤醒时间"段。
   - skip_proactive(reason): 主动跳过本次任务，立即退出 session（终结工具）
-  - （memory_agent / task_register_agent 暂未开放，本会话不要尝试调用或推断它们的行为）
+  - （memory_agent / quest_agent 暂未开放，本会话不要尝试调用或推断它们的行为）
 - launch_pfca 和 skip_proactive 都是终结工具：调用后 session 立即关闭。
 
 【任务更新 - 推迟唤醒时间】

@@ -2,11 +2,12 @@
 """通用经验辅助方法（bequest helpers）
 
 存放 conversation / social_chat 共用的话术经验（bequest）检索与激活核心逻辑。
-两模块的 experience_agent 工具与 input 经验激活共用这里的"向量检索"原语；
+conversation 的 wait_and_observe（experience_scenario）与 social_chat 的 experience_agent 工具、两模块 input 经验激活共用这里的"向量检索"原语；
 激活缓存的写入与文案拼装留在各模块——缓存来源不同：
 conversation_bequest 单例 / social_chat_input_manager._activated_bequests。
 
-经验库已固定为话术专用（category = 'speech'，写入侧硬编码），此处不再做分类过滤。
+经验库支持两类经验（speech 话术 / decision 决策，2026-09-24 起）；
+本模块只服务话术场景，检索显式限定 category='speech'（决策经验不混入话术激活）。
 """
 
 from typing import Any, Callable, Dict, List, Optional
@@ -19,7 +20,7 @@ async def search_speech_bequests(
     skip: Optional[Callable[[str], bool]] = None,
     top_k: int = 5,
 ) -> List[Dict[str, Any]]:
-    """向量检索话术经验库（experience_agent 共用核心）。
+    """向量检索话术经验库（conversation wait_and_observe / social_chat experience_agent 共用核心）。
 
     过滤规则：
     - skip(bequest_id) 命中即跳过（已激活判定，由调用方提供）；
@@ -37,7 +38,9 @@ async def search_speech_bequests(
         [{"id": str, "title": str, "summary": str, "score": float}, ...]，按检索相关性排序。
     """
     bequest_ops = BequestOperations()
-    scored = await bequest_ops.search_bequest_by_vector(scenario, top_k=top_k)
+    scored = await bequest_ops.search_bequest_by_vector(
+        scenario, top_k=top_k, category="speech",
+    )
 
     matched: List[Dict[str, Any]] = []
     for bequest_id, score in scored:
@@ -81,7 +84,9 @@ async def activate_bequests_for_input(
         return []
 
     bequest_ops = BequestOperations()
-    scored = await bequest_ops.search_bequest_by_vector(query, top_k=top_k)
+    scored = await bequest_ops.search_bequest_by_vector(
+        query, top_k=top_k, category="speech",
+    )
 
     matched: List[Dict[str, Any]] = []
     for bequest_id, score in scored:

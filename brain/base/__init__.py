@@ -18,6 +18,7 @@ from brain.base.common_ways import (
     ToolPersistent,
     ToolBequest,
     ToolTask,
+    ToolPersona,
 )
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     'ToolPersistent',
     'ToolBequest',
     'ToolTask',
+    'ToolPersona',
 ]

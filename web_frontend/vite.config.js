@@ -37,7 +37,7 @@ export default defineConfig({
                 target: 'http://127.0.0.1:5002',
                 changeOrigin: true,
             },
-            // 表情包管理 HTTP API（/stickers/list、/stickers/{filename}）
+            // 表情包管理 HTTP API（/stickers/list、/stickers/vectorize、/stickers/{filename}）
             '/stickers': {
                 target: 'http://127.0.0.1:5002',
                 changeOrigin: true,
@@ -63,6 +63,11 @@ export default defineConfig({
                 changeOrigin: true,
             },
             '/amy': {
+                target: 'http://127.0.0.1:5002',
+                changeOrigin: true,
+            },
+            // 记事本笔记 HTTP API（/notes）
+            '/notes': {
                 target: 'http://127.0.0.1:5002',
                 changeOrigin: true,
             },

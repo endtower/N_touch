@@ -96,7 +96,7 @@ class TemporaryMemory:
             limit: 最多返回多少条（默认 DEFAULT_DISPLAY_LIMIT）。None/<=0 表示全部。
 
         Returns:
-            str: 多行文本，每行形如 "1. [2026-07-01 22:30:00] xxx"
+            str: 多行文本，每行形如 "1. [2026-07-01 22:30:00] xxx"，最新一条在前。
         """
         if limit is None or limit <= 0 or limit >= len(self._messages):
             recent = self._messages
@@ -104,9 +104,10 @@ class TemporaryMemory:
             recent = self._messages[-limit:]
         if not recent:
             return ""
+        # 倒序输出：最近经历按最新在前排列，编号 1 为最新一条
         return "".join(
             _format_message_line(i, msg) + "\n"
-            for i, msg in enumerate(recent, 1)
+            for i, msg in enumerate(reversed(recent), 1)
         )
 
 

@@ -17,9 +17,10 @@ proactive 工具模块
 
 暂未暴露给 LLM 的工具（实现 + 注册保留，仅从 TOOL_SCHEMAS 中隐藏，避免 LLM 发现/误调）：
 - memory_agent:              调整记忆（实现仍保留在 _tool_memory_adjustment）
-- task_register_agent:       调整任务（实现仍保留在 _tool_task_judgement；与 update_long_term_task
-                             不同：task_register_agent 走 TaskRegisterAgent.run 的多轮 LLM 决策，
-                             可 create/update；proactive 不开放给 LLM）
+- task_judgement:            调整任务（实现仍保留在 _tool_task_judgement；2026-09-17 起委托
+                             QuestAgent.run 的多轮 LLM 决策，可 create/update/review_stage；
+                             与 update_long_term_task 不同：后者直调 ToolTask 底层、仅 update，
+                             proactive 不把 task_judgement 开放给 LLM）
 """
 
 import json
@@ -123,7 +124,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                 "**必须**调用本工具把这条任务的 next_occurrence 推迟到更晚的时间点，"
                 "以避免系统短期重复唤起——这是防止重复唤起的唯一受支持手段。\n"
                 "  - next_occurrence 里填入新的期望时间（ISO 8601）。\n"
-                "  - summary 是新的完整概况（覆盖旧的），要说明为什么这次不处理 / 推迟到何时。\n"
+                "  - summary 是新的完整概况（覆盖旧的），保持原格式不变：首行「当前阶段：<一句话>」、"
+                "之后为分级笔记（每行「- 」开头，缩进两个空格表示从属层级），"
+                "只在末尾追加一条笔记说明本次情况；"
+                "若本次为推迟唤醒，要说明为什么这次不处理 / 推迟到何时。\n"
                 "也可以用于：(1) 给已有任务追加新进展；(2) 把任务标记为完成"
                 "（next_occurrence 填「完结」）。"
             ),
@@ -139,8 +143,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                     "summary": {
                         "type": "string",
                         "description": (
-                            "更新后的完整任务概况（覆盖旧的概况）。"
-                            "若本次为推迟唤醒时间，请在这里说明推迟原因（例如：时机不成熟、缺关键信息等）。"
+                            "更新后的完整任务概况（重写全文、覆盖旧的）。"
+                            "保持原格式不变：首行「当前阶段：<一句话>」、"
+                            "之后为分级笔记（每行「- 」开头，缩进两个空格表示从属层级）；"
+                            "只在末尾追加一条笔记说明本次情况"
+                            "（若本次为推迟唤醒，说明推迟原因，例如：时机不成熟、缺关键信息等）。"
                         ),
                     },
                     "next_occurrence": {
@@ -376,30 +383,33 @@ async def _tool_memory_adjustment(
 async def _tool_task_judgement(content: str, operation_type: str) -> str:
     """任务调整，根据请求对任务进行创建或更新。
 
-    对齐 reflection_tools.task_judgement 的任务语义（2026-09-15 由 event_judgement 改来）。
+    对齐 reflection_tools.task_judgement 的任务语义（2026-09-15 由 event_judgement 改来；
+    2026-09-17 升级为 QuestAgent：阶段拆解 / 进展追踪 / 推进裁决）。
 
     Args:
         content: 具体情况的详细描述
         operation_type: 操作类型
             - 'create_task': 创建新任务
             - 'update_task': 推进或完结一个已有任务
+            - 'review_stage': 阶段裁决（进展到哪一步、下一阶段能否推进）
 
     Returns:
-        str: TaskRegisterAgent 的最终文本回复（未使用工具的轮次）
+        str: QuestAgent 的最终文本回复（未使用工具的轮次）
     """
     logger.info(f"执行task_judgement操作，operation_type={operation_type}，内容: {content}")
 
     from brain.hc.global_session_state import get_global_session_state
-    from brain.base.light_agent.task_register_agent import TaskRegisterAgent
+    from brain.base.light_agent.quest_agent import QuestAgent
 
     focus_state = get_global_session_state()
     action_desc = {
         "create_task": f"新增任务：{content}",
         "update_task": f"更新任务：{content}",
+        "review_stage": f"阶段裁决：{content}",
     }.get(operation_type, f"记录任务：{content}")
     focus_state.manager_pfca_actions('add', action_desc)
 
-    agent = TaskRegisterAgent()
+    agent = QuestAgent()
     result = await agent.run(additional_content=content, operation_type=operation_type)
 
     if isinstance(result, dict) and result.get('formatted_output'):
@@ -432,13 +442,17 @@ async def _tool_update_long_term_task(
 ) -> str:
     """受限的任务更新工具（proactive 专用）。
 
-    与 TaskRegisterAgent 暴露的 update_task_status 不同，这里**直接复用底层
-    ToolTask.update_task_status**（绕过 TaskRegisterAgent.run 的多轮 LLM 决策层），
-    因此只能 update、不能 create。
+    与 QuestAgent 暴露的 update_task_status 不同，这里**直接复用
+    QuestAgent._update_task_status_impl**（绕过 QuestAgent.run 的多轮
+    LLM 决策层），因此只能 update、不能 create。
+
+    注：update_task_status 属裁决级工具（2026-09-17 权限分区调整），
+    实现私有于 QuestAgent，不再作为 common way——ToolTask 只收口
+    append_task_log / query_task_status。
 
     Args:
         task_title: 任务标题（必须能在任务表里精确匹配到一条已存在的任务）
-        summary: 更新后的完整任务概况（覆盖旧概况）
+        summary: 更新后的完整任务概况（覆盖旧概况，保持首行「当前阶段：」等原格式）
         next_occurrence: 下次发生时间（ISO 8601）；输入「完结」则标记任务已完成
         reason: 本次更新原因（仅日志/留痕，不影响行为）
 
@@ -466,10 +480,11 @@ async def _tool_update_long_term_task(
         f"next_occurrence={next_occurrence!r}, reason={reason!r}"
     )
 
-    # 懒导入：schema 与实现统一收口于 ToolTask（common_ways，2026-09-15）
-    from brain.base.common_ways.tool_task import ToolTask
+    # 懒导入：update_task_status 属裁决级工具，实现私有于 QuestAgent
+    # （2026-09-17 权限分区调整，不再收口于 common_ways/tool_task.py）
+    from brain.base.light_agent.quest_agent import QuestAgent
 
-    result = await ToolTask.update_task_status(
+    result = await QuestAgent._update_task_status_impl(
         task_title=task_title,
         summary=summary,
         next_occurrence=next_occurrence,

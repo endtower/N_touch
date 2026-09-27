@@ -32,7 +32,7 @@ from brain.amy.constants import (
     SC_DEFAULT, SC_MIN, SC_MAX,
     SC_DECAY_PER_HOUR, SC_DECAY_TARGET,
     SC_EFFECT_GOOD, SC_EFFECT_BAD,
-    SC_NEUTRAL_DESCRIPTION, SC_ACT_BANDS,
+    SC_ACT_BANDS,
 )
 from brain.amy.emotional_interface import EmotionalInterface, get_emotional_interface, reset_emotional_interface
 from brain.amy.sc_state import ScState, get_sc_state, reset_sc_state
@@ -57,7 +57,7 @@ __all__ = [
     "SC_DECAY_PER_HOUR", "SC_DECAY_TARGET",
     "SC_EFFECT_GOOD", "SC_EFFECT_BAD",
     # SC 行动对应表（0-100 每 10 分一档）
-    "SC_NEUTRAL_DESCRIPTION", "SC_ACT_BANDS",
+    "SC_ACT_BANDS",
     # 核心类
     "EmotionalInterface", "get_emotional_interface", "reset_emotional_interface",
     "ScState", "get_sc_state", "reset_sc_state",

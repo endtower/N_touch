@@ -191,12 +191,13 @@ async function refreshAll() {
 // ===== 展示辅助 =====
 
 // 各 agent 上下文文件的 kind 标签 (后端从文件名解析; null 时按原始文件名展示)
-type Kind = 'chat' | 'pfca' | 'proactive' | 'social_chat'
+type Kind = 'chat' | 'pfca' | 'proactive' | 'social_chat' | 'quest'
 const KIND_META: Record<Kind, { label: string; color: string }> = {
   chat: { label: '聊天', color: 'var(--accent-2)' },
   pfca: { label: 'PFCA', color: 'var(--accent)' },
   proactive: { label: '主动', color: 'var(--warn)' },
   social_chat: { label: 'Social', color: 'var(--accent)' },
+  quest: { label: '任务', color: 'var(--warn)' },
 }
 
 function kindLabel(f: ChainFileItem): string {

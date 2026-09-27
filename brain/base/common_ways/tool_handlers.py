@@ -13,7 +13,7 @@ tool_conversation.ToolConversation。
 
 子类：
 - ToolConversation：会话发送类工具（send_message / send_image 及发送原语）
-- ToolVision：vision 相关工具（识图 / 表情包管理）
+- ToolVision：vision 相关工具（vision_agent 查询 / vision_agent_adjust 表情包管理）
 - ToolHC：hc 通用工具（记事本）
 """
 

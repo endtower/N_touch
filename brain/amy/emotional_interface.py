@@ -10,7 +10,7 @@ Amy 情绪系统核心接口
 - get_language_description: 表现侧出口（仅 NE/DA），conversation / social_chat 专用
 - get_decision_description: 决策侧出口（仅 SC），pfca / proactive / light_agent 专用
 - get_amy_description: 完整视图出口（三行），仅供 adapt/web/amy_api 前端展示
-- get_mood_snapshot: 统一快照出口，供需要数值快照的消费者（reorganize/strategy_check/amy_api）使用
+- get_mood_snapshot: 统一快照出口，供需要数值快照的消费者（strategy_check/amy_api）使用
 - apply_final_evaluation: PFCA 收尾最终评价登记，按评价类别刷新 SC 常驻标量并持久化
 
 情绪体系隔离（2026-09-13）：
@@ -229,6 +229,7 @@ class EmotionalInterface:
 
         # 最终评价计入想法池：act=评价词（前端归为 final 分类），desc 带事件标题，时长 4 小时。
         # 不产生 NE/DA 增量（final 词表不注册进 ACTEffects，快照计算自然跳过边际贡献）。
+        # 遵守统一堆叠上限 3（2026-09-24：所有想法统一堆叠上限 3，池满 FIFO 替换最早）。
         title = title.strip()
         now = int(time.time())
         thought = Thought(
@@ -238,7 +239,7 @@ class EmotionalInterface:
             act=final_evaluation,
             expire_time=now + FINAL_EVALUATION_THOUGHT_DURATION,
         )
-        await self.thought_cache.add(thought)
+        await self.thought_cache.add(thought, max_stack_override=3)
         self.thought_cache.save_to_file()
 
         # 刷新决策侧情绪描述（消费者各自经门面拉取，此处仅确认可生成）
@@ -273,7 +274,7 @@ class EmotionalInterface:
         return get_amy_description(snapshot, with_reason=True)
 
     async def get_mood_snapshot(self) -> MoodSnapshot:
-        """统一快照出口：供需要数值快照的消费者（reorganize/strategy_check/amy_api）使用。"""
+        """统一快照出口：供需要数值快照的消费者（strategy_check/amy_api）使用。"""
         return await self.thought_cache.calculate_mood_snapshot()
 
     async def get_active_thought_ids(self) -> set:

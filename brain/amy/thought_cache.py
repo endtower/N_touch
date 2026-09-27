@@ -128,7 +128,7 @@ class ThoughtCache:
             for t in expired:
                 await self._emit("thought_expired", t)
 
-    async def add(self, thought: Thought):
+    async def add(self, thought: Thought, max_stack_override: Optional[int] = None):
         """添加 thought。
 
         行为：
@@ -142,6 +142,9 @@ class ThoughtCache:
            - max_stack == 1（单 instance）→ 池已有同 act：刷新现有 thought 的 expire_time/create_time/desc，
              保持原 ID（不创建新 instance）
            - max_stack > 1（多 instance）→ 池满：FIFO 替换（移除最早，添加新）
+
+        max_stack_override: 可选堆叠上限覆盖（仅对未注册进 ACT_EFFECTS 的 act 生效，
+            如最终评价词），None 时按 ACT_EFFECTS 配置；池满同样 FIFO 替换最早。
 
         异常：
         - 若 act 属于 system 类（max_stack=0 含义为"无限"），拒绝添加
@@ -187,7 +190,16 @@ class ThoughtCache:
                         logger.debug(f"FIFO 替换：act='{thought.act}' 移除最早 thought id={oldest.id}")
                         await self._emit("thought_replaced", oldest)
             else:
-                # act 未注册：intensity 保持传入值（默认 1.0）
+                # act 未注册（如最终评价词）：intensity 保持传入值（默认 1.0）；
+                # 显式传入 max_stack_override 时按该上限 FIFO 封顶（2026-09-24：
+                # 所有想法统一堆叠上限 3）
+                if max_stack_override is not None:
+                    same_act_thoughts = [t for t in self.thoughts if t.act == thought.act]
+                    if len(same_act_thoughts) >= max_stack_override:
+                        oldest = min(same_act_thoughts, key=lambda t: t.create_time)
+                        self.thoughts.remove(oldest)
+                        logger.debug(f"FIFO 替换（未注册 act 封顶 {max_stack_override}）：act='{thought.act}' 移除最早 id={oldest.id}")
+                        await self._emit("thought_replaced", oldest)
                 thought.intensity = thought.intensity if thought.intensity else 1.0
 
             self.thoughts.append(thought)

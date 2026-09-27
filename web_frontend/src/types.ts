@@ -425,7 +425,7 @@ export interface ExperienceItem {
   bequest_id: string
   title: string
   summary: string
-  category: string            // 固定 'speech'（话术经验，写入侧硬编码）
+  category: string            // 'speech'（话术经验）/ 'decision'（决策经验）
   start_time?: string | null
   updated_at?: string | null
 }
@@ -446,25 +446,32 @@ export interface ExperienceUpdateResponse {
   updated: boolean
 }
 
+// 删除经验响应（DELETE /memory/experiences/{bequest_id}）
+export interface ExperienceDeleteResponse {
+  deleted: boolean
+  bequest_id: string
+}
+
 // ============================================================
-// 长期事件 (列表式查看, 状态切换)
+// 任务管理 (quest 长期任务, 列表式查看 / 编辑 / 删除; 后端 /events/*)
 // ============================================================
 
-export interface LongEvent {
+export type TaskStatus = 'active' | 'completed'
+
+export interface TaskInfo {
   id: string
-  event_id: string
+  task_id: string
   title: string
   summary: string
-  event_type: 'ongoing' | 'completed' | 'failed' | 'aborted' | 'planned'
+  status: TaskStatus
   next_occurrence?: string | null
-  is_vectorized?: number
   start_time?: string | null
   end_time?: string | null
   updated_at?: string | null
 }
 
-export interface LongEventList {
-  events: LongEvent[]
+export interface TaskList {
+  tasks: TaskInfo[]
   total: number
   status: string
   limit: number
@@ -477,7 +484,7 @@ export interface LongEventList {
 
 // 事件链文件夹内的单个上下文文件 (固定名 {prefix}.json 或 legacy 时间戳名)
 export interface ChainFileItem {
-  kind: string | null                  // 从文件名解析 (chat|pfca|proactive|social_chat|null)
+  kind: string | null                  // 从文件名解析 (chat|pfca|proactive|social_chat|quest|null)
   name: string
   size: number
   mtime: number
@@ -609,4 +616,36 @@ export interface AmyState {
   amy_descriptions: AmyDescriptions
   sc_meta?: AmyScMeta
   error?: string
+}
+
+// ============================================================
+// 记事本笔记 (notepad 状态查看, GET /notes)
+// ============================================================
+
+export interface NotepadNoteEntry {
+  note_id: string
+  text: string
+  source: string
+  session_id: string
+  session_name: string
+  usage: string
+  record_time: string
+}
+
+export interface NotepadNoteDoc {
+  title: string
+  chain_id: string
+  trigger: string
+  begin_time: string
+  finalize_time: string
+  final_evaluation: string | null
+  summary: string
+  notes: NotepadNoteEntry[]
+}
+
+export interface NotesResponse {
+  pfca_manual: string       // PFCA 当前可见的记事本手册 (render_manual(max_chars=1000))
+  all: NotepadNoteDoc[]     // 全部未归档（活动池）笔记, 落库时间倒序
+  unprocessed_chars: number // 未处理笔记字符数 (反思触发统计口径)
+  fetched_at: number
 }

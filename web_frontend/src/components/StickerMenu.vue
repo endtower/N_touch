@@ -3,7 +3,7 @@ import { ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 // 表情包管理菜单：读取 LLM 自存表情包（memory/llm_save/stickers/）
-// 点击缩略图 → 作为图片加入输入框待发送；编辑/删除走 /stickers HTTP 接口。
+// 点击缩略图 → 作为图片加入输入框待发送；编辑/删除/一键向量化走 /stickers HTTP 接口。
 // 组件私有状态用本地 ref（弹窗/菜单类型状态，不进入全局 store）。
 
 interface Sticker {
@@ -13,6 +13,7 @@ interface Sticker {
   mood: string
   saved_at: string
   url: string
+  vectorized: boolean
 }
 
 const emit = defineEmits<{
@@ -29,7 +30,10 @@ const editing = ref<Sticker | null>(null)
 const form = ref({ sticker_title: '', description: '', mood: '' })
 const saving = ref(false)
 
+const vectorizing = ref(false)
+
 const hasStickers = computed(() => stickers.value.length > 0)
+const pendingVectorCount = computed(() => stickers.value.filter(s => !s.vectorized).length)
 
 async function loadStickers() {
   loading.value = true
@@ -105,6 +109,29 @@ async function saveEdit() {
   }
 }
 
+// 一键向量化：为全部表情包生成/更新语义向量（后端写入 _vectors.json），完成后刷新状态
+async function onVectorize() {
+  vectorizing.value = true
+  try {
+    const res = await fetch('/stickers/vectorize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: false }),
+    })
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '')
+      throw new Error(`HTTP ${res.status}: ${errBody || res.statusText}`)
+    }
+    const data = (await res.json()) as { total: number; embedded: number; reused: number; skipped: number }
+    await loadStickers()
+    ElMessage.success(`向量化完成：新算 ${data.embedded} 个，复用 ${data.reused} 个`)
+  } catch (e: any) {
+    ElMessage.error(`向量化失败：${e?.message || e}`)
+  } finally {
+    vectorizing.value = false
+  }
+}
+
 async function onDelete(s: Sticker) {
   try {
     await ElMessageBox.confirm(`确定删除表情包「${s.sticker_title || s.filename}」？`, '删除表情包', {
@@ -145,10 +172,27 @@ async function onDelete(s: Sticker) {
 
     <div class="sticker-menu">
       <div class="sticker-menu-head">
-        <span>表情包库</span>
-        <el-button link type="primary" size="small" :loading="loading" @click="loadStickers()">
-          刷新
-        </el-button>
+        <span>
+          表情包库
+          <span v-if="hasStickers" class="sticker-pending" :class="{ 'is-clear': pendingVectorCount === 0 }">
+            {{ pendingVectorCount === 0 ? '向量已就绪' : `待向量化 ${pendingVectorCount}` }}
+          </span>
+        </span>
+        <span class="sticker-menu-actions">
+          <el-button
+            link
+            type="primary"
+            size="small"
+            :loading="vectorizing"
+            :disabled="!hasStickers"
+            @click="onVectorize()"
+          >
+            一键向量化
+          </el-button>
+          <el-button link type="primary" size="small" :loading="loading" @click="loadStickers()">
+            刷新
+          </el-button>
+        </span>
       </div>
 
       <div v-if="loading" class="sticker-empty">加载中…</div>
@@ -201,6 +245,19 @@ async function onDelete(s: Sticker) {
   padding: 0 4px 8px;
   font-size: 13px;
   color: var(--el-text-color-regular);
+}
+.sticker-menu-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sticker-pending {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--el-color-warning);
+}
+.sticker-pending.is-clear {
+  color: var(--el-color-success);
 }
 .sticker-empty {
   padding: 24px 0;

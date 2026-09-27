@@ -36,6 +36,21 @@ _TRUCK_META: Dict[str, Dict[str, Any]] = {
         "description": "按固定周期唤醒 proactive，做定时 check-in / 自检等主动任务",
         "category": "主动任务",
     },
+    "reflection_char_truck": {
+        "label": "反思触发·字符",
+        "description": "未处理笔记字符数达到 500 时触发一次反思",
+        "category": "反思",
+    },
+    "reflection_time_truck": {
+        "label": "反思触发·定时",
+        "description": "距上次反思满 3 小时自动触发一次反思",
+        "category": "反思",
+    },
+    "task_truck": {
+        "label": "任务到期触发",
+        "description": "任务到达预计的再次处理时间时，直接启动 PFCA 处理该任务",
+        "category": "任务",
+    },
 }
 
 
@@ -45,12 +60,17 @@ def _apply_to_config(truck_id: str, enabled: bool) -> None:
         from config.truck_settings import (
             private_truck_config, ongoing_truck_config,
             special_attention_truck_config, scheduled_proactive_truck_config,
+            reflection_char_truck_config, reflection_time_truck_config,
+            task_truck_config,
         )
         mapping = {
             "private_truck": private_truck_config,
             "ongoing_truck": ongoing_truck_config,
             "special_attention_truck": special_attention_truck_config,
             "scheduled_proactive_truck": scheduled_proactive_truck_config,
+            "reflection_char_truck": reflection_char_truck_config,
+            "reflection_time_truck": reflection_time_truck_config,
+            "task_truck": task_truck_config,
         }
         cfg = mapping.get(truck_id)
         if cfg is not None:
@@ -106,7 +126,10 @@ def get_state_snapshot() -> List[Dict[str, Any]]:
             "description": meta["description"],
             "category": meta["category"],
             "enabled": actually_enabled,
-            "cycle_time": getattr(cfg, "CYCLE_TIME", None) if cfg else None,
+            "cycle_time": (
+                getattr(cfg, "CYCLE_TIME", None)
+                or getattr(cfg, "CHECK_CYCLE_TIME", None)
+            ) if cfg else None,
         })
     return result
 

@@ -1,6 +1,6 @@
 // 全局 chat 状态
 import { reactive, computed } from 'vue'
-import type { UiMessage, WebSession, FileMessage, SessionRuntime, Identity, GlobalStateSnapshot, TruckState, ActivityPayload, SocialMemorySnapshot, ExperienceList, LongEventList, LongEvent, SessionMessagesResponse, MemorySocialUpdateRequest, MemorySocialUpdateResponse, ExperienceUpdateRequest, ExperienceUpdateResponse, SessionListResponse } from '../types'
+import type { UiMessage, WebSession, FileMessage, SessionRuntime, Identity, GlobalStateSnapshot, TruckState, ActivityPayload, SocialMemorySnapshot, ExperienceList, TaskList, TaskInfo, SessionMessagesResponse, MemorySocialUpdateRequest, MemorySocialUpdateResponse, ExperienceUpdateRequest, ExperienceUpdateResponse, ExperienceDeleteResponse, SessionListResponse } from '../types'
 import { channel } from '../api/channel'
 
 interface State {
@@ -35,11 +35,11 @@ interface State {
   memoryExperiences: ExperienceList | null
   memoryExperiencesLoading: boolean
   memoryExperiencesError: string | null
-  // 长期事件列表 (状态查看 + 状态快改)
-  longEvents: LongEventList | null
-  longEventsLoading: boolean
-  longEventsError: string | null
-  longEventsStatus: 'ongoing' | 'completed' | 'failed' | 'aborted' | 'planned' | 'all'
+  // 任务列表 (状态查看 + 状态快改 + 删除)
+  tasks: TaskList | null
+  tasksLoading: boolean
+  tasksError: string | null
+  tasksStatus: 'active' | 'completed' | 'all'
   // 会话聊天记录调试查看器 (HTTP, 独立于 WS 会话)
   sessionDebugList: WebSession[]
   sessionDebugLoading: boolean
@@ -74,10 +74,10 @@ const state = reactive<State>({
   memoryExperiences: null,
   memoryExperiencesLoading: false,
   memoryExperiencesError: null,
-  longEvents: null,
-  longEventsLoading: false,
-  longEventsError: null,
-  longEventsStatus: 'ongoing',
+  tasks: null,
+  tasksLoading: false,
+  tasksError: null,
+  tasksStatus: 'active',
   sessionDebugList: [],
   sessionDebugLoading: false,
   sessionDebugError: null,
@@ -646,14 +646,32 @@ async function updateExperience(
   }
 }
 
+/**
+ * 删除某条经验/嘱托。成功后从列表里原地移除对应项（免全量重拉）。
+ */
+async function deleteExperience(bequest_id: string): Promise<void> {
+  const res = await fetch(`/memory/experiences/${bequest_id}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '')
+    throw new Error(`HTTP ${res.status}: ${errBody || res.statusText}`)
+  }
+  const data = (await res.json()) as ExperienceDeleteResponse
+  if (state.memoryExperiences && data.deleted) {
+    state.memoryExperiences.experiences = state.memoryExperiences.experiences.filter(
+      e => e.bequest_id !== data.bequest_id,
+    )
+    state.memoryExperiences.total = Math.max(0, state.memoryExperiences.total - 1)
+  }
+}
+
 // ============================================================
-// 长期事件列表 (状态查看 + 状态快改)
+// 任务列表 (状态查看 + 状态快改 + 删除)
 // ============================================================
 
-async function loadLongEvents(status: 'ongoing' | 'completed' | 'failed' | 'aborted' | 'planned' | 'all' = 'ongoing', limit = 200, offset = 0): Promise<void> {
-  state.longEventsLoading = true
-  state.longEventsError = null
-  state.longEventsStatus = status
+async function loadTasks(status: 'active' | 'completed' | 'all' = 'active', limit = 200, offset = 0): Promise<void> {
+  state.tasksLoading = true
+  state.tasksError = null
+  state.tasksStatus = status
   try {
     const qs = new URLSearchParams({
       status,
@@ -665,21 +683,21 @@ async function loadLongEvents(status: 'ongoing' | 'completed' | 'failed' | 'abor
       const errBody = await res.text().catch(() => '')
       throw new Error(`HTTP ${res.status}: ${errBody || res.statusText}`)
     }
-    const data = (await res.json()) as LongEventList
-    state.longEvents = data
-    state.longEventsError = null
+    const data = (await res.json()) as TaskList
+    state.tasks = data
+    state.tasksError = null
   } catch (e: any) {
-    state.longEventsError = e?.message || String(e)
-    state.longEvents = null
+    state.tasksError = e?.message || String(e)
+    state.tasks = null
   } finally {
-    state.longEventsLoading = false
+    state.tasksLoading = false
   }
 }
 
-function patchLongEvent(updated: LongEvent) {
-  if (!state.longEvents) return
-  const list = state.longEvents.events
-  const idx = list.findIndex(e => e.event_id === updated.event_id)
+function patchTask(updated: TaskInfo) {
+  if (!state.tasks) return
+  const list = state.tasks.tasks
+  const idx = list.findIndex(e => e.task_id === updated.task_id)
   if (idx >= 0) {
     list[idx] = { ...list[idx], ...updated }
   } else {
@@ -687,24 +705,24 @@ function patchLongEvent(updated: LongEvent) {
   }
 }
 
-/** 新建事件 — 插到 list 头部, total +1 */
-function addLongEvent(created: LongEvent) {
-  if (!state.longEvents) return
-  const list = state.longEvents.events
+/** 新建任务 — 插到 list 头部, total +1 */
+function addTask(created: TaskInfo) {
+  if (!state.tasks) return
+  const list = state.tasks.tasks
   // 避免重复
-  if (list.some(e => e.event_id === created.event_id)) return
+  if (list.some(e => e.task_id === created.task_id)) return
   list.unshift(created)
-  state.longEvents.total = (state.longEvents.total ?? 0) + 1
+  state.tasks.total = (state.tasks.total ?? 0) + 1
 }
 
-/** 删除事件 — 从 list 移除, total -1 */
-function removeLongEvent(eventId: string) {
-  if (!state.longEvents) return
-  const list = state.longEvents.events
-  const idx = list.findIndex(e => e.event_id === eventId)
+/** 删除任务 — 从 list 移除, total -1 */
+function removeTask(taskId: string) {
+  if (!state.tasks) return
+  const list = state.tasks.tasks
+  const idx = list.findIndex(e => e.task_id === taskId)
   if (idx >= 0) {
     list.splice(idx, 1)
-    state.longEvents.total = Math.max(0, (state.longEvents.total ?? 0) - 1)
+    state.tasks.total = Math.max(0, (state.tasks.total ?? 0) - 1)
   }
 }
 
@@ -895,11 +913,12 @@ export const chat = {
   loadExperiences,
   clearExperiences,
   updateExperience,
-  // 长期事件列表
-  loadLongEvents,
-  patchLongEvent,
-  addLongEvent,
-  removeLongEvent,
+  deleteExperience,
+  // 任务列表
+  loadTasks,
+  patchTask,
+  addTask,
+  removeTask,
   // 会话聊天记录调试查看器
   loadSessionDebugList,
   clearSessionDebugList,

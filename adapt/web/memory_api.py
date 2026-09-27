@@ -351,6 +351,30 @@ async def handle_update_experience(request: web.Request) -> web.Response:
 
 
 # ============================================================
+# DELETE /memory/experiences/{bequest_id} — 删除经验/嘱托
+# ============================================================
+
+async def handle_delete_experience(request: web.Request) -> web.Response:
+    """DELETE /memory/experiences/{bequest_id}
+
+    删除话术经验，成功返回 { deleted: True, bequest_id }；不存在返回 404。
+    """
+    bequest_id = request.match_info.get("bequest_id", "")
+    if not bequest_id:
+        return web.json_response({"error": "bequest_id 必填"}, status=400)
+
+    try:
+        ok = await BequestOperations().delete_bequest_by_id(bequest_id)
+        if not ok:
+            return web.json_response({"error": f"经验 {bequest_id} 不存在"}, status=404)
+        logger.debug(f"[/memory/experiences/{bequest_id}] 已删除")
+        return web.json_response({"deleted": True, "bequest_id": bequest_id})
+    except Exception as e:
+        logger.exception(f"[/memory/experiences/{bequest_id}] 删除失败")
+        return web.json_response({"error": f"删除失败: {e}"}, status=500)
+
+
+# ============================================================
 # PATCH /memory/social/{entity_type}/{entity_id} — 编辑具体记忆内容
 # ============================================================
 

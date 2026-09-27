@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Connection,
   Refresh,
@@ -12,6 +12,7 @@ import {
   ArrowRight,
   Collection,
   EditPen,
+  Delete,
 } from '@element-plus/icons-vue'
 import type {
   SocialNode,
@@ -247,6 +248,7 @@ const filteredExperiences = computed(() => {
 
 const EXP_GROUPS = [
   { key: 'speech', title: '话术经验', color: '#14b8a6' },
+  { key: 'decision', title: '决策经验', color: '#a855f7' },
 ]
 
 const expGroups = computed<{ def: typeof EXP_GROUPS[number]; items: ExperienceItem[] }[]>(() => {
@@ -276,16 +278,19 @@ function expCollapsedGet(key: string) {
 
 function scenarioName(s: string): string {
   if (s === 'speech') return '话术经验'
+  if (s === 'decision') return '决策经验'
   return s || '未指定'
 }
 
 function scenarioColor(s: string): string {
   if (s === 'speech') return '#14b8a6'
+  if (s === 'decision') return '#a855f7'
   return '#a855f7'
 }
 
 function scenarioBadgeClass(s: string): string {
   if (s === 'speech') return 'speech'
+  if (s === 'decision') return 'decision'
   return 'other'
 }
 
@@ -332,6 +337,34 @@ async function expSave(key: 'title' | 'summary') {
     expEditError.value = err?.message || String(err)
   } finally {
     expSavingField.value = null
+  }
+}
+
+// 删除当前经验（二次确认后调用后端，成功后本地移除并清除选中）
+const expDeleting = ref(false)
+
+async function expDelete() {
+  const e = selectedExp.value
+  if (!e || expDeleting.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除经验「${e.title || '（未命名）'}」吗？删除后不可恢复。`,
+      '删除经验',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return // 用户取消
+  }
+  expDeleting.value = true
+  try {
+    await chat.deleteExperience(e.bequest_id)
+    expCancelEdit()
+    clearSelExp()
+    ElMessage.success('已删除')
+  } catch (err: any) {
+    ElMessage.error(err?.message || String(err))
+  } finally {
+    expDeleting.value = false
   }
 }
 
@@ -719,6 +752,15 @@ function colorFor(n: SocialNode): string {
               <span class="memory-type-badge" :class="scenarioBadgeClass(selectedExp.category)">{{ scenarioName(selectedExp.category) }}</span>
               <span class="memory-detail-name">{{ selectedExp.title || '（未命名经验）' }}</span>
               <span class="memory-edit-tip">点击字段值即可修改</span>
+              <el-button
+                class="memory-detail-delete"
+                type="danger"
+                size="small"
+                plain
+                :icon="Delete"
+                :loading="expDeleting"
+                @click="expDelete"
+              >删除</el-button>
             </div>
             <div class="memory-detail-body">
               <dl class="kv">
@@ -772,7 +814,7 @@ function colorFor(n: SocialNode): string {
                 </dd>
 
                 <dt>分类</dt>
-                <dd><code>speech（话术）</code></dd>
+                <dd><code>{{ selectedExp.category }}（{{ scenarioName(selectedExp.category) }}）</code></dd>
 
                 <dt>开始时间</dt><dd>{{ timeShort(selectedExp.start_time) }}</dd>
                 <dt>更新时间</dt><dd>{{ timeShort(selectedExp.updated_at) }}</dd>
@@ -969,6 +1011,7 @@ function colorFor(n: SocialNode): string {
   flex-shrink: 0;
 }
 .memory-scenario-tag.speech { background: rgba(20, 184, 166, 0.15); color: #14b8a6; }
+.memory-scenario-tag.decision { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
 .memory-scenario-tag.other { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
 .memory-item {
   display: flex;
@@ -1081,6 +1124,9 @@ function colorFor(n: SocialNode): string {
   padding: 14px 18px;
   border-bottom: 1px solid var(--border-1);
   flex-wrap: wrap;
+}
+.memory-detail-delete {
+  margin-left: auto;
 }
 .memory-type-badge {
   display: inline-flex;

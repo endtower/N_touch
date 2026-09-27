@@ -3,11 +3,13 @@
 LLM客户端管理器
 
 提供统一的LLM调用接口，按模型等级（level）调用：
-- flash: 主力模型（ModelConfig.FLASH，当前统一使用）
-- pro: 高阶模型（ModelConfig.PRO）
-- vision / embedding: 视觉 / 嵌入等级（由各自专用链路消费 ModelConfig）
+- flash: 主力模型（LLMSettings.FLASH，当前统一使用）
+- vision: 视觉位（LLMSettings.VISION，当前 = deepseek/deepseek-v4.1-flash，与 flash 同走
+  commandcode 中转接入点）
+- pro: 高阶模型（LLMSettings.PRO）
+- embedding: 嵌入等级（由 VectorConfig 专用链路消费，不走本模块）
 
-模型名与思考开关统一从 config.settings.ModelConfig 注册表解析。
+模型名与思考开关统一从 config/llm_settings.py 的 LLMSettings 注册表解析。
 """
 
 import inspect
@@ -20,7 +22,7 @@ from pickle import TRUE
 import openai
 from typing import Dict, Any, List, Optional
 from utils.logger import get_logger
-from config.settings import LLMConfig, ModelConfig
+from config.llm_settings import LLMConfig, LLMSettings
 
 logger = get_logger('LLMClientManager', log_level='INFO')
 
@@ -96,11 +98,42 @@ TOKEN_PRICING = {
         "input_per_million": 3,
         "output_per_million": 6,
         "cached_per_million": 0.025
+    },
+    "glm-5.3-flash": {
+        "input_per_million": 0.8,
+        "output_per_million": 2.8,
+        "cached_per_million": 0.23
     }
 }
 
-# 合法模型等级白名单（ModelConfig 上的等级注册名，大写）
-MODEL_LEVELS = ('FLASH', 'CONVERSATION', 'PRO', 'VISION', 'EMBEDDING')
+# 合法模型等级白名单（LLMSettings 上的等级注册名，大写）
+MODEL_LEVELS = ('FLASH', 'CONVERSATION', 'PERSONA', 'PRO', 'VISION', 'EMBEDDING')
+
+
+def extract_reasoning(message) -> Optional[str]:
+    """从 LLM 响应 message 中提取思考链文本（无则 None）。
+
+    兼容不同接入点的字段命名差异（不 try-ex 吞错，缺失属于可选字段的正常情形）：
+    - DeepSeek 官方 API：reasoning_content
+    - commandcode 中转（DeepSeek V4.1 Flash）：reasoning / reasoning_details
+    - opencode 统一接入点：thinking
+    """
+    if message is None:
+        return None
+    for attr in ("reasoning_content", "reasoning", "thinking"):
+        value = getattr(message, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value
+    details = getattr(message, "reasoning_details", None)
+    if isinstance(details, list) and details:
+        parts = []
+        for d in details:
+            text = d.get("text") if isinstance(d, dict) else getattr(d, "text", None)
+            if text:
+                parts.append(text)
+        if parts:
+            return "\n".join(parts)
+    return None
 
 
 class LLMClient:
@@ -108,9 +141,9 @@ class LLMClient:
 
     def __init__(self, api_key: str = None, base_url: str = None, use_session_header: Optional[bool] = None,
                  extra_headers: Dict[str, str] = None):
-        # 接入点参数化：未显式传入时使用 opencode 统一接入点（ModelConfig）
-        api_key = api_key or ModelConfig.API_KEY
-        base_url = base_url or ModelConfig.BASE_URL
+        # 接入点参数化：未显式传入时使用 opencode 统一接入点（LLMSettings）
+        api_key = api_key or LLMSettings.API_KEY
+        base_url = base_url or LLMSettings.BASE_URL
         # opencode Go 网关强制要求会话头（MissingSessionID 400），仅用于网关路由
         # 优化，不进模型上下文。进程级固定 id：路由最稳定，prompt 前缀缓存命中最有保障。
         # 第三方接入点（无该网关约束）不发送；未显式指定时按接入点自动判断。
@@ -291,43 +324,66 @@ class LLMClient:
 class LLMBridge:
     """LLM调用桥接器（单例由模块级 llm_bridge 持有）
 
-    模型等级统一从 ModelConfig 注册表解析（flash / conversation / pro / vision /
-    embedding），等级同时决定接入点：flash 走主力专属接入点（未配置时回退
-    opencode 统一接入点），conversation 走专属接入点（未配置时回退 opencode
-    统一接入点），其余等级走 opencode 统一接入点。
-    思考开关由 ModelConfig.THINKING 全局控制（仅 opencode 接入点注入 thinking
-    extra_body，第三方接入点不注入）。
+    模型等级统一从 LLMSettings 注册表解析（flash / conversation / persona /
+    pro / vision / embedding），等级同时决定接入点：flash / vision / pro 走主接入点
+    （flash 专属 commandcode 中转 DeepSeek V4.1 Flash，未配置时回退 opencode 统一接入点），
+    conversation / persona 走各自专属接入点（未配置时回退 opencode 统一接入点）。
+    思考开关由 LLMSettings.THINKING 全局控制（仅 opencode 接入点注入 thinking
+    extra_body，第三方接入点不注入——commandcode 接入点走其默认值，默认即思考模式）。
     """
 
     def __init__(self):
-        # 主 client 服务 flash 等级：优先走主力专属接入点（DeepSeek 官方 API），
-        # 未配置时 LLMClient 内部回退 opencode 统一接入点
+        # 主 client 服务 flash / vision / pro 等级：优先走主力专属接入点
+        # （commandcode 中转 DeepSeek V4.1 Flash），未配置时 LLMClient 内部回退 opencode 统一接入点
         self._client = LLMClient(
-            api_key=ModelConfig.FLASH_API_KEY or None,
-            base_url=ModelConfig.FLASH_BASE_URL or None,
+            api_key=LLMSettings.FLASH_API_KEY or None,
+            base_url=LLMSettings.FLASH_BASE_URL or None,
+            # 第三方中转 WAF 可能拦截 OpenAI SDK 默认 UA，覆盖为应用自有 UA
+            extra_headers={"User-Agent": "N-Touch/1.0"},
         )
         # conversation 专属 client（接入点配置为空时与主 client 等价，共享实例）
         self._conversation_client = None
+        # persona（内心人格）专属 client（接入点配置为空时与主 client 等价）
+        self._persona_client = None
 
     def _resolve_conversation_client(self) -> LLMClient:
         """解析 conversation 等级的 client（专属接入点，懒初始化）。
 
         专用接入点为空时回退 opencode 统一接入点（直接复用主 client）。
         """
-        conv_key = ModelConfig.CONVERSATION_API_KEY
-        conv_url = ModelConfig.CONVERSATION_BASE_URL
+        conv_key = LLMSettings.CONVERSATION_API_KEY
+        conv_url = LLMSettings.CONVERSATION_BASE_URL
         if not conv_key and not conv_url:
             return self._client
         if self._conversation_client is None:
             self._conversation_client = LLMClient(
-                api_key=conv_key or ModelConfig.API_KEY,
-                base_url=conv_url or ModelConfig.BASE_URL,
+                api_key=conv_key or LLMSettings.API_KEY,
+                base_url=conv_url or LLMSettings.BASE_URL,
                 use_session_header=False,
                 # 部分第三方中转 WAF 拦截 OpenAI SDK 默认 UA（403 Your request was blocked），
                 # 覆盖为应用自有 UA
                 extra_headers={"User-Agent": "N-Touch/1.0"},
             )
         return self._conversation_client
+
+    def _resolve_persona_client(self) -> LLMClient:
+        """解析 persona（内心人格）等级的 client（专属接入点，懒初始化）。
+
+        与 conversation 接入点相互独立配置；专用接入点为空时回退
+        opencode 统一接入点（直接复用主 client）。
+        """
+        persona_key = LLMSettings.PERSONA_API_KEY
+        persona_url = LLMSettings.PERSONA_BASE_URL
+        if not persona_key and not persona_url:
+            return self._client
+        if self._persona_client is None:
+            self._persona_client = LLMClient(
+                api_key=persona_key or LLMSettings.API_KEY,
+                base_url=persona_url or LLMSettings.BASE_URL,
+                use_session_header=False,
+                extra_headers={"User-Agent": "N-Touch/1.0"},
+            )
+        return self._persona_client
 
     async def call_llm(
         self,
@@ -344,9 +400,9 @@ class LLMBridge:
 
         Args:
             level: 模型等级，可选值：
-                - flash: 主力模型（ModelConfig.FLASH）
-                - conversation: conversation 会话模型（ModelConfig.CONVERSATION，专属接入点）
-                - pro: 高阶模型（ModelConfig.PRO，未设置时直接报错阻断）
+                - flash: 主力模型（LLMSettings.FLASH）
+                - conversation: conversation 会话模型（LLMSettings.CONVERSATION，专属接入点）
+                - pro: 高阶模型（LLMSettings.PRO，未设置时直接报错阻断）
                 - vision / embedding: 视觉 / 嵌入等级
             messages: 消息列表 (必需)
             tools: 工具列表 (可选)
@@ -360,18 +416,24 @@ class LLMBridge:
             raise ValueError(
                 f"未知的模型等级: {level}，支持的等级: flash / conversation / pro / vision / embedding"
             )
-        model = getattr(ModelConfig, level_attr)
+        model = getattr(LLMSettings, level_attr)
         if not model:
-            raise ValueError(f"模型等级 {level} 尚未在 ModelConfig 中设置模型，禁止降级调用")
+            raise ValueError(f"模型等级 {level} 尚未在 LLMSettings 中设置模型，禁止降级调用")
 
-        # conversation 等级路由到专属接入点；其余走主接入点（flash 专属 DeepSeek / opencode 统一）
-        client = self._resolve_conversation_client() if level_attr == 'CONVERSATION' else self._client
+        # conversation 等级路由到专属接入点；persona 等级路由到人格专属接入点；
+        # 其余走主接入点（flash 专属 commandcode DeepSeek V4.1 Flash / opencode 统一）
+        if level_attr == 'CONVERSATION':
+            client = self._resolve_conversation_client()
+        elif level_attr == 'PERSONA':
+            client = self._resolve_persona_client()
+        else:
+            client = self._client
         is_opencode = client.is_opencode
 
         # thinking extra_body 为 opencode 接入点思考开关格式，第三方接入点不注入
         extra_body = None
         if is_opencode:
-            extra_body = {"thinking": {"type": "enabled" if ModelConfig.THINKING else "disabled"}}
+            extra_body = {"thinking": {"type": "enabled" if LLMSettings.THINKING else "disabled"}}
 
         request_params = {
             "model": model,
@@ -383,7 +445,7 @@ class LLMBridge:
 
         request_params.update(kwargs)
 
-        logger.debug(f"LLM调用 - 等级: {level}, 模型: {model}, 思考: {ModelConfig.THINKING if is_opencode else '由接入点默认'}")
+        logger.debug(f"LLM调用 - 等级: {level}, 模型: {model}, 思考: {LLMSettings.THINKING if is_opencode else '由接入点默认'}")
 
         return await client.chat(**request_params, extra_body=extra_body,
                                  caller_file=caller_file, caller_name=caller_name, caller_line=caller_line)

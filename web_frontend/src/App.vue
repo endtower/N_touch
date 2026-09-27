@@ -261,11 +261,11 @@ const headerSubtitle = computed(() => {
           </button>
           <button
             class="truck-toggle-btn"
-            title="长期事件列表 (按状态查看)"
+            title="任务管理 (按状态查看 / 编辑 / 删除)"
             @click="eventListDialogVisible = true"
           >
             <el-icon :size="14"><Document /></el-icon>
-            <span class="truck-toggle-label">事件</span>
+            <span class="truck-toggle-label">任务</span>
           </button>
           <button
             class="truck-toggle-btn"

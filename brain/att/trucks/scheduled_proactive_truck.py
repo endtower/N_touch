@@ -128,12 +128,12 @@ class ScheduledProactiveTruck(BaseTruck):
 
             # 若 proactive 传入了 target_task_title，说明本次启动任务
             # 原因是未完成任务到期或提前触发。在末尾追加一条提示，要求 PFCA 在
-            # 结束阶段通知 task_register_agent 更新该任务。
+            # 结束阶段通知 quest_agent 更新该任务。
             if target_task_title:
                 formatted_message = (
                     f"{formatted_message}\n\n"
                     f"本次启动任务原因为到期任务触发（任务标题：{target_task_title}），"
-                    f"你必须在结束阶段通知task_register_agent更新该任务。"
+                    f"你必须在结束阶段通知quest_agent更新该任务。"
                 )
 
             logger.info("scheduled_proactive_truck 决策 launch_pfca, station 将调 PFCA")

@@ -106,27 +106,27 @@ class ProactiveSession(HeavySession):
         from brain.hc.global_session_state import get_global_session_state
         get_global_session_state().set_activity(source="proactive", tool_name="proactive_session")
 
-        # 重置 history（保证每次会话是干净的上下文）
-        #
-        # 内存/磁盘分离后 LLM 只消费 history_manager 的内存会话历史（重启后
-        # 恒为空），旧"磁盘残留触发 OpenAI 400"的问题不复存在。这里直接归档
-        # 上一轮：终结链写入资格 / 轮转 unlinked 常驻文件，磁盘展示记录保留。
-        if self.history_manager is None:
-            self.history_manager = get_proactive_history_manager()
-        self.history_manager.archive_context()
-
-        self.input_manager.clear_bequest_cache() if hasattr(self.input_manager, "clear_bequest_cache") else None
-
-        # 1. 准备 input_manager 的首次消息
-        await self._prepare_first_message()
-
-        # 2. 推进主循环（含 token 预算作用域与轮数上限；process_cycle 用基类实现）
-        budget = TokenBudget(self.TOKEN_BUDGET) if self.TOKEN_BUDGET else None
-        self.token_budget = budget
-        self._recent_tool_sigs = []
-        self._tool_repeat_strikes = 0
-        self._last_repeat_tool = ""
         try:
+            # 重置 history（保证每次会话是干净的上下文）
+            #
+            # 内存/磁盘分离后 LLM 只消费 history_manager 的内存会话历史（重启后
+            # 恒为空），旧"磁盘残留触发 OpenAI 400"的问题不复存在。这里直接归档
+            # 上一轮：终结链写入资格 / 轮转 unlinked 常驻文件，磁盘展示记录保留。
+            if self.history_manager is None:
+                self.history_manager = get_proactive_history_manager()
+            self.history_manager.archive_context()
+
+            self.input_manager.clear_bequest_cache() if hasattr(self.input_manager, "clear_bequest_cache") else None
+
+            # 1. 准备 input_manager 的首次消息
+            await self._prepare_first_message()
+
+            # 2. 推进主循环（含 token 预算作用域与轮数上限；process_cycle 用基类实现）
+            budget = TokenBudget(self.TOKEN_BUDGET) if self.TOKEN_BUDGET else None
+            self.token_budget = budget
+            self._recent_tool_sigs = []
+            self._tool_repeat_strikes = 0
+            self._last_repeat_tool = ""
             with token_budget_scope(budget):
                 while (self.running and not self.should_stop
                        and self._rounds < self.max_rounds):
@@ -141,16 +141,16 @@ class ProactiveSession(HeavySession):
         except Exception as e:
             logger.warning(f"ProactiveSession 主循环异常: {e}")
             self._exit_reason = f"error: {e}"
+        finally:
+            # 会话结束统一收尾：无论正常/异常路径都必须清除活动状态，
+            # 否则前端残留 "proactive 处理中" 假激活显示（异常被外层吞掉时尤其致命）
+            get_global_session_state().end_session_activity(source="proactive")
 
         if self._exit_reason is None and self._rounds >= self.max_rounds:
             self._exit_reason = f"达到最大轮数 ({self.max_rounds})"
             logger.warning(f"ProactiveSession {self._exit_reason}")
 
         logger.info(f"ProactiveSession 退出, reason={self._exit_reason}")
-
-        # 广播: proactive_session 退出 -> 清除活动状态, 前端回退到 "事件链未激活"
-        from brain.hc.global_session_state import get_global_session_state
-        get_global_session_state().clear_activity()
 
         return {
             "intent": self.intent,

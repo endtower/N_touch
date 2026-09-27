@@ -9,7 +9,7 @@
     ) -> dict:
 
 Returns:
-    dict: 包含 summary_text / messages_sent / exit_reason。
+    dict: 包含 summary_text / exit_reason。
 
 发送模式（审批 / 自由）由 config.SOCIAL_CHAT_SEND_MODE 决定初始值，
 run 内可经 set_send_mode 工具切换（升级需主人『同意』），本类不接收模式参数。
@@ -99,7 +99,6 @@ class SocialChatCore:
         Returns:
             {
                 "summary_text": str,          # 给 PFCA 的汇报（包含 master/working 两段）
-                "messages_sent": list[dict],  # 实际发出的消息（session/content/sent_at）
                 "exit_reason": str,
             }
         """
@@ -254,7 +253,6 @@ class SocialChatCore:
 
         return {
             "summary_text": summary_text,
-            "messages_sent": messages_sent,
             "exit_reason": exit_reason,
         }
 

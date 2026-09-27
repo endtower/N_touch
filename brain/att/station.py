@@ -8,7 +8,7 @@ from utils.chain_context import generate_chain_id, set_chain_context, reset_chai
 from config.truck_settings import is_truck_enabled
 from .trucks.private_truck import PrivateTruck
 from .trucks.special_attention_truck import SpecialAttentionTruck
-from .trucks.reflection_truck import ReflectionTruck
+from .trucks.reflection_truck import ReflectionCharTruck, ReflectionTimeTruck
 
 logger = get_logger(__name__, 'WARNING')
 
@@ -18,6 +18,9 @@ def _force_archive_chain_contexts():
 
     - conversation / observe / temporary / social_chat → Chat_HistoryManager 工厂
     - pfca / proactive → 各自全局单例
+    - quest → Quest_HistoryManager 全局单例（QuestAgent 落盘，链尾终结写入资格）
+    - persona / vision / bequest / memory → LightAgent_HistoryManager 前缀单例
+      （LightweightAgent._llm_loop 落盘，链尾终结写入资格）
 
     新存储模型下链内文件写入即落位到 event_chains/{chain_id}/{prefix}.json，
     归档只终结写入资格（移出进行中注册表 + 广播），文件原位保留，
@@ -28,6 +31,8 @@ def _force_archive_chain_contexts():
     from brain.chat.chat_history_manager import get_history_manager
     from brain.pfc.pfca.pfca_history_manager import get_pfca_history_manager
     from brain.att.proactive.proactive_history_manager import get_proactive_history_manager
+    from brain.base.light_agent.quest_history_manager import get_quest_history_manager
+    from brain.base.light_agent.light_history_manager import archive_light_contexts
     managers = [
         get_history_manager('conversation'),
         get_history_manager('observe'),
@@ -35,9 +40,12 @@ def _force_archive_chain_contexts():
         get_history_manager('social_chat'),
         get_pfca_history_manager(),
         get_proactive_history_manager(),
+        get_quest_history_manager(),
     ]
     for m in managers:
         m.archive_context()
+    # light agent 系（persona / vision / bequest / memory）：链尾终结写入资格
+    archive_light_contexts()
 
 
 class AttentionStation:
@@ -47,7 +55,9 @@ class AttentionStation:
         self.ongoing_truck = None  # 先初始化为None，避免循环引用
         self.special_attention_truck = None  # 先初始化为None，避免循环引用
         self.scheduled_proactive_truck = None  # 定时主动任务 truck
-        self.reflection_truck = None  # 反思系统自动触发 truck
+        self.reflection_char_truck = None  # 反思系统字符触发 truck
+        self.reflection_time_truck = None  # 反思系统定时触发 truck
+        self.task_truck = None  # 任务到期触发 truck
         # 任务队列 - 存储需要处理的truck请求
         self.task_queue = asyncio.Queue()
         # 已入队但尚未被 _process_tasks 消费的 truck_id 集合（去重，防止同一 truck 堆栈）
@@ -62,7 +72,8 @@ class AttentionStation:
         trucks = []
         for t in (self.private_truck, self.ongoing_truck,
                   self.special_attention_truck, self.scheduled_proactive_truck,
-                  self.reflection_truck):
+                  self.reflection_char_truck, self.reflection_time_truck,
+                  self.task_truck):
             if t is None:
                 continue
             try:
@@ -287,12 +298,25 @@ class AttentionStation:
                     self.scheduled_proactive_truck.start()
                 else:
                     logger.info("scheduled_proactive_truck 已禁用，不启动线程")
-            if self.reflection_truck is None:
-                self.reflection_truck = ReflectionTruck()
-                if is_truck_enabled('reflection_truck'):
-                    self.reflection_truck.start()
+            if self.reflection_char_truck is None:
+                self.reflection_char_truck = ReflectionCharTruck()
+                if is_truck_enabled('reflection_char_truck'):
+                    self.reflection_char_truck.start()
                 else:
-                    logger.info("reflection_truck 已禁用，不启动线程")
+                    logger.info("reflection_char_truck 已禁用，不启动线程")
+            if self.reflection_time_truck is None:
+                self.reflection_time_truck = ReflectionTimeTruck()
+                if is_truck_enabled('reflection_time_truck'):
+                    self.reflection_time_truck.start()
+                else:
+                    logger.info("reflection_time_truck 已禁用，不启动线程")
+            if self.task_truck is None:
+                from .trucks.task_truck import TaskTruck
+                self.task_truck = TaskTruck()
+                if is_truck_enabled('task_truck'):
+                    self.task_truck.start()
+                else:
+                    logger.info("task_truck 已禁用，不启动线程")
             
             # 启动任务处理主任务
             self._process_task = asyncio.create_task(self._process_tasks())
@@ -322,8 +346,12 @@ class AttentionStation:
             self.special_attention_truck.stop()
         if self.scheduled_proactive_truck:
             self.scheduled_proactive_truck.stop()
-        if self.reflection_truck:
-            self.reflection_truck.stop()
+        if self.reflection_char_truck:
+            self.reflection_char_truck.stop()
+        if self.reflection_time_truck:
+            self.reflection_time_truck.stop()
+        if self.task_truck:
+            self.task_truck.stop()
 
     def get_queue_size(self) -> int:
         """获取当前任务队列大小
@@ -340,7 +368,9 @@ class AttentionStation:
             'ongoing_truck': self.ongoing_truck,
             'special_attention_truck': self.special_attention_truck,
             'scheduled_proactive_truck': self.scheduled_proactive_truck,
-            'reflection_truck': self.reflection_truck,
+            'reflection_char_truck': self.reflection_char_truck,
+            'reflection_time_truck': self.reflection_time_truck,
+            'task_truck': self.task_truck,
         }
         return mapping.get(truck_id)
 

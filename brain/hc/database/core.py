@@ -110,7 +110,7 @@ class MemoryDatabase:
             -- 旧事件表（已废弃，任务系统替代；启动时彻底删除旧数据）
             DROP TABLE IF EXISTS events;
 
-            -- 任务表（独立）
+            -- 任务表（独立；阶段进展以概况文本承载，不落结构化列）
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY,
                 title TEXT DEFAULT '',

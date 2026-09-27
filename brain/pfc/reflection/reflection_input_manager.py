@@ -115,10 +115,12 @@ class ReflectionInputManager:
             【当前情绪】{amy 统一出口描述}        <- 三行激素 + 原因；取到非空才拼
             {近期经历}                            <- temporary_memory 取到非空才拼（≤3 条，
                                                      label "近期经历" 内置标题）
-            【当前未完成的任务】                 <- 任务命中才拼（≤3 条，自带标题）
+            【当前已经承接的任务】                <- 任务命中才拼（≤10 行轻量简表：
+            {title} 下次处理时间{相对时间}           标题+下次处理时间，概况全文不进首条，
+            ...                                      细节由 query_task_status 按需查询）
             【记事本手册】                       <- 记事本手册非空才拼（render_manual 生成，自带段头）：
             记事本存在以下章节:                      策略/决策场景子集 + 通用条目，
-            {章名}                                   ≤3 章、正文 ≤150 字符、每章 ≤5 条新挤旧
+            {章名}                                   ≤3 章、正文 ≤300 字符、每章 ≤5 条新挤旧
             └ {条目}
             可以使用工具查询记事本某一章节的具体信息以查看细节。
 
@@ -153,7 +155,7 @@ class ReflectionInputManager:
         self._collect_current_environment()
         await self._collect_amy_effect()
         self._collect_recent_memory(limit=3)
-        await self._collect_ongoing_tasks(limit=3)
+        await self._collect_ongoing_tasks()
         await self._collect_notebook_manual()
 
         content = self._compile()
@@ -293,10 +295,12 @@ class ReflectionInputManager:
         if text:
             self._blocks["recent_memory"] = text
 
-    async def _collect_ongoing_tasks(self, limit: int = 3) -> None:
-        """首条专用槽位：从任务数据库拉取未完成（active）任务的格式化列表。
+    async def _collect_ongoing_tasks(self, limit: int = 10) -> None:
+        """首条专用槽位：当前已经承接的任务（轻量简表：标题 + 下次处理时间）。
 
-        仅在首条注入一次。任务量很少变化，不进增量。
+        仅在首条注入一次。任务概况全文极易带偏 LLM 表现，这里只给
+        轻量索引行（format_tasks_brief，每行标题+相对时间），
+        细节由 query_task_status 工具按需查询；任务量很少变化，不进增量。
         按 user_rules，关键任务拉取失败直接崩溃阻断，不使用 try-except 静默跳过。
         """
         from brain.hc.database.task import TaskOperations
@@ -304,18 +308,20 @@ class ReflectionInputManager:
         task_ids = await task_ops.get_active_tasks(limit=limit)
         if not task_ids:
             return
-        text = await task_ops.format_tasks_by_ids(task_ids)
-        if text and not text.startswith("未找到"):
-            self._blocks["ongoing_tasks"] = f"【当前未完成的任务】\n{text}"
+        text = await task_ops.format_tasks_brief(task_ids)
+        if text:
+            self._blocks["ongoing_tasks"] = f"【当前已经承接的任务】\n{text}"
 
     async def _collect_notebook_manual(self) -> None:
         """首条专用槽位：记事本手册（全部已落库条目，usage 不参与路由）。
 
         聚合渲染见 notepad.render_manual（章节式裸文本，细节经 query_note 工具溯源）；
+        字符预算 max_chars=500：逐步拉取，累计超过 500 字符即停止继续拉取
+        （反思系统设置的字符限制，2026-09-21 用户设定）；
         拉取失败直接上抛崩溃阻断（按 user_rules，不 try-ex 静默跳过）。
         """
         from brain.hc.shortlight import get_shortlight_notepad
-        manual = await get_shortlight_notepad().render_manual()
+        manual = await get_shortlight_notepad().render_manual(max_chars=500)
         if manual:
             self._blocks["notebook_manual"] = manual
 

@@ -96,6 +96,10 @@ class ReflectionCore:
             session_result = await session.start()
         finally:
             self.current_session = None
+            # 会话结束统一收尾：反思脱离事件链，工具调用广播的 activity 必须在此
+            # 复位（含异常路径），否则前端残留 "LLM xxx" 假激活显示（事件链实际未激活）
+            from brain.hc.global_session_state import get_global_session_state
+            get_global_session_state().end_session_activity(source="reflection")
 
         logger.info("Reflection Core 执行完成")
 

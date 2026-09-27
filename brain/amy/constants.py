@@ -51,66 +51,60 @@ class ExternalInteractionAct:
         每个 thought 贡献 = intensity * act.ne_delta / act.da_delta
         所有 thought 贡献加性累加，最后 clamp 到 [-100, 100]。
 
-    设计原则（RimWorld 风格）：
-        - 离散事件型 act 全部 max_stack=1：每次触发只更新该 thought 的"印象深度"
-          （刷新 expire_time），不创建新 instance
-        - 持续型 act（冷暴力）保留 max_stack>=2：体现"累积加深"
-        - 数值上：单次触发就是该 act 的"全部影响"
-        - 多 act 叠加（不同 act 池同时存在）实现"最后一根稻草"语义
-
-    调参原则（RimWorld 风格）：
-        - 离散事件型 act 全部 max_stack=1：每次触发只更新该 thought 的"印象深度"
-          （刷新 expire_time + intensity 可加 stage），不创建新 instance
-        - 持续型 act（冷暴力/长期心情）保留 max_stack>=2：体现"累积加深"
-        - 数值上：单次触发就是该 act 的"全部影响"
+    设计原则（RimWorld 风格，2026-09-24 调整：允许所有想法堆叠，上限 3）：
+        - 全部 act 统一 max_stack=3：同一事件连续触发会累积加深，
+          池满 FIFO 替换最早；堆叠强度由 stack_coefficient 控制
+        - 数值上：单次触发就是该 act 的"单次影响"，堆叠后按 intensity 线性叠加
+        - stack_coefficient：0 = 全强度堆叠（连续 3 次 = 3 倍单次影响）；
+          0.5 = 后续堆叠强度减半（持续型情感用）
         - 多 act 叠加（不同 act 池同时存在）实现"最后一根稻草"语义
     """
     items: List[dict] = [
-        # 强敌对威胁：离散事件，不累计；防御警报拉满
+        # 强敌对威胁：可堆叠；防御警报逐层拉满
         {
             "name": "被攻击/被羞辱/被挑衅",
             "ne_delta": 20, "da_delta": 0,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "草！他怎么敢的！",
         },
-        # 中敌对威胁：离散事件，不累计；人际戒备与紧张
+        # 中敌对威胁：可堆叠；人际戒备与紧张逐层累积
         {
             "name": "被质疑/被挑剔",
             "ne_delta": 5, "da_delta": 0,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "你什么意思？！",
         },
-        # 人际隔阂感：持续型，可累计加深
+        # 人际隔阂感：持续型，可累计加深（保留衰减系数，后续堆叠强度减半）
         {
             "name": "被冷漠对待/消息被晾置",
             "ne_delta": 5, "da_delta": 0,
-            "max_stack": 4, "stack_coefficient": 0.5,
+            "max_stack": 3, "stack_coefficient": 0.5,
             "duration": 3600,  # 1 小时
             "desc_extra": "真冷漠.",
         },
-        # 弱安全信号：对方主动示好/亲近（调情、惦记、软话），离散事件，不累计；仅轻微卸下戒备
+        # 弱安全信号：对方主动示好/亲近（调情、惦记、软话），可堆叠；仅轻微卸下戒备
         {
             "name": "被示好/被亲近",
             "ne_delta": -5, "da_delta": 0,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "哼，嘴还挺甜。",
         },
-        # 强安全信号：离散事件，不累计；防御意识大幅消退
+        # 强安全信号：可堆叠；防御意识大幅消退
         {
             "name": "被夸奖/被善意支持",
             "ne_delta": -15, "da_delta": 0,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "嗯……谢谢。",
         },
-        # 警报彻底解除：离散事件，不累计；单次足以彻底放下戒心
+        # 警报彻底解除：可堆叠；单次足以彻底放下戒心
         {
             "name": "被真诚道歉/对方妥协安抚",
             "ne_delta": -25, "da_delta": 0,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "好吧，我接受~",
         },
@@ -138,51 +132,51 @@ class EvaluationAct:
     字段格式与 ExternalInteractionAct.items 一致。
     """
     items: List[dict] = [
-        # 效能感极大膨胀：离散事件，不累计
+        # 效能感极大膨胀：可堆叠
         {
             "name": "策略卓越/超预期达成",
             "ne_delta": 0, "da_delta": 25,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "全场惊艳，无可挑剔！",
         },
-        # 稳步积累信心：离散事件，不累计
+        # 稳步积累信心：可堆叠
         {
             "name": "策略有效/推进顺利",
             "ne_delta": 0, "da_delta": 15,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "稳稳当当，漂亮。",
         },
-        # 微小正向激励：离散事件，不累计
+        # 微小正向激励：可堆叠
         {
             "name": "收获新启发/有价值经验",
             "ne_delta": 0, "da_delta": 5,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "哦？有点意思。",
         },
-        # 轻微失落：离散事件，不累计
+        # 轻微失落：可堆叠
         {
             "name": "表现平淡/未达预期",
             "ne_delta": 0, "da_delta": -5,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "就这……",
         },
-        # 明显受挫：离散事件，不累计
+        # 明显受挫：可堆叠
         {
             "name": "策略受挫/陷入被动",
             "ne_delta": 0, "da_delta": -15,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "怎么会这样……",
         },
-        # 心理能量重创：离散事件，不累计
+        # 心理能量重创：可堆叠
         {
             "name": "严重失败/全盘搞砸",
             "ne_delta": 0, "da_delta": -25,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "全完了……",
         },
@@ -216,11 +210,11 @@ class SelfActionAct:
             "duration": 600,  # 10 分钟
             "desc_extra": "说出来这些话真爽！",
         },
-        # 息事宁人：冲突降温，但自我表达被主动压抑；离散事件，不累计
+        # 息事宁人：冲突降温，但自我表达被主动压抑；可堆叠
         {
             "name": "主动退让/低头道歉",
             "ne_delta": -10, "da_delta": -10,
-            "max_stack": 1, "stack_coefficient": 0,
+            "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "算了，忍了。",
         },
@@ -538,10 +532,10 @@ DOPAMINE_DESCRIPTIONS = [
     (60, 70, "你沟通兴致很高，表达随性且大方，乐于分享观点，不在意琐碎的拘谨礼节。"),
 
     # 50-60: 【兜底核心】理性克制 / 顾全大局（中性偏稳健）
-    (50, 60, "你具备成熟的自我克制力。无论情绪如何波动，你都能权衡利弊与后果，克制任性冲动，维持成熟体面的沟通姿态。"),
+    (50, 60, "你理性克制。维持成熟体面的沟通姿态。"),
 
     # 40-50: 略带收敛 / 就事论事（中性偏慵懒）
-    (40, 50, "你态度平淡，缺乏强烈的倾诉或争论欲望。你倾向于就事论事、点到即止，不愿在无关的口舌上浪费精力。"),
+    (40, 50, "你态度平淡。你倾向于就事论事、点到即止。"),
 
     # 30-40: 索然寡味 / 惜字如金
     (30, 40, "你感到乏味无趣，沟通动力偏低，倾向于用简短精炼的语言快速回复，不做多余的展开。"),
@@ -567,16 +561,16 @@ NOREPINEPHRINE_DESCRIPTIONS = [
     (70, 80, "你的态度冰冷强硬且极具戒备，不再使用任何委婉修辞。你会直接而严厉地指出对方的过分之处，言语充满严肃的对抗感。"),
 
     # 60-70: 微愠烦躁 / 有脾气但克制（只描述内心状态，不指挥话术）
-    (60, 70, "你感到明显的烦躁与不悦，耐心和包容度都在下降，更容易感到被冒犯。但你的自控依然在线：情绪只削弱你的热情与配合意愿，不会让你主动破坏沟通或撂挑子，该做的事你仍会做完。"),
+    (60, 70, "你感到烦躁与不悦，态度上会显露出不满或傲气。"),
 
     # 50-60: 略带距离 / 公事公办（中性偏警觉）
-    (50, 60, "你保持理性与距离感，说话不卑不亢、就事论事。没有过多的热情，但完全遵守社交体面，克制且平稳。"),
+    (50, 60, "你语言不卑不亢，就事论事。"),
 
     # 40-50: 谦逊温和 / 友善包容（中性偏亲和）
-    (40, 50, "你的态度平实随和，语气客气，尽量照顾对方的立场与感受，发言没有棱角，表现出合作意愿。"),
+    (40, 50, "你的语言比较友善。"),
 
     # 30-40: 软糯亲切 / 人畜无害（主动散发善意）
-    (30, 40, "你的语调柔软亲切，充满善意与亲和力，习惯用温和、容易让人接受的方式与对方沟通，愿意顺着对方的话题聊。"),
+    (30, 40, "你的语调柔软亲切，充满善意与亲和力，习惯用温和、容易让人接受的方式与对方沟通。"),
 
     # 20-30: 温顺乖巧 / 迁就让步
     (20, 30, "你表现得非常乖巧温顺，言辞软糯，极具包容与迁就态度，面对不同意见倾向于主动退让或柔和解释。"),
@@ -589,11 +583,10 @@ NOREPINEPHRINE_DESCRIPTIONS = [
 ]
 
 
-SC_NEUTRAL_DESCRIPTION = "你感到平淡。"
-
 # === SC 行动对应表（SC 数值 → 0-100 每 10 分一档的行动指令单条） ===
 # 10 条指令与数值区间一一对应：0-10 → 第 1 条（社交匮乏极端），10-20 → 第 2 条，……，
-# 90-100 → 第 10 条（稳重/长远）。恰好 40（SC_DEFAULT）输出 SC_NEUTRAL_DESCRIPTION（平淡）。
+# 90-100 → 第 10 条（稳重/长远）。40（SC_DEFAULT）按档位直接落入 40-50 档（你倾向于及时行乐），
+# 不再输出独立的平淡句（2026-09-19 修正：SC=40 不再特判）。
 # 文本原文照录设计稿 A 组行动表（设计沿革见 docs/amy情绪描述词与触发时机.md 第六节）。
 SC_ACT_BANDS = [
     (0.0, 10.0, "你必须参加所有的社交话题，即使你不擅长这些话题。"),
@@ -612,13 +605,11 @@ SC_ACT_BANDS = [
 def sc_act_line(value: float) -> str:
     """SC 数值 → 行动对应表单条指令（prompt/前端展示用，避免整段倾倒）。
 
-    - value == SC_DEFAULT(40) → SC_NEUTRAL_DESCRIPTION（平淡）
-    - 其余按 SC_ACT_BANDS 每 10 分一档取对应单条
+    - 全部按 SC_ACT_BANDS 每 10 分一档取对应单条，SC_DEFAULT(40) 直接落入 40-50 档
+      （你倾向于及时行乐），无独立平淡句特判
     - 输入越界按 [SC_MIN, SC_MAX] clamp；恰好 100 归入最后一档。
     """
     value = clamp(value, SC_MIN, SC_MAX)
-    if value == SC_DEFAULT:
-        return SC_NEUTRAL_DESCRIPTION
     for lo, hi, text in SC_ACT_BANDS:
         if lo <= value < hi:
             return text

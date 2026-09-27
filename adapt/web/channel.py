@@ -356,6 +356,7 @@ class WebChannel:
             handle_get_experiences,
             handle_update_social_memory,
             handle_update_experience,
+            handle_delete_experience,
         )
         from .graph_api import (
             handle_list_tasks,
@@ -374,19 +375,23 @@ class WebChannel:
             handle_update_amy_thought,
             handle_delete_amy_thought,
         )
-        # LLM 自存表情包管理 (list/update/delete)
+        # 记事本（notepad）状态查看 (只读)
+        from .notes_api import handle_get_notes
+        # LLM 自存表情包管理 (list/update/delete) + 一键向量化
         from .sticker_api import (
             handle_list_stickers,
             handle_update_sticker,
             handle_delete_sticker,
+            handle_vectorize_stickers,
         )
         # 记忆社交实体: 以 00000000 为中心的星形图 (只读)
         self._app.router.add_get("/memory/social", handle_get_social_memory)
         # 记忆内容编辑: PATCH 修改角色/群组/模糊角色的具体字段
         self._app.router.add_patch("/memory/social/{entity_type}/{entity_id}", handle_update_social_memory)
-        # 记忆经验/嘱托: bequests 表 (只读 + 内联编辑)
+        # 记忆经验/嘱托: bequests 表 (只读 + 内联编辑 + 删除)
         self._app.router.add_get("/memory/experiences", handle_get_experiences)
         self._app.router.add_patch("/memory/experiences/{bequest_id}", handle_update_experience)
+        self._app.router.add_delete("/memory/experiences/{bequest_id}", handle_delete_experience)
         # 任务列表 (只读 + 状态快改 + 字段编辑 + 创建 + 删除；URL 暂沿用 /events/*)
         self._app.router.add_get("/events/list", handle_list_tasks)
         self._app.router.add_post("/events/set_type", handle_set_task_status)
@@ -405,8 +410,12 @@ class WebChannel:
         self._app.router.add_patch("/amy/thoughts/{thought_id}", handle_update_amy_thought)
         self._app.router.add_delete("/amy/thoughts/{thought_id}", handle_delete_amy_thought)
 
-        # LLM 自存表情包管理 (list/update/delete)
+        # 记事本（notepad）状态查看 (只读)
+        self._app.router.add_get("/notes", handle_get_notes)
+
+        # LLM 自存表情包管理 (list/update/delete) + 一键向量化
         self._app.router.add_get("/stickers/list", handle_list_stickers)
+        self._app.router.add_post("/stickers/vectorize", handle_vectorize_stickers)
         self._app.router.add_patch("/stickers/{filename}", handle_update_sticker)
         self._app.router.add_delete("/stickers/{filename}", handle_delete_sticker)
 

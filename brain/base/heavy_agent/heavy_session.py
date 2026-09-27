@@ -22,7 +22,7 @@ from typing import Dict, List, Any, Optional
 
 from utils.logger import get_logger
 from utils.error_handling import AbyssCoreError
-from utils.llm_client_manager import TokenBudget, TokenBudgetExceededError, token_budget_scope
+from utils.llm_client_manager import TokenBudget, TokenBudgetExceededError, token_budget_scope, extract_reasoning
 
 logger = get_logger('HeavySession', "DEBUG")
 
@@ -205,7 +205,7 @@ class HeavySession(ABC):
         assistant_dict = {
             "role": "assistant",
             "content": assistant_message.content,
-            "reasoning_content": getattr(assistant_message, 'reasoning_content', None),
+            "reasoning_content": extract_reasoning(assistant_message),
         }
         if assistant_message.tool_calls:
             assistant_dict["tool_calls"] = [

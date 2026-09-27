@@ -17,12 +17,12 @@ PFCA Session - 统一的消息注入器
 - 实现抽象方法 _inject_first_user_message / _inject_incremental_user_message
   （每轮最多一条 user 消息，首条 > 增量 优先级）。
 - 工具能力统一由 tool_manager 提供（get_tools / handle_tool_call 委托）。
-- 自我保护上限由 config.settings.llm_config 驱动（max_no_tool_call）；空转防护仅保留
+- 自我保护上限由 config.llm_settings.llm_config 驱动（max_no_tool_call）；空转防护仅保留
   会话累计 token 预算熔断（轮数上限与重复调用检测已禁用，2026-09-09 决策）。
 """
 from typing import List, Dict, Any, Literal
 from utils.logger import get_logger
-from config.settings import llm_config
+from config.llm_settings import llm_config
 from brain.base import HeavySession
 from brain.pfc.pfca.pfca_history_manager import get_pfca_history_manager
 from brain.pfc.pfca.pfca_tools import get_available_tools, get_pfca_tool_manager
@@ -100,7 +100,7 @@ class PFCASession(HeavySession):
         messages = self.history_manager.get_history()
         full_messages = [{"role": "system", "content": get_full_system_prompt()}] + messages
 
-        from utils.llm_client_manager import call_llm
+        from utils.llm_client_manager import call_llm, extract_reasoning
         response = await call_llm(
             level='flash',
             messages=full_messages,
@@ -108,7 +108,7 @@ class PFCASession(HeavySession):
         )
         assistant_message = response.choices[0].message
         logger.debug(f"LLM完整响应: {assistant_message.model_dump()}")
-        logger.info(f"LLM响应 content: {assistant_message.content}, reasoning: {assistant_message.reasoning_content}")
+        logger.info(f"LLM响应 content: {assistant_message.content}, reasoning: {extract_reasoning(assistant_message)}")
 
         # 第一次循环后，标记为非第一次
         if self._is_first_cycle:

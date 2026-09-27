@@ -52,7 +52,7 @@ class ToolConversation(ToolHandlers):
             "function": {
                 "name": "send_message",
                 "description": (
-                    "发送纯文字消息。"
+                    "发送纯文字消息。一次只能调用一次该工具，不能一次性同时调用多次该工具。"
                     "就在 message 里用换行分隔：一次调用会拆成多条独立消息，按真人节奏逐条发出。"
                     "长篇的观点论证也可以整段粘贴。但禁止连续发送长篇观点论证，需要有语气词间隔缓冲节奏。"
                 ),

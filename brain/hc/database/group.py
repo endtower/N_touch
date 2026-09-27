@@ -263,7 +263,7 @@ class GroupOperations:
 
         combined_text = " ".join(text_parts) or group_info.get("name", "")
         vector_store = get_vector_store()
-        vector = vector_store.generate_vector(combined_text)
+        vector = await vector_store.generate_vector(combined_text, target="group")
 
         conn = await self.db._ensure_connection()
         await conn.execute(

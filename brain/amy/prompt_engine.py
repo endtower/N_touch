@@ -118,9 +118,9 @@ def build_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False) -> str:
     决策侧（pfca/proactive/light_agent）走 build_decision_mood_prompt，
     保证 pfca 与 conversation 情绪体系隔离（见 docs/api/amy.md）。
 
-    SC 行按 snapshot.sc 数值从 A 组行动对应表取单条（40 输出平淡句），
+    SC 行按 snapshot.sc 数值从 A 组行动对应表取单条（40 落入 40-50 档：你倾向于及时行乐），
     原因段仅在 with_reason=True 时追加在末尾（全部想法，不分区）。
-    SC 值取 snapshot.sc；缺失时用 SC_DEFAULT=40 兜底渲染平淡句。
+    SC 值取 snapshot.sc；缺失时用 SC_DEFAULT=40 兜底，同样按档位渲染（及时行乐）。
     """
     ne_desc = get_norepinephrine_desc(snapshot.norepinephrine)
     da_desc = get_dopamine_desc(snapshot.dopamine)
@@ -156,7 +156,7 @@ def build_language_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False
 def build_decision_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False) -> str:
     """决策侧视图（仅 SC）：pfca / proactive / light_agent 专用。
 
-    仅输出一行 SC 行动对应（sc_act_line，40 输出平淡句），
+    仅输出一行 SC 行动对应（sc_act_line，40 落入 40-50 档：你倾向于及时行乐），
     不含 NE/DA 行；原因段（with_reason=True 时）仅渲染最终评价类想法
     （FinalEvaluationAct 词表，PFCA 收尾评价），与表现侧完全隔离。
     """

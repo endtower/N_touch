@@ -2,7 +2,7 @@
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { MagicStick, Refresh, ChatLineSquare, Sunny, Lightning, Clock, Plus, Edit, Delete, Odometer } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { AmyState, AmyThought, AmyActEntry, AmyFinalEvaluationEntry, AmyDescriptionBand } from '../types'
+import type { AmyState, AmyThought, AmyActEntry, AmyFinalEvaluationEntry, AmyDescriptionBand, NotesResponse } from '../types'
 
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [v: boolean] }>()
@@ -11,6 +11,11 @@ const data = ref<AmyState | null>(null)
 const loading = ref(false)
 const lastFetchedAt = ref<number>(0)
 let pollTimer: number | null = null
+
+// ===== 记事本笔记（PFCA 视角手册 + 全部未归档条目） =====
+const notes = ref<NotesResponse | null>(null)
+const notesLoading = ref(false)
+const notesOpen = ref<number[]>([])
 
 // ===== 想法池编辑（调试/测试） =====
 const createDialogVisible = ref(false)
@@ -29,6 +34,7 @@ watch(
   (v) => {
     if (v) {
       fetchData()
+      fetchNotes()
       startPolling()
     } else {
       stopPolling()
@@ -41,7 +47,10 @@ onBeforeUnmount(stopPolling)
 function startPolling() {
   stopPolling()
   pollTimer = window.setInterval(() => {
-    if (props.visible) fetchData(true)
+    if (props.visible) {
+      fetchData(true)
+      fetchNotes(true)
+    }
   }, 3000)
 }
 function stopPolling() {
@@ -65,6 +74,22 @@ async function fetchData(silent = false) {
     if (!silent) ElMessage.error(`加载 Amy 状态失败: ${e?.message || e}`)
   } finally {
     loading.value = false
+  }
+}
+
+async function fetchNotes(silent = false) {
+  notesLoading.value = !silent
+  try {
+    const res = await fetch('/notes')
+    if (!res.ok) {
+      const t = await res.text().catch(() => '')
+      throw new Error(`HTTP ${res.status}: ${t || res.statusText}`)
+    }
+    notes.value = (await res.json()) as NotesResponse
+  } catch (e: any) {
+    if (!silent) ElMessage.error(`加载记事本笔记失败: ${e?.message || e}`)
+  } finally {
+    notesLoading.value = false
   }
 }
 
@@ -210,6 +235,22 @@ function timeShort(ts?: number | null) {
   const d = new Date(ts * 1000)
   const pad = (n: number) => n.toString().padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+// ===== 记事本笔记显示辅助 =====
+// 后端 ISO 时间 (2026-09-20T17:06:05.123) -> "2026-09-20 17:06:05"
+function noteTime(ts?: string) {
+  if (!ts) return '—'
+  return ts.replace('T', ' ').slice(0, 19)
+}
+function noteSourceLabel(src: string) {
+  switch (src) {
+    case 'reflection':  return '反思'
+    case 'conversation': return '对话'
+    case 'social_chat': return '社交'
+    case 'pfca':        return 'PFCA'
+    default:            return src || '—'
+  }
 }
 function durationShort(sec: number) {
   if (sec < 60) return `${Math.round(sec)}s`
@@ -544,6 +585,58 @@ function gaugeWidth(v: number) {
               </div>
             </div>
           </template>
+        </div>
+      </section>
+
+      <!-- 记事本笔记：PFCA 当前可见手册 + 全部未归档条目 -->
+      <section class="amy-section">
+        <div class="amy-section-head amy-section-head-ops">
+          <span>记事本笔记 · PFCA 视角 / 未归档条目</span>
+          <span v-if="notes" class="amy-notes-summary">
+            未归档 {{ notes.all.length }} 篇 · 未处理 {{ notes.unprocessed_chars }} 字符
+          </span>
+        </div>
+        <div v-if="notesLoading && !notes" class="amy-empty">加载中…</div>
+        <div v-else-if="!notes" class="amy-empty">暂无数据</div>
+        <div v-else class="amy-notes-wrap">
+          <!-- PFCA 视角手册（render_manual 同源出口） -->
+          <div class="amy-notes-block">
+            <div class="amy-notes-block-title">
+              PFCA 当前可见（render_manual · 1000 字符预算）
+            </div>
+            <pre v-if="notes.pfca_manual" class="amy-notes-manual">{{ notes.pfca_manual }}</pre>
+            <div v-else class="amy-empty amy-empty-inline">PFCA 当前无可见笔记</div>
+          </div>
+
+          <!-- 全部未归档（活动池）笔记 -->
+          <div class="amy-notes-block">
+            <div class="amy-notes-block-title">全部未归档笔记 · {{ notes.all.length }} 篇</div>
+            <div v-if="!notes.all.length" class="amy-empty amy-empty-inline">无未归档笔记</div>
+            <el-collapse v-else v-model="notesOpen" class="amy-note-collapse">
+              <el-collapse-item v-for="(doc, i) in notes.all" :key="doc.chain_id || i" :name="i">
+                <template #title>
+                  <div class="amy-note-title">
+                    <span class="amy-note-name">{{ doc.title || '(无标题)' }}</span>
+                    <span class="amy-note-meta">
+                      {{ noteTime(doc.finalize_time) }} · {{ (doc.notes || []).length }} 条
+                    </span>
+                  </div>
+                </template>
+                <div class="amy-note-body">
+                  <div v-if="doc.trigger" class="amy-note-line"><b>起因</b> {{ doc.trigger }}</div>
+                  <div v-if="doc.summary" class="amy-note-line"><b>总结</b> {{ doc.summary }}</div>
+                  <div v-if="doc.final_evaluation" class="amy-note-line"><b>最终评价</b> {{ doc.final_evaluation }}</div>
+                  <div v-if="(doc.notes || []).length" class="amy-note-entries">
+                    <div v-for="(n, j) in doc.notes" :key="n.note_id || j" class="amy-note-entry">
+                      <span class="amy-note-src">{{ noteSourceLabel(n.source) }}</span>
+                      <span class="amy-note-text">{{ n.text }}</span>
+                    </div>
+                  </div>
+                  <div v-else class="amy-note-line amy-note-empty">该笔记无条目记录</div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+          </div>
         </div>
       </section>
     </div>
@@ -1049,5 +1142,138 @@ function gaugeWidth(v: number) {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
   font-family: var(--font-mono);
+}
+
+/* —— 记事本笔记（PFCA 视角手册 + 未归档条目） —— */
+.amy-notes-summary {
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.amy-notes-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.amy-notes-block {
+  background: var(--bg-app);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.amy-notes-block-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+.amy-notes-manual {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-1);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.amy-empty-inline {
+  padding: 14px 12px;
+}
+.amy-note-collapse {
+  border-top: none;
+}
+.amy-note-collapse :deep(.el-collapse-item__header) {
+  background: transparent;
+  border-bottom: 1px solid var(--border-1);
+  font-size: 12.5px;
+  color: var(--text-1);
+  height: 36px;
+  line-height: 36px;
+}
+.amy-note-collapse :deep(.el-collapse-item__wrap) {
+  background: transparent;
+  border-bottom: 1px solid var(--border-1);
+}
+.amy-note-collapse :deep(.el-collapse-item__content) {
+  padding: 8px 10px 12px 10px;
+}
+.amy-note-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+  padding-right: 8px;
+}
+.amy-note-name {
+  font-weight: 600;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.amy-note-meta {
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+}
+.amy-note-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.amy-note-line {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-2);
+  word-break: break-word;
+}
+.amy-note-line b {
+  color: var(--text-3);
+  font-weight: 600;
+  margin-right: 4px;
+}
+.amy-note-empty { color: var(--text-3); }
+.amy-note-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+.amy-note-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  font-size: 12px;
+}
+.amy-note-src {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+  padding: 1px 5px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  line-height: 1.4;
+}
+.amy-note-text {
+  color: var(--text-1);
+  word-break: break-word;
+  line-height: 1.5;
 }
 </style>

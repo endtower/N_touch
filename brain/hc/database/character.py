@@ -273,7 +273,7 @@ class CharacterOperations:
 
         combined_text = " ".join(text_parts) or char_info.get("name", "")
         vector_store = get_vector_store()
-        vector = vector_store.generate_vector(combined_text)
+        vector = await vector_store.generate_vector(combined_text, target="character")
 
         conn = await self.db._ensure_connection()
         await conn.execute(
@@ -293,7 +293,7 @@ class CharacterOperations:
             raise ValueError("查询文本不能为空")
 
         vector_store = get_vector_store()
-        query_vector = vector_store.generate_vector(query_text)
+        query_vector = await vector_store.generate_vector(query_text, target="character")
         if not query_vector:
             return []
 

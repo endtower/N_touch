@@ -3,7 +3,7 @@ import json
 from typing import Dict, Any
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
-from brain.base import ToolManager, ToolHandlers, ToolConversation, ToolVision, ToolHC, CONVERSATION_CONSUMER_ID
+from brain.base import ToolManager, ToolHandlers, ToolConversation, ToolVision, ToolHC, ToolBequest, CONVERSATION_CONSUMER_ID
 from brain.amy.constants import ExternalInteractionAct, EvaluationAct, SelfActionAct
 
 # act 表 ↔ 工具 一一对应：
@@ -35,24 +35,20 @@ class ConversationToolManager(ToolManager):
                 "enum": _SEND_MESSAGE_NATURES
             }
 
-        # 通用 wait_and_observe schema（ToolHandlers 收口）+ conversation 专有 experience_scenario 扩展
-        wait_and_observe_schema = ToolHandlers.get_wait_and_observe_tool_schema()
-        wait_and_observe_schema["function"]["description"] = (
-            "等待一段时间，等待对方消息的回复。"
-            "话题转变或需要话术灵感时，可附带 experience_scenario 检索匹配的经验内容、用词技巧和话术结构。"
+        # 通用 record_to_notepad schema（ToolHC 收口）+ conversation 专有经验匮乏上报扩展
+        record_note_schema = ToolHC.get_conversation_record_note_tool_schema()
+        record_note_schema["function"]["description"] = (
+            "将对话中观察到的对方素材写入记事本缓存，供反思系统后续提炼。"
+            "优先记录对方的言论（原话短引最佳）、要求与标准、好恶、反应模式；"
+            "完整事件经过不用记（由 terminate 的 summary 承担）。"
+            "也可记录经验匮乏情况：某类场景检索不到可用经验、现有经验效果不佳、"
+            "缺少某类话术或表情包素材等，写明场景与缺口，供反思系统裁决是否登记、修订或删除经验。"
         )
-        wait_and_observe_schema["function"]["parameters"]["properties"]["experience_scenario"] = {
-            "type": "string",
-            "description": (
-                "经验检索场景描述（可选），例如：'表达嘲讽'、'表达喜爱'、'回应调侃'、'表达关心'。"
-                "传入后等待结束时附带返回匹配经验（已激活过的经验不再返回）。"
-            ),
-        }
 
         return [
             send_message_schema,
             send_image_schema,
-            wait_and_observe_schema,
+            ToolHandlers.get_wait_and_observe_tool_schema(),
             {
                 "type": "function",
                 "function": {
@@ -93,35 +89,11 @@ class ConversationToolManager(ToolManager):
                     }
                 }
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "experience_agent",
-                    "description": (
-                        "向经验系统上报经验不足情况（例如某类场景下找不到合适的经验、现有经验效果不佳等）。"
-                        "反馈会记录下来供反思系统裁决是否登记、修订或删除经验。"
-                        "经验检索已并入 wait_and_observe（experience_scenario 参数），本工具不再返回经验内容。"
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "scenario": {
-                                "type": "string",
-                                "description": "场景描述，例如：'表达嘲讽'、'表达喜爱'、'回应调侃'、'处理冲突'。"
-                            },
-                            "feedback": {
-                                "type": "string",
-                                "description": "经验不足反馈的具体内容（缺什么经验、现有经验哪里不合适）。"
-                            }
-                        },
-                        "required": ["scenario", "feedback"]
-                    }
-                }
-            },
-            ToolHC.get_conversation_record_note_tool_schema(),
+            record_note_schema,
             ToolHC.get_query_note_tool_schema(),
-            ToolVision.get_call_vision_agent_tool_schema(),
-            ToolVision.get_list_stickers_tool_schema(),
+            ToolBequest.get_query_bequest_tool_schema(),
+            ToolVision.get_vision_agent_tool_schema(),
+            ToolVision.get_vision_agent_adjust_tool_schema(),
         ]
 
     def __init__(self, conversation_core):
@@ -132,11 +104,11 @@ class ConversationToolManager(ToolManager):
             "wait_and_observe": self.wait_and_observe,
             "transfer_task_to_PFCA_agent": self.transfer_task_to_PFCA_agent,
             "emotional_judgment": self.emotional_judgment,
-            "experience_agent": self.experience_agent,
             "record_to_notepad": self.record_to_notepad,
             "query_note": self.query_note,
-            "call_vision_agent": self.call_vision_agent,
-            "list_stickers": self.list_stickers,
+            "query_bequest": self.query_bequest,
+            "vision_agent": self.vision_agent,
+            "vision_agent_adjust": self.vision_agent_adjust,
         }
         logger.debug(f"ConversationToolManager 已初始化，包含 {len(self.tool_functions)} 个工具")
 
@@ -241,45 +213,21 @@ class ConversationToolManager(ToolManager):
 
         return result
 
-    async def wait_and_observe(self, seconds: float, experience_scenario: str = None) -> str:
+    async def wait_and_observe(self, seconds: float) -> str:
         """等待并监听当前 conversation 会话的新消息（委托通用 wait_and_observe）。
 
         Args:
             seconds: 最长等待秒数（默认工具 schema 限制 10-30）。
-            experience_scenario: 经验检索场景（可选）。传入时按该场景向量检索话术经验，
-                结果附在观察结果之后；激活缓存去重（已激活不再返回）。
-                检索失败直接上抛崩溃阻断（按 user_rules）。
         """
         from brain.chat.conversation.conversation_core import get_conversation_core
 
         session_id = get_conversation_core().conversation_id
 
-        result = await ToolHandlers.wait_and_observe(
+        return await ToolHandlers.wait_and_observe(
             session_id=session_id,
             seconds=seconds,
             consumer_id=CONVERSATION_CONSUMER_ID,
         )
-
-        scenario = (experience_scenario or "").strip()
-        if scenario:
-            from brain.base.common_ways.bequest_helpers import search_speech_bequests
-            from brain.chat.conversation.conversation_bequest import get_conversation_bequest
-
-            bequest_cache = get_conversation_bequest()
-            matched = await search_speech_bequests(
-                scenario, skip=bequest_cache.is_activated, top_k=5,
-            )
-            for entry in matched:
-                bequest_cache.add(entry["id"])
-                logger.info(f"wait_and_observe 激活经验: {entry['title']} score={entry['score']:.3f}")
-
-            lines = [f"{entry['title']} - {entry['summary']}" for entry in matched]
-            result = (
-                f"{result}\n【经验联想·{scenario}】\n"
-                + ("\n".join(lines) if lines else "没有联想到新的经验。")
-            )
-
-        return result
 
     async def transfer_task_to_PFCA_agent(self, summary: str, encounter_type: str = None) -> Dict[str, Any]:
         logger.debug(f"收到仔细思索请求，总结: {summary}")
@@ -319,19 +267,6 @@ class ConversationToolManager(ToolManager):
         logger.debug(f"情感判断完成，动作为: {act}, session={session_type}/{session_name}, 成功: {success}")
         return f"情感判断失败: {msg}"
 
-    async def experience_agent(self, scenario: str, feedback: str = None) -> str:
-        """经验 agent（conversation 自有包装）——仅保留经验不足上报。
-
-        检索能力已并入 wait_and_observe（experience_scenario 参数）；
-        本工具不再检索，仅记录经验不足反馈，供反思系统裁决是否登记、修订或删除经验。
-        """
-        feedback_text = (feedback or "").strip()
-        if not feedback_text:
-            return "未提供反馈内容。请描述经验不足的具体情况（哪类场景缺少经验、现有经验效果如何）。"
-
-        logger.info(f"经验agent收到经验不足反馈: scenario={scenario}, feedback={feedback_text}")
-        return "已记录经验不足反馈，将交由反思系统裁决是否补充或修订经验。"
-
     async def record_to_notepad(self, text: str, usage: str) -> str:
         """记事本（灵光一现）写入——对话现场观察采集（对方素材），不做经验提炼。
         仅收纯文本与语境标注；元数据由系统侧自动附加，记录进当前事件链的缓存文档，
@@ -352,20 +287,38 @@ class ConversationToolManager(ToolManager):
         委托通用 ToolHC.query_note（起因/总结/自我评价/逐条记录及元数据）。"""
         return await ToolHC.query_note(title)
 
-    async def call_vision_agent(self, image_filename: str, context_hint: str = None) -> str:
+    async def query_bequest(self, query: str, top_k: int = 3) -> Dict[str, Any]:
+        """查询话术经验（按语义相似度检索 title），委托通用 ToolBequest.query_bequest。
+
+        与 reflection 的 query_bequest 同源、原始结构化输出
+        （title / summary / similarity），不做激活去重，由 LLM 自行判断取用。
         """
-        识图工具（委托通用 ToolVision.call_vision_agent，返回其 content 文案）。
+        return await ToolBequest.query_bequest(query=query, top_k=top_k)
 
-        Args:
-            image_filename: 图片文件名（与消息中 [图片:xxx] 的 xxx 一致）。
-            context_hint: 可选附加提示，辅助识图模型理解。
+    async def vision_agent(self, type: str, context: str = "") -> str:
+        """视觉查询工具，委托通用 ToolVision.vision_agent。
 
-        Returns:
-            识图结果文案（成功 / 失败）。
+        type 取「向量比对」（context=期望用途的表情包描述）/「识别图片」（context=图片标题/名称）。
         """
-        result = await ToolVision.call_vision_agent(image_filename, context_hint)
-        return result.get("content") or "vision agent 未返回任何信息。"
+        from brain.base import ToolVision
+        return await ToolVision.vision_agent(type=type, context=context)
 
-    async def list_stickers(self, keyword: str = "") -> str:
-        """查询已保存的表情包库（委托通用 ToolVision.list_stickers）。"""
-        return await ToolVision.list_stickers(keyword=keyword)
+    async def vision_agent_adjust(
+        self,
+        type: str,
+        target: str,
+        new_title: str = "",
+        summary: str = "",
+    ) -> str:
+        """表情包管理工具，委托通用 ToolVision.vision_agent_adjust。
+
+        type 取「保存」/「删除」/「修改」；target 传图片原标题或名称；
+        summary（简介）保存与修改必填、删除可留空。
+        """
+        from brain.base import ToolVision
+        return await ToolVision.vision_agent_adjust(
+            type=type,
+            target=target,
+            new_title=new_title,
+            summary=summary,
+        )

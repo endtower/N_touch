@@ -118,8 +118,8 @@ class OutboundRouter:
         segments = payload.segments
 
         # === 分支点: 模拟模式 vs 真实模式 ===
-        from config.settings import chat_config
-        if chat_config.SIMULATED_SEND:
+        from config.settings import safety_config
+        if safety_config.SIMULATED_SEND:
             message_id = await self._send_via_web(target, payload)
             if not message_id:
                 # 模拟模式下 web 通道无客户端 = 无实际投递对象，

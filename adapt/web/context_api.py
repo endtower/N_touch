@@ -10,6 +10,7 @@ LLM 上下文查看接口（事件链存储模型）.
     memory/event_chains/
       event_chain_20260912_223001_ab12/   ← 每个任务链一个文件夹
         conversation.json / pfca.json / proactive.json / social_chat.json
+        quest_223045.json                 ← quest agent 唤醒分段（QuestAgent 落盘）
       unlinked/                           ← 链外写入 + legacy 迁移
         conversation.json                 ← 链外常驻
         pfca_223001.json                  ← 链外归档（时间戳名）
@@ -53,6 +54,16 @@ _PREFIX_TO_KIND = {
     "pfca": "pfca",
     "proactive": "proactive",
     "social_chat": "social_chat",
+    "quest": "quest",
+    "persona": "persona",
+    # 人格粒度动态前缀（PersonaAgent.history_prefix = persona_{persona_id}）
+    "persona_assistant": "persona_assistant",
+    "persona_normal": "persona_normal",
+    "persona_attack": "persona_attack",
+    "vision": "vision",
+    "bequest": "bequest",
+    "memory": "memory",
+    "light_agent": "light_agent",
 }
 
 # 安全: 文件名必须只允许字母数字 _ - (防 path traversal)
@@ -90,7 +101,7 @@ def _chains_root() -> Path:
 
 
 def ensure_legacy_migrated() -> None:
-    """确保六个 HistoryManager 单例已实例化（触发一次性 legacy 迁移）。
+    """确保七个 HistoryManager 单例已实例化（触发一次性 legacy 迁移）。
 
     前端读 /context/chains 前调用；迁移在各 manager __init__ 中幂等执行
     （_migrated_keys 去重），重复调用零开销。
@@ -98,6 +109,8 @@ def ensure_legacy_migrated() -> None:
     from brain.chat.chat_history_manager import get_history_manager
     from brain.pfc.pfca.pfca_history_manager import get_pfca_history_manager
     from brain.att.proactive.proactive_history_manager import get_proactive_history_manager
+    from brain.base.light_agent.quest_history_manager import get_quest_history_manager
+    from brain.base.light_agent.light_history_manager import get_light_history_manager
 
     get_history_manager("conversation")
     get_history_manager("observe")
@@ -105,6 +118,11 @@ def ensure_legacy_migrated() -> None:
     get_history_manager("social_chat")
     get_pfca_history_manager()
     get_proactive_history_manager()
+    get_quest_history_manager()
+    # light agent 系：实例化以触发 legacy 迁移（persona 为人格粒度动态前缀）
+    for prefix in ("persona", "persona_assistant", "persona_normal", "persona_attack",
+                   "vision", "bequest", "memory", "light_agent"):
+        get_light_history_manager(prefix)
 
 
 def _file_meta(f: Path) -> Dict[str, Any]:

@@ -21,12 +21,8 @@ from typing import Dict, Any, List
 from brain.amy.constants import FinalEvaluationAct
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
-from brain.base import ToolManager, ToolHC, ToolSocial
+from brain.base import ToolManager, ToolHC, ToolSocial, ToolTask, ToolPersona, ToolBequest
 from brain.hc.global_session_state import get_global_session_state
-from brain.pfc.pfca.pfca_input_manager import (
-    get_pfca_input_manager,
-    FirstMessageType,
-)
 
 
 # 获取日志记录器
@@ -45,12 +41,13 @@ class PFCA_tool_manager(ToolManager):
             List[Dict[str, Any]]: 工具列表，每个工具包含名称、描述和参数信息
         """
         logger.debug("获取可用工具列表")
+
         return [
             {
                 "type": "function",
                 "function": {
                     "name": "conversation_agent",
-                    "description": "启动conversation_agent，开启一段对话（约 5-15 句）。可指定目标会话 id；不指定则默认为主人的私聊会话。",
+                    "description": "启动conversation_agent，开启一段对话（约 5-15 句）。可指定目标会话 id；不指定则默认为主人的私聊会话。一次只能调用一次该工具，不能一次性同时调用多次该工具。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -79,7 +76,7 @@ class PFCA_tool_manager(ToolManager):
                 "type": "function",
                 "function": {
                     "name": "social_chat_agent",
-                    "description": ("启动 social_chat_agent，在主人的监管/协作/支持下，与目标对话进行沟通，适用于谨慎环境的社交任务。"),
+                    "description": ("启动 social_chat_agent，在主人的监管/协作/支持下，与目标对话进行沟通，适用于谨慎环境的社交任务。一次只能调用一次该工具，不能一次性同时调用多次该工具。"),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -127,28 +124,10 @@ class PFCA_tool_manager(ToolManager):
                 }
             },
             ToolSocial.get_query_address_book_tool_schema(),
-            {
-                "type": "function",
-                "function": {
-                    "name": "advanced_decision_agent",
-                    "description": "调度高级决策 agent 获取严谨结论。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "thinking_mode": {
-                                "type": "string",
-                                "enum": ["reorganize", "opinion"],
-                                "description": "reorganize=受挫时方向性决议；opinion=理性观点。"
-                            },
-                            "current_summary": {
-                                "type": "string",
-                                "description": "当前现状总结：前因后果、状态、问题、已尝试方法。"
-                            }
-                        },
-                        "required": ["thinking_mode"]
-                    }
-                }
-            },
+            # 内心人格召唤（2026-09-19 接入：取代 advanced_decision_agent，
+            # 召唤一个内心人格以自己的立场审视现状，产出该人格视角的思考结论；
+            # schema 收口于通用层 ToolPersona，enum 随注册表动态生成）
+            ToolPersona.get_inner_persona_tool_schema(),
             {
                 "type": "function",
                 "function": {
@@ -160,7 +139,7 @@ class PFCA_tool_manager(ToolManager):
                             "summary": {
                                 "type": "string",
                                 "description": (
-                                    "本次会话的总结：完整前因后果、自我感受与关键细节，需包含具体人物名称。"
+                                    "本次会话的总结：完整前因后果、自我感受与关键细节，需包含具体人物名称。不能超过100字"
                                     "该总结会写入短期记忆，并随记事本一同落库存档"
                                     "——事件经过无需再用 record_to_notepad 记录。"
                                 )
@@ -174,6 +153,21 @@ class PFCA_tool_manager(ToolManager):
                                 "type": "string",
                                 "enum": FinalEvaluationAct.names(),
                                 "description": "本次 PFCA 会话的最终评价，仅第二次调用（确认退出时）生效；不填按无评价"
+                            },
+                            "enter_reflection": {
+                                "type": "boolean",
+                                "description": (
+                                    "可选。是否在本次会话结束后进入反思状态，反思系统可以对经验进行思考，任务进行复盘，笔记进行整理，登记相关经验，修改角色印象，调整任务等"
+                                    "设为 true 时必须同时提供 reflection_purpose；"
+                                    "仅第二次调用（确认退出时）生效。"
+                                )
+                            },
+                            "reflection_purpose": {
+                                "type": "string",
+                                "description": (
+                                    "可选。进入反思的目的（仅 enter_reflection=true 且第二次调用时生效）："
+                                    "本次要复盘什么、想提炼什么经验或检验什么认知，将作为反思会话的首条输入。"
+                                )
                             }
                         },
                         "required": ["summary", "title"]
@@ -183,6 +177,16 @@ class PFCA_tool_manager(ToolManager):
             ToolHC.get_list_notes_tool_schema(),
             ToolHC.get_query_note_tool_schema(),
             ToolHC.get_pfca_record_note_tool_schema(),
+            # 通用级任务工具（2026-09-18 接入：查询任务状态 + 给任务添加笔记；
+            # 裁决级 create_task / update_task_status 仍私有于 QuestAgent，不对 PFCA 开放）
+            *ToolTask.get_task_tool_schemas(),
+            # quest_agent 联系通道（2026-09-18 接入：直接联系 quest agent，转交内容
+            # 由其裁决——审批推进 / 登记任务 / 修订任务；PFCA 不持有裁决权）
+            ToolTask.get_quest_agent_tool_schema(),
+            # 决策经验查询（2026-09-24 接入：取代原 recall_memory 的 bequest 分支——
+            # 该工具注册在分发表却无 schema，LLM 一直调不到；schema / 实现统一收口
+            # ToolBequest，PFCA 只读不写，经验增删仍由反思系统裁决）
+            ToolBequest.get_query_decision_bequest_tool_schema(),
         ]
 
     def __init__(self):
@@ -197,11 +201,17 @@ class PFCA_tool_manager(ToolManager):
             "wait_and_observe": self.wait_and_observe,
             "terminate": self.terminate,
             "query_address_book": ToolSocial.query_address_book,
-            "advanced_decision_agent": self.deep_thinking,
-            "recall_memory": self.recall_memory,
+            "inner_persona_agent": self.summon_personas,
+            # 决策经验查询（直接引用 ToolBequest 类方法，只读；增删仍由反思系统裁决）
+            "query_decision_bequest": ToolBequest.query_decision_bequest,
             "query_note": self.query_note,
             "list_notes": self.list_notes,
-            "record_to_notepad": self.record_to_notepad
+            "record_to_notepad": self.record_to_notepad,
+            # 通用级任务工具（直接引用 ToolTask 类方法，风格同 query_history 引用 ToolSocial）
+            "append_task_log": ToolTask.append_task_log,
+            "query_task_status": ToolTask.query_task_status,
+            # quest_agent 联系通道（直接引用 ToolTask 类方法）
+            "quest_agent": ToolTask.quest_agent,
         }
 
     @async_handle_errors()
@@ -282,6 +292,12 @@ class PFCA_tool_manager(ToolManager):
         直接开启一段对话（约 5-15 句的短对话）。
         调用方可通过 session_id 指定目标会话；不指定则默认为主人的私聊会话（private_<MASTER_ID>）。
 
+        保护模式（SafetyConfig.CONVERSATION_PROTECTION_MODE）：
+        - 开启时仅允许对主人私聊会话（private_<MASTER_ID>）以及
+          SafetyConfig.CONVERSATION_ALLOWED_SESSIONS 白名单内的会话发起对话；
+          对其他非主人用户（群聊 / 他人私聊）一律阻止，返回 blocked 结果并提醒
+          LLM 改用 social_chat_agent。
+
         涉及附件时，PFCA 把附件清单（[图片:xxx] / [文件:xxx] 等）写进 purpose 或 extra_info 里。
 
         Args:
@@ -291,13 +307,36 @@ class PFCA_tool_manager(ToolManager):
             session_id: 可选，目标会话 id，格式 'type_id'。为空时默认主人的私聊会话。
 
         Returns:
-            Dict[str, Any]: 遵循统一格式的操作结果
+            Dict[str, Any]: 遵循统一格式的操作结果；保护模式阻止时返回
+            {"blocked": True, "reason", "session_id", "message"}。
         """
         from config.role_settings import RoleConfig
+        from config.settings import SafetyConfig
         from brain.hc.global_session_state import get_global_session_state
         from brain.chat.conversation.conversation_core import get_conversation_core
 
         session_id = (session_id or "").strip() or f"private_{RoleConfig.MASTER_ID}"
+
+        # 保护模式：仅允许对主人私聊会话 + 白名单会话对话，非主人用户一律阻止并提醒
+        # 改用 social_chat_agent（对外社交走受监管的社交通道）。
+        # 白名单见 SafetyConfig.CONVERSATION_ALLOWED_SESSIONS（除主人外仍允许的会话 id）。
+        if SafetyConfig.CONVERSATION_PROTECTION_MODE:
+            master_private = f"private_{RoleConfig.MASTER_ID}"
+            allowed = {master_private} | set(SafetyConfig.CONVERSATION_ALLOWED_SESSIONS)
+            if session_id not in allowed:
+                logger.warning(
+                    f"conversation_agent 保护模式已阻止对非主人/白名单会话发起对话: {session_id}"
+                )
+                return {
+                    "blocked": True,
+                    "reason": "保护模式已开启：conversation_agent 仅允许与主人私聊会话及白名单会话对话。",
+                    "session_id": session_id,
+                    "message": (
+                        f"已阻止 conversation_agent 向非主人会话 {session_id} 发起对话。"
+                        "对其他人/群聊的沟通请改用 social_chat_agent。"
+                    ),
+                }
+
         focus_state = get_global_session_state()
 
         # 注册会话（如未注册）
@@ -341,7 +380,7 @@ class PFCA_tool_manager(ToolManager):
             extra_info: 可选补充材料（相关消息原文、人物印象要点、前因后果）。
 
         Returns:
-            Dict[str, Any]: social_chat 返回结果 {summary_text, messages_sent, exit_reason}
+            Dict[str, Any]: social_chat 返回结果 {summary_text, exit_reason}
         """
         if not session_id or not session_id.strip():
             raise ValueError("session_id 必填")
@@ -482,7 +521,8 @@ class PFCA_tool_manager(ToolManager):
         )
         return f"已记录至记事本（{note_id}）。"
 
-    async def terminate(self, summary: str, title: str = "", check: bool = False, final_evaluation: str = "") -> str:
+    async def terminate(self, summary: str, title: str = "", check: bool = False, final_evaluation: str = "",
+                        enter_reflection: bool = False, reflection_purpose: str = "") -> str:
         """
         结束当前全部的任务链。
 
@@ -499,6 +539,10 @@ class PFCA_tool_manager(ToolManager):
             check: 已废弃，不再使用
             final_evaluation: 本次 PFCA 会话的最终评价（词表名，来自 FinalEvaluationAct）；
                 仅第二次调用（确认退出）时生效；留空按「未得到他人评价与反馈」登记
+            enter_reflection: 是否在本会话结束后进入反思状态（接力 Reflection 会话）；
+                仅第二次调用（确认退出）时生效
+            reflection_purpose: 进入反思的目的（作为反思会话首条输入）；
+                仅 enter_reflection=true 时使用
 
         Returns:
             str: 操作结果，包含行动记录和确认提示
@@ -507,6 +551,13 @@ class PFCA_tool_manager(ToolManager):
 
         from brain.hc.global_session_state import get_global_session_state
         focus_state = get_global_session_state()
+
+        # 参数校验前置（在任何落库副作用之前）：enter_reflection=true 时
+        # reflection_purpose 必填，缺失属参数错误，抛 ValueError 交 LLM 自纠
+        # （_safe_execute 可恢复错误通道；先校验再落库，避免部分副作用已提交）。
+        if enter_reflection:
+            if not (reflection_purpose or "").strip():
+                raise ValueError("enter_reflection=true 时必须提供 reflection_purpose")
 
         terminate_confirmed = focus_state._data.get("terminate_confirmed", False)
 
@@ -572,6 +623,19 @@ class PFCA_tool_manager(ToolManager):
             title, final_evaluation=final_evaluation, summary=summary
         )
 
+        # 可选接力：本会话结束后进入反思状态（由 core.py run_pfc_cycle 消费）。
+        # 仅第二次调用（确认退出）生效；enter_reflection=true 时 reflection_purpose 必填，
+        # 缺失属参数错误，抛 ValueError 交 LLM 自纠（_safe_execute 可恢复错误通道）。
+        if enter_reflection:
+            purpose = (reflection_purpose or "").strip()
+            if not purpose:
+                raise ValueError("enter_reflection=true 时必须提供 reflection_purpose")
+            focus_state._data["pfc_handoff"] = {
+                "state": "reflection",
+                "purpose": purpose,
+            }
+            logger.info("terminate 已登记反思接力，会话结束后进入反思状态")
+
         from brain.pfc.pfca.pfca_core import get_pfca_instance
         pfca_core = get_pfca_instance()
         await pfca_core.stop()
@@ -579,92 +643,43 @@ class PFCA_tool_manager(ToolManager):
 
         return f"已成功结束任务链，总结: {summary}"
 
-    async def deep_thinking(self, thinking_mode: str, current_summary: str = "") -> str:
+    async def summon_personas(self, persona_ids: List[str], current_summary: str = "") -> Dict[str, Any]:
         """
-        深入思考工具，处理重新整理思绪或总结观点两种模式。
+        召唤多个内心人格，异步并行思考，统一返回各人格视角的思考结论。
+
+        取代原 advanced_decision_agent（reorganize / opinion 两种思考模式）：
+        人格 = 预设的内核 system prompt，从注册表按 persona_id 取用，
+        让 LLM 思考链完全代入角色，从不同角度审视问题。
 
         Args:
-            thinking_mode:
-                - reorganize: 重新整理思绪，使用 ReorganizeAgent 重新思索根本性行动方针
-                - opinion: 观点，根据现状总结形成观点
+            persona_ids: 要召唤的内心人格 id 列表（见 brain/base/persona 注册表）。
+            current_summary: 当前现状总结：前因后果、状态、问题、已尝试方法。
 
         Returns:
-            str: 思考结果
+            Dict: {"personas": [{"persona_id", "persona_name", "content"}, ...]}
+            各人格视角的思考结论，顺序与 persona_ids 一致。
         """
-        logger.info(f"执行deep_thinking操作，思考模式: {thinking_mode}")
+        logger.info(f"执行summon_personas操作，并行召唤人格: {persona_ids}")
 
-        from brain.pfc.pfca.pfca_history_manager import get_pfca_history_manager
+        from brain.base.persona.persona_agent import PersonaAgent
 
-        pfca_history_manager = get_pfca_history_manager()
+        agents = [PersonaAgent(persona_id=pid, current_summary=current_summary) for pid in persona_ids]
+        results = await asyncio.gather(*(agent.run() for agent in agents))
 
-        if thinking_mode == "reorganize":
-            from brain.base.light_agent.reorganize_agent import ReorganizeAgent
-            reorganize_agent = ReorganizeAgent(current_summary=current_summary)
-            direction_result = await reorganize_agent.run()
+        for r in results:
+            logger.info(f"内心人格 [{r['persona_name']}] 思考完成，"
+                        f"工具调用 {len((r.get('extra_info') or {}).get('tools_called') or [])} 次")
 
-            logger.info(f"ReorganizeAgent 返回结果: {direction_result}")
-
-            clear_mind = direction_result.get("clear_mind", False)
-            decision_thought = direction_result.get("decision_thought", "")
-
-            if clear_mind:
-                logger.info("检测到根本性方向错误，清空 PFCA 上下文并传入方向性指令")
-                pfca_history_manager.clear()
-
-                focus_state = get_global_session_state()
-                current_session = (focus_state.get_sessions() or [{}])[0]
-
-                first_message_manager = get_pfca_input_manager()
-                first_message_manager.prepare_first_message(
-                    FirstMessageType.CONTEXT_REBUILD,
-                    current_session,
-                    current_summary=current_summary,
-                    decision_thought=decision_thought,
-                )
-                # 消息已放入队列，由 session 统一注入 history
-                return {
-                    "archived": True,
-                    "content": f"【方向检查】检测到根本性方向错误。\n\n决策思想：{decision_thought}\n\n已归档上下文并更新新的思考方向。"
+        return {
+            "personas": [
+                {
+                    "persona_id": r["persona_id"],
+                    "persona_name": r["persona_name"],
+                    "content": f"【{r['persona_name']}视角】{r['thought']}",
                 }
-            else:
-                return f"决策思想：{decision_thought}"
-
-        elif thinking_mode == "opinion":
-            from brain.base.light_agent.opinion_agent import OpinionAgent
-            opinion_agent = OpinionAgent(current_summary=current_summary)
-            opinion_result = await opinion_agent.run()
-            opinion = opinion_result.get("opinion", "")
-            return f"【观点】{opinion}"
-
-    async def recall_memory(self, operation: str, title: str) -> str:
-        """
-        回想记忆，查找记忆中一个任务或经验/嘱托的完整信息
-
-        Args:
-            operation: 操作类型，task=回想任务，bequest=回想经验/嘱托
-            title: 要回想的任务或经验/嘱托的标题（完整标题）
-
-        Returns:
-            str: 检索结果
-        """
-        logger.debug(f"执行recall_memory操作，操作类型: {operation}，标题: {title}")
-
-        if operation == "task":
-            from brain.hc.database.task import TaskOperations
-            task_ops = TaskOperations()
-            task_id = await task_ops.get_task_id_by_title(title)
-            if not task_id:
-                result = f"未找到标题为「{title}」的任务"
-            else:
-                result = await task_ops.format_task_by_id(task_id)
-        elif operation == "bequest":
-            from brain.hc.database.bequest import BequestOperations
-            bequest_ops = BequestOperations()
-            result = await bequest_ops.format_bequest_by_title(title)
-        else:
-            return f"未知的操作类型: {operation}"
-
-        return result
+                for r in results
+            ],
+        }
 
 
 # 全局PFCA工具管理器实例，延迟初始化

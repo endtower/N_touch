@@ -173,7 +173,7 @@ class SocialChatSession(HeavySession):
             {"role": "system", "content": get_social_chat_system_prompt()}
         ] + messages
         response = await call_llm(
-            level="flash",
+            level="conversation",
             messages=llm_messages,
             tools=tools,
         )

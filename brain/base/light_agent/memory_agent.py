@@ -24,6 +24,8 @@ logger = get_logger(__name__, "DEBUG")
 class MemoryAgent(LightweightAgent):
     """记忆浓缩Agent - 专门负责从会话事件中凝练记忆"""
 
+    history_prefix: str = "memory"
+
     def _get_system_prompt_content(self) -> str:
         master_name = RoleConfig.MASTER_NAME
         assistant_name = RoleConfig.ASSISTANT_NAME
@@ -55,12 +57,12 @@ class MemoryAgent(LightweightAgent):
 
 【字段填写原则】
 - name_list：整组替换（清空原全部别名后重建），最多 3 个，第一个为最常用。
-- impression（印象）：对一个人的认知总和，保守且简短，不超过 50 字；只做小幅调整，避免颠覆性改变。
+- impression（印象）：对一个人的简单描述，不超过 50 字；只做小幅调整，避免颠覆性改变。
   · 群聊中出现的 A 与私聊中出现的 A 视为不同个体，仅保留少量互通印象。
 - familiarity（熟悉程度，私聊 + 群聊通用）：
-  · 是对该角色 / 该群聊的熟悉程度，同时也是后续交往 / 在该群中应采取的「策略倾向」的隐含表达。
+  · 是对该对象的熟悉程度，也可以写自己对于该对象交流的策略倾向。
   · 不超过 20 字，渐进调整，避免每次会话都大幅改动。
-- self_relationship（仅私聊）：仅对认定有长期关系、功利价值的人写。在上次基础上渐进调整，不超过 20 字。临时或不重要的人不写。
+- self_relationship（仅私聊）：关系，代表对象与自身的关系、价值等。不超过 20 字。 
 - self_image（仅群聊）：我在该群聊的姿态与自我认知，用于辅助未来在该群的行为倾向。
   · 保守修改，不超过 20 字。
   · 例："每天发可爱表情暖群，大家都喜欢"；"不参与争吵，只偶尔吐槽自己的经历"。

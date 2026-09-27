@@ -64,6 +64,20 @@ class FrontendBroadcastMixin:
         self._current_activity = None
         self._broadcast_activity()
 
+    def end_session_activity(self, source: str) -> None:
+        """会话结束统一收尾：清除活动状态并广播 idle（含异常路径，调用方须放 try/finally）。
+
+        反思 / 主动任务等**脱离事件链**的会话，其工具调用会 set_activity 广播活动状态，
+        但会话结束时没有事件链收尾钩子（end_event_chain -> _on_event_chain_end）兜底，
+        必须在会话结束统一调用本方法复位，否则前端会残留 "LLM xxx" / "proactive 处理中"
+        的假激活显示（事件链实际未激活）。
+
+        事件链内的 PFCA 不经过本方法，仍由 end_event_chain 的钩子统一收尾。
+        """
+        self._current_activity = None
+        self._broadcast_activity()
+        logger.debug(f"会话结束，活动状态已清除 (source={source})")
+
     def get_current_activity(self) -> Optional[Dict[str, Any]]:
         """获取当前活动状态（供快照 / 调试）。"""
         return getattr(self, "_current_activity", None)
