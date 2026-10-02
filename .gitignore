@@ -133,11 +133,10 @@ token_trace.json
 # Adapt web runtime identity data (contains private user IDs/names)
 adapt/web/data/
 # ===== 本地敏感文件（永不入库）=====
+# （adapt_settings.py / llm_settings.py 的 key 已外置 .env.dev，恢复跟踪）
 config/settings.py
 config/role_settings.py
-config/adapt_settings.py
 config/truck_settings.py
-config/llm_settings.py
 brain/hc/database/default_initializer.py
 /tests/
 _tmp_*
