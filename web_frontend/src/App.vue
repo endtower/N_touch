@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Moon, Sunny, Connection, Document, Files, MagicStick, ChatDotRound, Aim, DataAnalysis } from '@element-plus/icons-vue'
+import { Moon, Sunny, Connection, Document, Files, MagicStick, ChatDotRound, Aim, DataAnalysis, Monitor } from '@element-plus/icons-vue'
 import ChatWindow from './components/ChatWindow.vue'
 import InputArea from './components/InputArea.vue'
 import SessionList from './components/SessionList.vue'
@@ -13,6 +13,7 @@ import ContextViewerDialog from './components/ContextViewerDialog.vue'
 import AmyStatusDialog from './components/AmyStatusDialog.vue'
 import SessionChatDialog from './components/SessionChatDialog.vue'
 import TokenStatsDialog from './components/TokenStatsDialog.vue'
+import SystemPanelDialog from './components/SystemPanelDialog.vue'
 import IdentityBar from './components/IdentityBar.vue'
 import ModeRail from './components/ModeRail.vue'
 import TestPresetDialog from './components/TestPresetDialog.vue'
@@ -29,6 +30,7 @@ const amyOpen = ref(false)
 const sessionChatDialogVisible = ref(false)
 const testPresetDialogVisible = ref(false)
 const tokenStatsOpen = ref(false)
+const systemPanelOpen = ref(false)
 const theme = ref<'light' | 'dark'>(
   (localStorage.getItem('abyss-theme') as 'light' | 'dark') || 'dark',
 )
@@ -302,6 +304,14 @@ const headerSubtitle = computed(() => {
             <span class="truck-toggle-label">用量</span>
           </button>
           <button
+            class="truck-toggle-btn"
+            title="系统面板 (进程管理 / 实时日志 / 优雅重启)"
+            @click="systemPanelOpen = true"
+          >
+            <el-icon :size="14"><Monitor /></el-icon>
+            <span class="truck-toggle-label">系统</span>
+          </button>
+          <button
             v-if="chat.state.mode === 'test'"
             class="truck-toggle-btn"
             title="运行预设测试 (环境准备: 清空测试库并填入预设数据)"
@@ -360,6 +370,7 @@ const headerSubtitle = computed(() => {
     <AmyStatusDialog v-model:visible="amyOpen" />
     <SessionChatDialog v-model:visible="sessionChatDialogVisible" />
     <TokenStatsDialog v-model:visible="tokenStatsOpen" />
+    <SystemPanelDialog v-model:visible="systemPanelOpen" />
     <TestPresetDialog v-model:visible="testPresetDialogVisible" />
   </div>
 </template>

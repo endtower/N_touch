@@ -386,6 +386,25 @@ class WebChannel:
             handle_delete_sticker,
             handle_vectorize_stickers,
         )
+        # 系统管理接口 (管家增量②): 状态 / SnowLuma 启停 / Core 关闭重启 / 日志 tail
+        # 注意: 必须注册在前端 dist 兜底路由之前, 否则会被 /{tail} 抢走
+        from .system_api import (
+            handle_system_status,
+            handle_snowluma_start,
+            handle_snowluma_stop,
+            handle_core_shutdown,
+            handle_core_restart,
+            handle_system_logs,
+            handle_logs_ws,
+        )
+        self._app.router.add_get("/system/status", handle_system_status)
+        self._app.router.add_post("/system/snowluma/start", handle_snowluma_start)
+        self._app.router.add_post("/system/snowluma/stop", handle_snowluma_stop)
+        self._app.router.add_post("/system/core/shutdown", handle_core_shutdown)
+        self._app.router.add_post("/system/core/restart", handle_core_restart)
+        self._app.router.add_get("/system/logs", handle_system_logs)
+        self._app.router.add_get("/system/ws/logs", handle_logs_ws)
+
         # 记忆社交实体: 以 00000000 为中心的星形图 (只读)
         self._app.router.add_get("/memory/social", handle_get_social_memory)
         # 记忆内容编辑: PATCH 修改角色/群组/模糊角色的具体字段
@@ -436,6 +455,7 @@ class WebChannel:
             self._app.router.add_get("/{tail:.*}", self._handle_spa_fallback)
 
         # access_log=None: 关闭 aiohttp 访问日志, 避免高频轮询请求刷屏干扰终端
+        self._app["started_at"] = time.time()   # 给 /system/status 算 uptime 用
         self._runner = web.AppRunner(self._app, access_log=None)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.config.host, self.config.port)

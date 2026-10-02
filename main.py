@@ -18,6 +18,7 @@ FastAPI 应用本身零业务路由，职责有两个：
 
 import argparse
 import sys
+import time
 import uvicorn
 from pathlib import Path
 from fastapi import FastAPI
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[Dict[str, Any]]:
     async with SystemCore() as system_core:
         # 明确将核心组件绑定到app.state
         app.state.system_core = system_core
+        app.state.started_at = time.time()
         logger.info("SystemCore初始化完成并绑定到应用状态")
 
         # 让应用运行
@@ -95,8 +97,14 @@ def main() -> None:
                 reload_excludes=reload_excludes,
             )
         else:
-            # 生产模式：直接传 app 对象，无文件监视、无子进程
-            uvicorn.run(app, host=args.host, port=args.port)
+            # 生产模式：直接传 app 对象，无文件监视、无子进程。
+            # 持有 Server 实例供 /system/core/shutdown|restart 优雅关闭
+            config = uvicorn.Config(app, host=args.host, port=args.port)
+            server = uvicorn.Server(config)
+            app.state.uvicorn_server = server
+            from adapt.web.system_api import set_uvicorn_server
+            set_uvicorn_server(server)   # 注入给 aiohttp 侧的系统管理接口
+            server.run()
 
     except KeyboardInterrupt:
         logger.info("接收到中断信号，正在停止服务...")
