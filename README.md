@@ -49,6 +49,7 @@ docs/                 文档（入口索引 + 四份状态文档 + api/ 活文�
 ## 启动
 
 ```bash
+python manager.py                # 管家：Core/SnowLuma 启停、状态、日志跟踪（help 查看命令）
 python main.py --dev             # 后端完整版（热重载；生产用 python main.py）
 python scripts/web_only.py       # 只读模式（不起大脑，查看上下文/记忆等）
 cd web_frontend && npm run dev   # 前端开发服；非开发时可直接开 5002（后端伺服 dist）
