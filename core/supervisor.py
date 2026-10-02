@@ -24,7 +24,9 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+from paths import app_root
+
+PROJECT_ROOT = app_root()
 LOG_DIR = PROJECT_ROOT / "logs" / "manager"
 SNOWLUMA_DIR = PROJECT_ROOT / "SnowLuma"
 
@@ -32,6 +34,20 @@ CREATE_NEW_PROCESS_GROUP = 0x00000200
 DETACHED_PROCESS = 0x00000008
 
 HEALTH_TIMEOUT_SEC = 30
+
+
+def manager_cmd(*args: str) -> list:
+    """管家入口命令：冻结运行用 manager.exe，源码运行用 python manager.py。"""
+    if getattr(sys, "frozen", False):
+        return [str(app_root() / "manager.exe"), *args]
+    return [sys.executable, str(PROJECT_ROOT / "manager.py"), *args]
+
+
+def core_cmd() -> list:
+    """Core 启动命令：冻结运行用 core.exe，源码运行用 python -u main.py。"""
+    if getattr(sys, "frozen", False):
+        return [str(app_root() / "core.exe")]
+    return [sys.executable, "-u", "main.py"]
 
 
 def snowluma_webui_port() -> int:
@@ -67,7 +83,7 @@ def build_specs() -> dict[str, ProcSpec]:
     return {
         "core": ProcSpec(
             name="core",
-            cmd=[sys.executable, "-u", "main.py"],
+            cmd=core_cmd(),
             cwd=PROJECT_ROOT,
             out_log=LOG_DIR / "core.out.log",
             ports=[web_port, onebot_port],
@@ -134,6 +150,33 @@ def wait_ports_free(spec: ProcSpec, timeout: float = 15) -> bool:
             return True
         time.sleep(0.4)
     return not spec_alive(spec)
+
+
+# ============================================================
+# 期望状态标记（GPT 审查-2：三端统一协调点）
+# ============================================================
+# logs/manager/desire/<name>.txt = "running" | "stopped" | "restart"
+# - 网页 /system/core/shutdown → 写 "stopped" 再优雅退出：看门狗读到后不再拉起
+# - 网页 /system/core/restart  → 写 "restart" 再优雅退出：看门狗负责拉回
+# - 托盘/CLI 的 start/stop 经 Manager 同步写标记，三端语义一致
+# - 意外崩溃时标记仍为 "running" → 看门狗按退避策略自动恢复
+
+def desire_path(name: str) -> Path:
+    return LOG_DIR / "desire" / f"{name}.txt"
+
+
+def read_desire(name: str, default: str = "stopped") -> str:
+    try:
+        value = desire_path(name).read_text(encoding="utf-8").strip()
+        return value if value in ("running", "stopped", "restart") else default
+    except OSError:
+        return default
+
+
+def write_desire(name: str, value: str) -> None:
+    path = desire_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value, encoding="utf-8")
 
 
 # ============================================================

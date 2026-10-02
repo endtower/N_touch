@@ -21,8 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import subprocess
-import sys
 import time
 from datetime import date
 from pathlib import Path
@@ -35,11 +33,12 @@ from core.supervisor import (
     PROJECT_ROOT,
     build_specs,
     pid_listening_on,
-    port_alive,
+    read_desire,
     spawn,
     spec_alive,
     stop_tree,
     wait_ports_free,
+    write_desire,
     snowluma_webui_port,
 )
 
@@ -120,6 +119,7 @@ async def handle_system_status(request: web.Request) -> web.Response:
             "onebot_port": onebot_port,
             "mode": "prod" if server is not None else "dev",
             "graceful_shutdown": server is not None,
+            "desired": read_desire("core"),
         },
         "snowluma": {
             "running": s_alive,
@@ -175,9 +175,13 @@ async def handle_core_shutdown(request: web.Request) -> web.Response:
     server = _uvicorn_server["server"]
     if server is None:
         return _json_error("dev(--reload) 模式不支持远程关闭，请在终端 Ctrl+C", 400)
+    # 期望状态标记：常驻管家读到 "stopped" 后不会把这次关闭当崩溃拉起。
+    # 没有管家在跑时该标记只是无害的落盘记录。
+    write_desire("core", "stopped")
     server.should_exit = True
     return web.json_response({"shutting_down": True,
-                              "note": "uvicorn 将走完整 lifespan 收尾（SystemCore 优雅退出）"})
+                              "note": "uvicorn 将走完整 lifespan 收尾（SystemCore 优雅退出）；"
+                                      "重新启动请用 manager.exe / 托盘"})
 
 
 async def handle_core_restart(request: web.Request) -> web.Response:
@@ -186,20 +190,14 @@ async def handle_core_restart(request: web.Request) -> web.Response:
     server = _uvicorn_server["server"]
     if server is None:
         return _json_error("dev(--reload) 模式不支持远程重启，请在终端 Ctrl+C 后重启", 400)
-    # 起一个脱离的 respawn 工人：等本进程退出释放端口后拉起新 Core
-    helper_log = LOG_DIR / "restart.out.log"
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    out = open(helper_log, "ab")
-    subprocess.Popen(
-        [sys.executable, str(PROJECT_ROOT / "manager.py"), "respawn", "core"],
-        cwd=PROJECT_ROOT, stdout=out, stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        creationflags=0x00000200 | 0x00000008,   # NEW_PROCESS_GROUP | DETACHED_PROCESS
-    )
-    out.close()
+    if not spec_alive(_specs["core"]):
+        return _json_error("Core 未在运行", 409)
+    # 期望状态标记（GPT 审查-2）：常驻管家的看门狗读到 "restart" 会在本进程
+    # 优雅退出后立即拉起新实例。Core 不再自己 spawn 第二个管理进程。
+    write_desire("core", "restart")
     server.should_exit = True
     return web.json_response({"restarting": True,
-                              "note": "Core 正在优雅关闭，respawn 工人将在端口释放后拉起新实例（约 5~15s）"})
+                              "note": "Core 正在优雅关闭，管家将自动拉起新实例（约 5~15s）"})
 
 
 # ============================================================

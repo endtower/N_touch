@@ -12,10 +12,11 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
+
+from paths import app_root
 
 _ENV_LOADED = False
 
@@ -25,7 +26,7 @@ def ensure_env_loaded() -> None:
     global _ENV_LOADED
     if _ENV_LOADED:
         return
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env.dev")
+    load_dotenv(app_root() / ".env.dev")
     _ENV_LOADED = True
 
 

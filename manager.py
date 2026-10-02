@@ -36,7 +36,10 @@ import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+from paths import app_root, ensure_cwd
+
+PROJECT_ROOT = app_root()
+ensure_cwd()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.supervisor import (   # noqa: E402
@@ -45,14 +48,17 @@ from core.supervisor import (   # noqa: E402
     health_ok,
     pid_listening_on,
     port_alive,
+    read_desire,
     spawn,
     spec_alive,
     stop_tree,
     wait_ports_free,
+    write_desire,
 )
 
 HEALTH_TIMEOUT_SEC = 30      # start 等健康检查的上限
-WATCHDOG_RESTART_DELAY = 5   # 意外退出后延迟重启秒数
+WATCHDOG_RESTART_DELAY = 5   # 意外退出后首次重启延迟秒数（此后指数退避）
+WATCHDOG_BACKOFF_MAX = 60
 WATCHDOG_SCAN_INTERVAL = 2
 
 
@@ -68,6 +74,7 @@ class Managed:
     stop_requested: bool = False
     restarts: int = 0
     last_exit_code: int | None = None
+    backoff: float = WATCHDOG_RESTART_DELAY   # 崩溃重启退避（就绪后复位）
 
 
 class Manager:
@@ -86,6 +93,7 @@ class Manager:
             pid = pid_listening_on(spec.ports[0])
             mine = m.proc is not None and m.proc.poll() is None
             return f"[{name}] 已在运行（{'本管家' if mine else '外部'}实例 pid={pid}），跳过启动"
+        write_desire(name, "running")   # 期望状态先行：此后的意外退出由看门狗恢复
         m.stop_requested = False
         proc = spawn(spec, detached=False)
 
@@ -108,6 +116,7 @@ class Manager:
     def stop(self, name: str) -> str:
         m = self.managed[name]
         spec = m.spec
+        write_desire(name, "stopped")   # 期望状态先行：看门狗不恢复主动停止
         pid = None
         mine = False
         if m.proc is not None and m.proc.poll() is None:
@@ -147,7 +156,7 @@ class Manager:
     # ---------------- 状态 ----------------
 
     def status_lines(self) -> list[str]:
-        lines = [f"{'名称':<9} {'状态':<12} {'pid':<7} {'端口':<12} {'运行时长':<9} 说明"]
+        lines = [f"{'名称':<9} {'状态':<12} {'期望':<9} {'pid':<7} {'端口':<12} {'运行时长':<9} 说明"]
         for m in self.managed.values():
             spec = m.spec
             alive = spec_alive(spec)
@@ -160,7 +169,7 @@ class Manager:
                 state, pid = "已停止", "-"
             uptime = fmt_uptime(time.time() - m.started_at) if mine else "-"
             extra = f"重启{m.restarts}次" if m.restarts else spec.desc
-            lines.append(f"{spec.name:<9} {state:<12} {str(pid):<7} "
+            lines.append(f"{spec.name:<9} {state:<12} {read_desire(spec.name):<9} {str(pid):<7} "
                          f"{','.join(map(str, spec.ports)):<12} {uptime:<9} {extra}")
         return lines
 
@@ -170,27 +179,40 @@ class Manager:
         def loop():
             while True:
                 time.sleep(WATCHDOG_SCAN_INTERVAL)
-                to_restart = []
+                to_restart = []   # (m, 原因, 延迟秒)
                 with self._lock:
                     for m in self.managed.values():
-                        if m.proc is None or m.stop_requested or not m.spec.auto_restart:
+                        if m.proc is None:
                             continue
                         code = m.proc.poll()
                         if code is None:
+                            # 存活且健康 → 复位崩溃重启退避
+                            if m.backoff > WATCHDOG_RESTART_DELAY and health_ok(m.spec):
+                                m.backoff = WATCHDOG_RESTART_DELAY
                             continue
+                        if m.stop_requested:
+                            continue   # CLI/托盘主动停止
                         if time.time() - m.started_at < 10:
-                            # 启动即退（崩溃循环），不自动拉起，留给人工排查
-                            continue
+                            continue   # 启动即退（崩溃循环），不自动拉起，留给人工排查
+                        desire = read_desire(m.spec.name)
+                        if desire == "stopped":
+                            continue   # 网页/标记已表达"期望停止"，不恢复
+                        if not m.spec.auto_restart and desire != "restart":
+                            continue   # SnowLuma：意外退出不自动拉起（保 QQ 登录态）
                         m.restarts += 1
                         m.last_exit_code = code
-                        m.stop_requested = False
-                        to_restart.append(m)
+                        if desire == "restart":
+                            to_restart.append((m, "收到重启指令（网页）", 0.0))
+                        else:
+                            to_restart.append((m, f"意外退出 (exitcode={code})", m.backoff))
+                            m.backoff = min(m.backoff * 2, WATCHDOG_BACKOFF_MAX)
                 # 锁外执行重启（start 的健康等待可能长达 30s，不能占锁）
-                for m in to_restart:
-                    print(f"[watchdog] {m.spec.name} 意外退出 "
-                          f"(exitcode={m.last_exit_code})，{WATCHDOG_RESTART_DELAY}s 后重启",
-                          flush=True)
-                    time.sleep(WATCHDOG_RESTART_DELAY)
+                for m, reason, delay in to_restart:
+                    if delay > 0:
+                        print(f"[watchdog] {m.spec.name} {reason}，{delay:.0f}s 后重启", flush=True)
+                        time.sleep(delay)
+                    else:
+                        print(f"[watchdog] {m.spec.name} {reason}，立即重启", flush=True)
                     print(self.start(m.spec.name), flush=True)
 
         self._watchdog = threading.Thread(target=loop, daemon=True, name="watchdog")
@@ -350,11 +372,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Abyss 管家：Core / SnowLuma 进程监督")
     parser.add_argument("command", nargs="?", default=None,
                         choices=["status", "start", "stop", "restart", "respawn", "logs", "open"],
-                        help="不带命令则进入交互模式")
+                        help="不带命令：源码运行进 CLI 交互模式，冻结运行(manager.exe)进托盘")
     parser.add_argument("target", nargs="?", default=None,
                         help="core / snowluma / all（open: web / snowluma）")
+    parser.add_argument("--tray", action="store_true",
+                        help="强制进入托盘模式（源码调试托盘用）")
     args = parser.parse_args()
     mgr = Manager()
+    if args.command is None and (args.tray or getattr(sys, "frozen", False)):
+        from tray import run_tray   # 延迟导入：tray 反向依赖本模块的 Manager
+        return run_tray(mgr)
     if args.command is None:
         repl(mgr)
         return 0

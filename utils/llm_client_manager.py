@@ -99,9 +99,10 @@ def agent_scope(agent: Optional[str]):
         _CURRENT_AGENT.reset(token)
 
 
-# 运行期产物归拢到 memory/，不再散落仓库根目录
-TOKEN_STATS_FILE = Path(__file__).parent.parent / "memory" / "token_stats.json"
-TOKEN_TRACE_FILE = Path(__file__).parent.parent / "memory" / "token_trace.json"
+# 运行期产物归拢到 memory/（经 paths.app_root()，冻结运行时也在 exe 目录下）
+from paths import app_root as _app_root
+TOKEN_STATS_FILE = _app_root() / "memory" / "token_stats.json"
+TOKEN_TRACE_FILE = _app_root() / "memory" / "token_trace.json"
 
 # 每百万 token 单价（人民币）。key 为归一化后的模型名（去掉 `deepseek/` 等前缀）。
 TOKEN_PRICING = {
