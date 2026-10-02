@@ -11,6 +11,7 @@
 | 你想… | 看这里 |
 |---|---|
 | **了解项目与文档导航** | [docs/README.md](docs/README.md) — 项目概览 + 关键约束 + 全库索引 |
+| **接入 QQ（SnowLuma）** | [docs/setup_snowluma.md](docs/setup_snowluma.md) — WebUI 配置步骤 + 自检 + 排错 |
 | 查某个模块的 API | [docs/api/](docs/api/README.md) — 按代码包 1:1 对应的 API 参考 |
 | 查已完成 / 待办 / 现象 / 远景 | [docs/已完成.md](docs/已完成.md) · [docs/待办.md](docs/待办.md) · [docs/现象观察.md](docs/现象观察.md) · [docs/未来改进.md](docs/未来改进.md) |
 | 跑测试 | [docs/测试系统使用说明.md](docs/测试系统使用说明.md) |
