@@ -461,26 +461,32 @@ class WebChannel:
         self._site = web.TCPSite(self._runner, self.config.host, self.config.port)
         await self._site.start()
 
-        # 加载身份运行时 + 自动初始化
-        self._identity_store.load()
-        await self._identity_store.ensure_initialized_from_store()
-
-        # 注册前端 warning 通知器: 任意模块的 warning/error/critical 日志会广播到所有 ws 客户端,
-        # 前端按 type="warning" 协议弹窗展示.
-        self._frontend_notifier = self._make_frontend_notifier()
-        register_frontend_notifier(self._frontend_notifier)
-
-        # 加载 truck 状态覆盖 (从磁盘恢复到内存 config 对象)
+        # 加载身份运行时 + 自动初始化。
+        # —— 端口已对外开放：此后任何初始化失败都必须自清理（GPT 审查-4）——
+        # 否则失败通道的监听器残留，端口被占且无人回滚。
         try:
-            from adapt.web.truck_control import init_from_disk
-            init_from_disk()
-        except Exception as e:
-            logger.warning(f"[Web:{self.name}] 初始化 truck 状态失败: {e}")
+            self._identity_store.load()
+            await self._identity_store.ensure_initialized_from_store()
 
-        # 注册 GlobalSessionState 变更回调 (LLM 处理中的会话 / 聊天目的)
-        # 关键功能: 注册失败直接阻断启动, 防止前端状态同步静默缺失
-        from brain.hc.global_session_state import register_state_change_callback
-        await register_state_change_callback(self._on_global_state_change)
+            # 注册前端 warning 通知器: 任意模块的 warning/error/critical 日志会广播到所有 ws 客户端,
+            # 前端按 type="warning" 协议弹窗展示.
+            self._frontend_notifier = self._make_frontend_notifier()
+            register_frontend_notifier(self._frontend_notifier)
+
+            # 加载 truck 状态覆盖 (从磁盘恢复到内存 config 对象)
+            try:
+                from adapt.web.truck_control import init_from_disk
+                init_from_disk()
+            except Exception as e:
+                logger.warning(f"[Web:{self.name}] 初始化 truck 状态失败: {e}")
+
+            # 注册 GlobalSessionState 变更回调 (LLM 处理中的会话 / 聊天目的)
+            # 关键功能: 注册失败直接阻断启动, 防止前端状态同步静默缺失
+            from brain.hc.global_session_state import register_state_change_callback
+            await register_state_change_callback(self._on_global_state_change)
+        except BaseException:
+            await self.stop()
+            raise
 
         sessions = await self._list_sessions()
         logger.info(

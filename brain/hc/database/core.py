@@ -12,6 +12,7 @@
 - 向量以 BLOB 存 JSON 序列化，Python 侧算余弦相似度。
 """
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -37,39 +38,63 @@ class MemoryDatabase:
             self._db_path = Path(db_path)
         os.makedirs(self._db_path.parent, exist_ok=True)
         self._conn: Optional[aiosqlite.Connection] = None
+        # —— 初始化竞态修复（GPT 审查-1）——：_ready 前连接视为半成品，
+        # 所有调用者经 _ensure_connection 的初始化锁等待，不允许绕过。
+        self._ready = False
+        self._closed = False
+        self._init_lock = asyncio.Lock()
 
     @property
     def db_path(self) -> Path:
         return self._db_path
 
     async def _ensure_connection(self) -> aiosqlite.Connection:
-        """确保数据库连接已建立（懒连接）。"""
-        if self._conn is None:
+        """确保数据库连接已建立（懒连接，初始化串行化）。
+
+        初始化（连接 + PRAGMA + 建表 + 迁移）在初始化锁内完成，全部成功才置
+        _ready 放行；失败或被取消（CancelledError 属 BaseException）都关闭
+        连接并回滚状态，绝不把"已连接未建表"的半成品连接留给并发调用者。
+        """
+        if self._ready and self._conn is not None:
+            return self._conn
+        async with self._init_lock:
+            if self._ready and self._conn is not None:
+                return self._conn
+            if self._closed:
+                raise StorageError("记忆数据库已关闭，不能再建立连接")
+            # 清掉取消/失败窗口内可能残留的半初始化连接
+            if self._conn is not None:
+                try:
+                    await self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+            conn = None
             try:
-                self._conn = await aiosqlite.connect(self._db_path)
-                self._conn.row_factory = aiosqlite.Row
-                # PRAGMA 光标必须消费完毕（fetchall 复位语句）：
-                # 悬空的 active 语句会让同连接后续 DDL（如 DROP TABLE）报
-                # SQLITE_LOCKED "database table is locked"
-                cur = await self._conn.execute("PRAGMA journal_mode=WAL")
+                conn = await aiosqlite.connect(self._db_path)
+                conn.row_factory = aiosqlite.Row
+                self._conn = conn   # 供 _create_tables/_migrate_* 内部使用
+                cur = await conn.execute("PRAGMA journal_mode=WAL")
                 await cur.fetchall()
-                # 并发写等待：web_only 与完整版可能同时读写同一库，
-                # 让短暂锁竞争等待而非立即抛 "database is locked"
-                cur = await self._conn.execute("PRAGMA busy_timeout=5000")
+                cur = await conn.execute("PRAGMA busy_timeout=5000")
                 await cur.fetchall()
                 await self._create_tables()
                 await self._migrate_tasks_table()
-            except Exception as e:
-                # 失败时关闭并清空连接，防止半初始化连接残留
-                # （aiosqlite 工作线程会挂住进程退出，且下次调用会误跳过建表）
-                if self._conn is not None:
+                self._ready = True
+            except BaseException:
+                self._conn = None
+                self._ready = False
+                if conn is not None:
                     try:
-                        await self._conn.close()
+                        await conn.close()
                     except Exception:
                         pass
-                    self._conn = None
-                raise StorageError(f"SQLite 连接失败: {str(e)}")
+                raise
         return self._conn
+
+    async def ensure_ready(self) -> None:
+        """显式就绪钩子（SystemCore start 用）：完成连接 + 建表 + 迁移，先于业务并发。"""
+        await self._ensure_connection()
 
     async def _create_tables(self) -> None:
         """建表。"""
@@ -252,24 +277,32 @@ class MemoryDatabase:
         logger.info(f"tasks 表结构迁移完成，搬迁 {len(rows)} 条（旧概况已丢弃）")
 
     async def close(self) -> None:
-        """关闭数据库连接。"""
-        if self._conn is not None:
-            await self._conn.close()
-            self._conn = None
+        """关闭数据库连接（与初始化串行化，避免和建表/迁移竞争）。"""
+        async with self._init_lock:
+            self._closed = True
+            if self._conn is not None:
+                await self._conn.close()
+                self._conn = None
+            self._ready = False
 
     async def reconfigure(self, db_path: str | None = None) -> None:
         """原地重指向数据库文件（测试切库 / 恢复真实库）。
 
-        先关闭当前连接再换路径；持有同一实例的模块自动跟随，无需重置依赖单例。
-        任何失败（如旧连接无法关闭）直接抛异常阻断，不 try-ex 兜底继续。
+        在初始化锁内完成：关旧连接、换路径、复位就绪状态；持有同一实例的
+        模块自动跟随。任何失败直接抛异常阻断，不 try-ex 兜底继续。
         """
-        await self.close()
-        if db_path is None:
-            # 恢复真实库：默认 memory/memory.db
-            project_root = Path(__file__).resolve().parent.parent.parent.parent
-            self._db_path = project_root / "memory" / "memory.db"
-        else:
-            self._db_path = Path(db_path)
+        async with self._init_lock:
+            if self._conn is not None:
+                await self._conn.close()
+                self._conn = None
+            self._ready = False
+            self._closed = False
+            if db_path is None:
+                # 恢复真实库：默认 memory/memory.db
+                project_root = Path(__file__).resolve().parent.parent.parent.parent
+                self._db_path = project_root / "memory" / "memory.db"
+            else:
+                self._db_path = Path(db_path)
 
 
 # ============================================================

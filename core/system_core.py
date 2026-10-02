@@ -80,8 +80,14 @@ class SystemCore:
             return
 
         # —— 按依赖顺序注册（stop 按注册逆序执行）——
-        self._registry.register(FuncService("memory_db", stop=self._stop_memory_db))
-        self._registry.register(FuncService("message_store", stop=self._stop_message_store))
+        # memory_db / message_store 注册真正的 start：先完成连接+建表+迁移，
+        # 再启动 attention、消息消费与通道（GPT 审查-1：空库并发首访竞态）
+        self._registry.register(FuncService("memory_db",
+                                            start=self.memory_db.ensure_ready,
+                                            stop=self._stop_memory_db))
+        self._registry.register(FuncService("message_store",
+                                            start=self.message_processor.ensure_store_ready,
+                                            stop=self._stop_message_store))
         self._registry.register(FuncService(
             "default_initializer", start=self._init_defaults))
         self._registry.register(FuncService("amy", start=self._start_amy, stop=self._stop_amy))

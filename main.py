@@ -25,12 +25,23 @@ from fastapi import FastAPI
 from typing import Dict, Any, AsyncIterator
 from dotenv import load_dotenv
 
-# 项目根 = main.py 所在目录。插入到 sys.path[0] 保证包导入不被环境干扰
-project_root = Path(__file__).resolve().parent
+from paths import app_root, ensure_cwd
+
+# 项目根：源码运行 = 仓库根；冻结运行 = exe 所在目录（.env.dev 与用户数据都在这）
+project_root = app_root()
+ensure_cwd()
 sys.path.insert(0, str(project_root))
 
 # 配置外置入口（.env.dev 不存在时静默跳过；见 config/ 下的读取方）
 load_dotenv(project_root / ".env.dev")
+
+# 冻结（--noconsole）模式下 stdout/stderr 是无效句柄，重定向到文件保住启动输出
+# 注意必须是文本模式：logging/uvicorn 写的是 str，二进制句柄会 TypeError
+if getattr(sys, "frozen", False):
+    _log_dir = project_root / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    sys.stdout = open(_log_dir / "core_stdout.log", "a", encoding="utf-8", errors="replace", buffering=1)
+    sys.stderr = sys.stdout
 
 # 导入日志模块
 from utils.logger import setup_logging
@@ -68,8 +79,8 @@ logger.info("应用初始化完成")
 # 主程序入口
 # ======================================
 
-def main() -> None:
-    """主函数：启动FastAPI服务"""
+def main() -> int:
+    """主函数：启动FastAPI服务。返回非零码表示启动失败（GPT 审查-5）。"""
     parser = argparse.ArgumentParser(description="Abyss Core 主服务")
     parser.add_argument("--dev", action="store_true",
                         help="开发模式：开启热重载（生产/打包环境务必关闭）")
@@ -105,10 +116,16 @@ def main() -> None:
             from adapt.web.system_api import set_uvicorn_server
             set_uvicorn_server(server)   # 注入给 aiohttp 侧的系统管理接口
             server.run()
+            # uvicorn 0.30.x：lifespan 启动失败时 run() 正常返回且 started=False，
+            # 必须显式转换非零退出码，监督者不能只看进程是否存活
+            if not server.started:
+                logger.error("Core 启动失败（lifespan 未完成）——以非零退出码结束")
+                return 1
+            return 0
 
     except KeyboardInterrupt:
         logger.info("接收到中断信号，正在停止服务...")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

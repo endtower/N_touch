@@ -90,12 +90,15 @@ web_frontend/vite.config.js
 web_frontend/vite.config.d.ts
 *.tsbuildinfo
 
-# Memory / chat history (private)
-memory/
-memory/chat/
+# Memory 运行时数据（私有，不入库）；memory/*.py 运行模块恢复跟踪
 memory/chat_history/
-memory/backups/
+memory/event_chains/
 memory/event_history/
+memory/llm_save/
+memory/backups/
+memory/*.db
+memory/*.db-wal
+memory/*.db-shm
 
 # Neo4j runtime data
 brain/hc/database/neo4j-chs-community-5.10.0-windows/data/
