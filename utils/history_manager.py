@@ -12,22 +12,22 @@
         social_chat_223058.json
       event_chain_20260911_.../
       unlinked/                             ← 未关联链（链外写入 + legacy 迁移）
-        conversation.json                   ← 链外常驻写入（累积，由归档轮转清空）
-        pfca_223001.json                    ← 链外归档（带时间戳）
+        quest_20261002_175621.json          ← 链外每次会话一个独立时间戳文件
+        pfca_20261002_180102.json              （{prefix}_{YYYYMMDD_HHMMSS}.json，永不共用）
         conversation_archived_*.json        ← 旧格式迁移保留原名
+        conversation.json                   ← 已废弃的旧共用文件（保留展示，不再被写入）
 
 核心语义:
-  - 写入即落位: append 时根据 contextvar 中的 chain_id 直接写入链文件夹内
-    本次唤醒的独立文件（{prefix}_{HHMMSS}.json，唤醒期间缓存，永不重命名）。
-  - 一次唤醒一个文件: 归档后下次唤醒生成新文件 -> 链内条目按创建时间排列，
-    天然还原"唤醒 1 / 唤醒 2 / ..."的分段视图。
-  - 内存/磁盘分离: get_history() 只返回本次唤醒的内存会话历史
-    (_session_history)，归档后下次唤醒从空上下文开始；磁盘链文件是展示用的
-    完整记录，仅供按链查看，不参与 LLM 请求组装。
-  - 归档 = 终结: archive_context 只终结写入资格（注册表 + 广播）并失效唤醒
-    文件缓存，链文件夹内文件原位保留，前端按链文件夹查看整个任务的全部上下文。
-  - 链外写入: 写入 unlinked/{prefix}.json 常驻文件；归档时轮转为
-    unlinked/{prefix}_{HHMMSS}.json（这是链外单文件共享场景的唯一例外）。
+  - 写入即落位: append 时根据 contextvar 中的 chain_id 定位本次会话的独立文件
+    （会话期间缓存，永不重命名）。
+  - 一次会话一个文件: 链内按 chain_id 分文件夹、链外统一落 unlinked/ 全时间戳名；
+    会话边界（链切换 / archive_context）后下次写入生成新文件，天然还原
+    "会话 1 / 会话 2 / ..."的分段视图——任何两个会话绝不共用同一文件。
+  - 内存/磁盘分离: get_history() 只返回本次会话的内存会话历史
+    (_session_history)，归档后下次会话从空上下文开始；磁盘文件是展示用的
+    完整记录，仅供查看，不参与 LLM 请求组装。
+  - 归档 = 终结: archive_context 终结写入资格（清会话缓存 + 注册表 + 广播），
+    已落盘文件原位保留，前端按 链文件夹 / unlinked 文件 查看全部上下文。
   - 旧存档迁移: 各 manager 首次实例化时一次性把旧格式（{prefix}_chain_* /
     {prefix}_archived_* / 旧 active 文件 / 链内残留固定名文件）迁入新结构，幂等。
 """
@@ -73,6 +73,9 @@ _active_chains: Set[str] = set()
 # 链文件夹保留上限（按文件夹 mtime 保留最近 N 个，防止无限膨胀）
 MAX_CHAIN_DIRS = 20
 
+# unlinked 目录每个前缀的文件保留上限（按 mtime 保留最近 N 个；防链外会话文件膨胀）
+MAX_UNLINKED_FILES = 20
+
 # 旧链归档文件名: {prefix}_chain_{chain_id}_{HHMMSS}.json（迁移解析用）
 # chain_id 本身含下划线, (.+)_ greedy 匹配到倒数第二段, 末段固定 6 位数字
 _LEGACY_CHAIN_NAME_RE = re.compile(r'^[a-z]+_chain_(.+)_([0-9]{6})\.json$')
@@ -103,11 +106,11 @@ _PREFIX_TO_KIND = {
     'social_chat': 'social_chat',
     'quest': 'quest',
     'persona': 'persona',
-    # 人格粒度动态前缀（PersonaAgent.history_prefix = persona_{persona_id}）：
+    # 人格粒度动态前缀（PersonaAgent.history_prefix = persona_{persona_name}）：
     # 同一链下每格独立 kind，前端一眼区分是哪个格
     'persona_assistant': 'persona_assistant',
     'persona_normal': 'persona_normal',
-    'persona_attack': 'persona_attack',
+    'persona_task': 'persona_task',
     'vision': 'vision',
     # 历史存档兼容：bequest agent 已于 2026-09-24 删除，仅老链文件仍用该前缀
     'bequest': 'bequest',
@@ -165,19 +168,17 @@ class HistoryManager(ABC):
             self.memory_dir = _test_storage_override / self.get_file_prefix()
         # 事件链存储根: <memory>/event_chains/（跨 kind 汇聚，按链分文件夹）
         self.chains_root = self.memory_dir.parent / 'event_chains'
-        # 链外常驻写入文件（unlinked），固定名 {prefix}.json，永不重命名
-        self.history_file = self.chains_root / 'unlinked' / f'{self.get_file_prefix()}.json'
-        # 链外常驻文件的归档轮转上限（对齐旧归档上限语义）
-        self.max_archive_files = 10
+        # 链外会话文件目录（unlinked），每次会话一个独立时间戳文件，永不共用
+        self.unlinked_dir = self.chains_root / 'unlinked'
         # 本 manager 最近一次参与链写入的 chain_id（归档终结时用）
         self.current_chain_id = None
-        # 本次唤醒的内存会话历史（LLM 上下文）；磁盘文件是跨唤醒的展示累积
+        # 本次会话的内存历史（LLM 上下文）；磁盘文件是跨会话的展示记录
         self._session_history: list = []
-        # 本次唤醒在链内的落盘文件（{prefix}_{HHMMSS}.json，唤醒期间缓存，
-        # 归档后失效 -> 下次唤醒生成新文件，实现链内"一次唤醒一个上下文条目"）
+        # 本次会话的落盘文件（链内 {prefix}_{HHMMSS}.json / 链外
+        # {prefix}_{YYYYMMDD_HHMMSS}.json）；会话期间缓存，归档后失效
+        # -> 下次会话生成新文件，实现"一次会话一个上下文条目"
         self._session_file: Optional[Path] = None
         self._session_chain_id: Optional[str] = None
-        self._ensure_file_exists()
         self._migrate_legacy_files()
 
     @abstractmethod
@@ -203,33 +204,41 @@ class HistoryManager(ABC):
     # --------------------------------------------------------
 
     def _current_target_file(self) -> Path:
-        """定位当前写入/读取目标文件。
+        """定位当前会话的写入/读取目标文件（会话期间缓存，归档后失效）。
 
-        - 链内（contextvar 有 chain_id）: 本次唤醒的独立落盘文件
-          event_chains/{chain_id}/{prefix}_{HHMMSS}.json（唤醒期间缓存，
-          归档后失效）——链内一次唤醒 = 一个上下文文件
-        - 链外: event_chains/unlinked/{prefix}.json（常驻）
+        - 链内（contextvar 有 chain_id）: event_chains/{chain_id}/{prefix}_{HHMMSS}.json
+        - 链外（无 chain_id）: event_chains/unlinked/{prefix}_{YYYYMMDD_HHMMSS}.json
+
+        两者都遵循"一次会话一个独立文件、永不共用"：链内由 chain_id 变化触发新文件，
+        链外由 archive_context() 终结会话后触发新文件。
         """
         from utils.chain_context import get_current_chain_id
         chain_id = get_current_chain_id()
-        if chain_id:
-            if self._session_file is None or self._session_chain_id != chain_id:
-                self._session_file = self._new_chain_session_file(chain_id)
-                self._session_chain_id = chain_id
-            return self._session_file
-        return self.history_file
+        if self._session_file is None or self._session_chain_id != chain_id:
+            self._session_file = self._new_session_file(chain_id)
+            self._session_chain_id = chain_id
+        return self._session_file
 
-    def _new_chain_session_file(self, chain_id: str) -> Path:
-        """为本次唤醒生成链内落盘文件路径（{prefix}_{HHMMSS}.json，冲突加序号）。"""
-        chain_dir = self.chains_root / chain_id
-        chain_dir.mkdir(parents=True, exist_ok=True)
+    def _new_session_file(self, chain_id: Optional[str]) -> Path:
+        """生成本次会话的落盘文件路径（冲突加序号，保证唯一）。
+
+        - 链内 chain_id 非空: {chains_root}/{chain_id}/{prefix}_{HHMMSS}.json
+        - 链外 chain_id 为空: {chains_root}/unlinked/{prefix}_{YYYYMMDD_HHMMSS}.json
+          （链文件夹名已含日期，链外无此上下文，故用全时间戳防跨天碰撞）
+        """
         prefix = self.get_file_prefix()
-        timestamp = datetime.now().strftime('%H%M%S')
-        candidate = chain_dir / f'{prefix}_{timestamp}.json'
+        if chain_id:
+            target_dir = self.chains_root / chain_id
+            timestamp = datetime.now().strftime('%H%M%S')
+        else:
+            target_dir = self.unlinked_dir
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        target_dir.mkdir(parents=True, exist_ok=True)
+        candidate = target_dir / f'{prefix}_{timestamp}.json'
         seq = 1
         while candidate.exists():
             seq += 1
-            candidate = chain_dir / f'{prefix}_{timestamp}_{seq}.json'
+            candidate = target_dir / f'{prefix}_{timestamp}_{seq}.json'
         return candidate
 
     # --------------------------------------------------------
@@ -325,54 +334,25 @@ class HistoryManager(ABC):
 
     @handle_errors()
     def archive_context(self):
-        """归档当前上下文。
+        """终结当前会话：清空会话缓存并终结写入资格（链内/链外语义统一）。
 
-        - 链内（本 manager 参与过链写入）: 链文件夹内文件原位保留（供按链查看），
-          仅终结写入资格并广播，同时清空内存会话历史（下次唤醒从干净上下文
-          开始）；随后触发链文件夹数量清理。
-        - 链外: 轮转 unlinked/{prefix}.json 常驻文件（内容搬到
-          unlinked/{prefix}_{HHMMSS}.json 并清空常驻），空文件直接跳过。
+        - 清空内存会话历史 + 失效会话文件缓存 -> 下次写入生成新文件（一次会话一个文件）
+        - 链内（本 manager 参与过链写入）: 从进行中注册表移除并广播
+        - 链外: 直接广播
+        - 已落盘文件原位保留，前端按链文件夹 / unlinked 文件查看
+        - 触发数量清理（链文件夹 / unlinked 文件各保留最近 N 个）
         """
         chain_id = self.current_chain_id
+        self.current_chain_id = None
+        self._session_history = []
+        self._session_file = None
+        self._session_chain_id = None
         if chain_id:
-            self.current_chain_id = None
-            self._session_history = []
-            self._session_file = None
-            self._session_chain_id = None
             _active_chains.discard(chain_id)
-            _fire_context_updated_broadcast(self.get_file_prefix(), 'archive', chain_id)
             logger.info(f'链上下文已归档终结: {chain_id} / {self.get_file_prefix()}')
             self._cleanup_old_chain_dirs()
-            return
-        self._archive_unlinked()
-
-    @handle_errors()
-    def _archive_unlinked(self):
-        """链外归档：轮转 unlinked 常驻文件（唯一保留重命名的场景）。"""
-        self._session_history = []
-        target = self.history_file
-        if not target.exists():
-            return
-        try:
-            with open(target, 'r', encoding='utf-8') as f:
-                history = json.load(f)
-        except Exception:
-            history = None
-        if not history:
-            return
-        unlinked_dir = self.chains_root / 'unlinked'
-        timestamp = datetime.now().strftime('%H%M%S')
-        archive_file = unlinked_dir / f'{self.get_file_prefix()}_{timestamp}.json'
-        seq = 1
-        while archive_file.exists():
-            seq += 1
-            archive_file = unlinked_dir / f'{self.get_file_prefix()}_{timestamp}_{seq}.json'
-        with open(archive_file, 'w', encoding='utf-8') as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
-        with open(target, 'w', encoding='utf-8') as f:
-            json.dump([], f)
-        logger.info(f'链外上下文已轮转归档: {archive_file.name}（共 {len(history)} 条消息）')
-        _fire_context_updated_broadcast(self.get_file_prefix(), 'archive', None)
+        _fire_context_updated_broadcast(self.get_file_prefix(), 'archive', chain_id)
+        self._cleanup_old_unlinked_files()
 
     @handle_errors()
     def _cleanup_old_chain_dirs(self):
@@ -387,24 +367,40 @@ class HistoryManager(ABC):
             shutil.rmtree(d, ignore_errors=True)
             logger.info(f'已删除旧链文件夹: {d.name}')
 
+    @handle_errors()
+    def _cleanup_old_unlinked_files(self):
+        """清理本前缀的旧 unlinked 文件：保留最近 MAX_UNLINKED_FILES 个。
+
+        只清理本前缀的链外会话文件（{prefix}_{YYYYMMDD_HHMMSS}.json，可带 _N 序号）；
+        legacy 迁移文件（legacy_ / archived_）与其它前缀文件一律不动。
+        """
+        if not self.unlinked_dir.exists():
+            return
+        prefix = self.get_file_prefix()
+        # 精确匹配会话文件命名，避免误伤 {prefix}_archived_* / {prefix}_legacy_*
+        # 等同前缀它类文件
+        pattern = re.compile(rf'^{re.escape(prefix)}_\d{{8}}_\d{{6}}(?:_\d+)?\.json$')
+        files = [f for f in self.unlinked_dir.iterdir()
+                 if f.is_file() and pattern.match(f.name)]
+        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        for f in files[MAX_UNLINKED_FILES:]:
+            try:
+                f.unlink()
+                logger.info(f'已删除旧 unlinked 上下文文件: {f.name}')
+            except OSError as e:
+                logger.warning(f'删除 unlinked 文件失败: {f.name} / {e}')
+
     # --------------------------------------------------------
     # 读写
     # --------------------------------------------------------
 
     @handle_errors()
-    def _ensure_file_exists(self):
-        """确保链外常驻文件存在"""
-        if not self.history_file.exists():
-            self.history_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.history_file, 'w', encoding='utf-8') as f:
-                json.dump([], f)
-
-    @handle_errors()
     def append(self, message: dict):
         """保存历史记录：内存会话历史追加 + 磁盘展示文件累积落盘。
 
-        链内写入落位到本次唤醒的独立文件 {prefix}_{HHMMSS}.json（写入即落位,
-        永不重命名）；同时把链标记为进行中。LLM 上下文只看内存会话历史。
+        落位到本次会话的独立文件（链内 {prefix}_{HHMMSS}.json /
+        链外 {prefix}_{YYYYMMDD_HHMMSS}.json，写入即落位, 永不重命名）；
+        链内写入同时把链标记为进行中。LLM 上下文只看内存会话历史。
         """
         self._session_history.append(message)
         target = self._current_target_file()
@@ -450,15 +446,17 @@ class HistoryManager(ABC):
 
     @handle_errors()
     def get_history(self):
-        """获取本次唤醒的会话历史（内存副本，不含之前唤醒的磁盘累积内容）"""
+        """获取本次会话的内存历史（副本，不含之前会话的磁盘记录）"""
         return list(self._session_history)
 
     @handle_errors()
     def clear(self):
-        """清空历史：重置内存会话历史，并将当前目标文件重置为空列表"""
+        """清空历史：重置内存会话历史并失效会话文件缓存。
+
+        下次写入会生成新的独立会话文件，不再往已落盘文件追加内容
+        （磁盘上的历史记录原位保留，仅供查看）。
+        """
         self._session_history = []
-        target = self._current_target_file()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, 'w', encoding='utf-8') as f:
-            json.dump([], f)
+        self._session_file = None
+        self._session_chain_id = None
         logger.warning('历史记录已清空')

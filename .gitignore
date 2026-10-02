@@ -13,6 +13,8 @@ dist/
 # Virtual environments
 venv/
 .env
+.env.*
+!.env.example
 .env.local
 .env.development.local
 .env.test.local
@@ -84,6 +86,9 @@ web_frontend/node_modules/
 web_frontend/dist/
 web_frontend/.env
 web_frontend/.env.local
+web_frontend/vite.config.js
+web_frontend/vite.config.d.ts
+*.tsbuildinfo
 
 # Memory / chat history (private)
 memory/
@@ -106,12 +111,6 @@ SnowLuma/
 
 # Neo4j (entire directory excluded)
 brain/hc/database/neo4j-chs-community-5.10.0-windows/
-
-# None_Tooth dev configs
-None_Tooth/.env
-None_Tooth/.env.local
-None_Tooth/__pycache__/
-None_Tooth/none_tooth/plugins/message_storage/
 
 # Amy persistence (private state)
 brain/amy/persistence/*.json
@@ -143,8 +142,10 @@ brain/hc/database/default_initializer.py
 /tests/
 _tmp_*
 
-# 人格注册表（含人格内核提示词，涉隐私）
+# 人格注册表与人格文件（含人格内核提示词，涉隐私）
 brain/base/persona/persona_registry.py
+brain/base/persona/*.json
+brain/base/persona/history/
 
 # 运行时备份（含 memory.db / chat_history.db / 私聊笔记快照）
 backups/

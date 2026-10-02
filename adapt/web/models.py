@@ -3,7 +3,7 @@
 adapt.web.models
 ================
 
-WebChannel 的数据模型（避免 channel.py 和 session_store.py 互相 import）。
+WebChannel 的数据模型（避免 channel.py 和 db_store.py 互相 import）。
 """
 
 from __future__ import annotations

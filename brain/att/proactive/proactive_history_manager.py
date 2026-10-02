@@ -5,7 +5,7 @@ proactive 历史/消息管理器
 类比 PFCAHistoryManager：
 - 维护 proactive session 的 messages list (system / user / assistant / tool)
 - 提供 append / get_history 接口
-- 持久化到 memory/proactive/ 目录下（active.json + 归档文件）
+- 持久化：落 event_chains/ 结构（链内按链分文件夹 / 链外落 unlinked 时间戳文件）
 """
 
 from pathlib import Path
@@ -77,8 +77,9 @@ def get_proactive_history_manager() -> ProactiveHistoryManager:
 def reset_proactive_history_manager() -> None:
     """重置单例（一般用于会话结束/进程重置）
 
-    注意：仅清空单例引用，磁盘上的 active.json 不会自动清理。
-    若需归档当前上下文再重置，请先调用 instance.archive_context()。
+    注意：仅清空单例引用，已落盘的链文件夹 / unlinked 会话文件不会自动清理。
+    若需终结当前会话写入资格（下次唤醒生成新文件）再重置，请先调用
+    instance.archive_context()。
     """
     global _global_proactive_history_manager
     _global_proactive_history_manager = None

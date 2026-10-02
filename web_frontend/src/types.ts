@@ -462,9 +462,13 @@ export interface TaskInfo {
   id: string
   task_id: string
   title: string
-  summary: string
+  brief: string           // 简要总结 (前因与目的)
+  conclusion: string      // 已获取的、用于汇报的结论
+  stage: string           // 当前阶段 (还需要做什么)
+  notes: string           // 任务笔记 (quest 推进时整列清理并重填)
   status: TaskStatus
   next_occurrence?: string | null
+  deadline?: string | null
   start_time?: string | null
   end_time?: string | null
   updated_at?: string | null
@@ -551,7 +555,6 @@ export interface AmyThought {
 export interface AmyMood {
   norepinephrine: number
   dopamine: number
-  sc: number
 }
 
 export interface AmyActEntry {
@@ -566,20 +569,6 @@ export interface AmyActEntry {
 
 export interface AmyFinalEvaluationEntry {
   name: string
-  sc_kind: 'good' | 'bad' | 'none'
-  effect: string
-}
-
-export interface AmyScMeta {
-  default: number
-  min: number
-  max: number
-  decay_per_hour: number
-  decay_target: number
-  effect_good: number
-  effect_bad: number
-  smooth_target: number
-  smooth_step: number
 }
 
 export interface AmyDescriptionBand {
@@ -591,8 +580,20 @@ export interface AmyDescriptionBand {
 export interface AmyDescriptions {
   dopamine: AmyDescriptionBand[]
   norepinephrine: AmyDescriptionBand[]
-  sc: AmyDescriptionBand[]
-  range: { min: number; max: number; sc_min: number; sc_max: number }
+  range: { min: number; max: number }
+}
+
+export interface AmyDebtEntry {
+  title: string
+  kind: string
+  score: number
+  create_time: number
+}
+
+export interface AmyPresence {
+  value: number
+  attribution_prompt: string
+  debts: AmyDebtEntry[]
 }
 
 export interface AmyState {
@@ -600,6 +601,7 @@ export interface AmyState {
   fetched_at?: number
   mood: AmyMood
   amy_description: string
+  presence: AmyPresence
   thoughts: {
     all_active_count: number
     all_active: AmyThought[]
@@ -614,7 +616,6 @@ export interface AmyState {
     final: AmyFinalEvaluationEntry[]
   }
   amy_descriptions: AmyDescriptions
-  sc_meta?: AmyScMeta
   error?: string
 }
 
@@ -647,5 +648,47 @@ export interface NotesResponse {
   pfca_manual: string       // PFCA 当前可见的记事本手册 (render_manual(max_chars=1000))
   all: NotepadNoteDoc[]     // 全部未归档（活动池）笔记, 落库时间倒序
   unprocessed_chars: number // 未处理笔记字符数 (反思触发统计口径)
+  fetched_at: number
+}
+
+// ============================================================
+// Token 用量统计 (GET /token-stats)
+// 数据源: utils/llm_client_manager 的 token_stats.json (v2 按天分桶)
+// ============================================================
+
+// 单维度分桶 (某 agent / 某 provider / 某 model 在某区间内的累计)
+export interface TokenBucket {
+  call_count: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  cached_tokens: number
+  cache_hit_tokens: number
+  cache_miss_tokens: number
+  reasoning_tokens: number
+  cost_cache_miss: number
+  cost_cache_hit: number
+  cost_output: number
+  cost_total: number
+  models: string[]          // 该维度下出现过的模型
+  providers: string[]       // 该维度下出现过的提供商
+}
+
+export interface TokenStatsDay {
+  date: string              // YYYY-MM-DD
+  totals: TokenBucket       // 单日合计 (仅按 by_agent 累加, 避免跨维度重复计数)
+  by_agent: Record<string, TokenBucket>
+  by_provider: Record<string, TokenBucket>
+  by_model: Record<string, TokenBucket>
+}
+
+export interface TokenStatsResponse {
+  range: { start: string; end: string; days: string[] }
+  totals: TokenBucket
+  per_day: TokenStatsDay[]
+  by_agent: Record<string, TokenBucket>
+  by_provider: Record<string, TokenBucket>
+  by_model: Record<string, TokenBucket>
+  updated_at: string | null
   fetched_at: number
 }

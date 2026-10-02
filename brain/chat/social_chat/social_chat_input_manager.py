@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
-"""social_chat 输入管理器：构造首条 user 消息（任务书 + 发送模式说明 + 情绪 + 记事本手册 + 经验）与增量输入。
+"""social_chat 输入管理器：构造首条 user 消息（人格 + 任务书 + 发送模式说明 + 情绪 + 记事本手册 + 经验）与增量输入。
 
 数据源统一走 memory.session_history 的游标拉取（consumer_id=CONVERSATION_CONSUMER_ID），
 与 conversation 共用同一游标：两种模式读同一批会话数据，任一模式消费过的消息
 另一模式不再重复拉取（审批轮询的 social_chat_approval 专用游标独立，不受影响）。
 
 条目对齐 conversation_input_manager：
+- 人格段（首条，最前）
 - 任务说明（首条）
 - 发送模式 block（首条，approval / unrestricted 两态）
 - amy_effect（首条）
 - 记事本手册（首条，对话场景子集 + 通用，与 conversation 同一套 shortlight 手册）
-- 经验激活（首条，向量匹配 + 缓存）
+- 经验激活（首条，心情/任务双通道向量匹配 + 缓存）
 - 主人 / 工作会话新消息（增量输入；工作会话注入受 SOCIAL_CHAT_DUAL_PUSH 开关控制）
 - 未使用工具警告（增量输入注入）
 """
@@ -63,7 +64,7 @@ class SocialChatInputManager:
     """social_chat 输入管理器（单例）。
 
     条目：
-    1. 首条：主人/工作会话近期记录 + 会话环境 + 任务书 + 发送模式 block + amy_effect + 记事本手册 + 经验激活
+    1. 首条：人格段 + 主人/工作会话近期记录 + 会话环境 + 任务书 + 发送模式 block + amy_effect + 记事本手册 + 经验激活
     2. 增量：主人会话新消息 +（SOCIAL_CHAT_DUAL_PUSH 开启时）工作会话新消息 + 未调工具警告
     """
 
@@ -181,6 +182,7 @@ class SocialChatInputManager:
     async def _build_first_input(self) -> str:
         """构造首条 user 消息：
 
+            0. 人格段（最前，本段社交显式指定的人格内核）
             1. 已经发生的聊天记录（主人会话 + 工作会话，游标拉取）
             2. 当前会话环境（合并单段：主人线 + 工作线）
             3. 【本次聊天任务】
@@ -214,13 +216,17 @@ class SocialChatInputManager:
 
         # 5) amy_effect（表现侧出口：仅 NE/DA 两行激素描述 + 原因（仅非最终评价类想法），
         #    不含 SC 行——pfca 决策侧情绪体系与本模块隔离，见 docs/api/amy.md）
+        #    展示块暂时隐藏原因（amy_effect_display，with_reason=False）；
+        #    amy_effect（带原因）仍作为经验检索心情通道的 query，检索行为不变
         try:
             from brain.amy.emotional_interface import get_emotional_interface
             ei = await get_emotional_interface()
             amy_effect = await ei.get_language_description()
+            amy_effect_display = await ei.get_language_description(with_reason=False)
         except Exception as e:
             logger.debug(f"social_chat 获取 amy_effect 失败: {e}")
             amy_effect = ""
+            amy_effect_display = ""
 
         # 拼接：用 parts 拼接避免连续空行（段头样式与 conversation 对齐）
         parts: List[str] = [f"【已经发生的聊天记录】\n{message_str}"]
@@ -228,10 +234,16 @@ class SocialChatInputManager:
             parts.append(env_text)
         parts.append(task_block)
         parts.append(mode_block)
-        if amy_effect:
-            parts.append(f"【你的情绪状态】{amy_effect}")
+        if amy_effect_display:
+            parts.append(f"【你的情绪状态】{amy_effect_display}")
 
         user_input = "\n".join(parts)
+
+        # 人格段（最前）：本段社交由 social_chat_agent 显式指定的人格内核，
+        # 与 conversation 同款注入位置（整条消息之首）。
+        persona_header = self._build_persona_header()
+        if persona_header:
+            user_input = f"{persona_header}\n{user_input}"
 
         # 6) 记事本手册：长期经验底色（全部已落库条目，usage 不参与路由），
         #    章节式裸文本；拉取失败直接上抛崩溃阻断（按 user_rules），细节经 query_note 工具溯源
@@ -240,10 +252,23 @@ class SocialChatInputManager:
         if manual:
             user_input = f"{user_input}\n{manual}"
 
-        user_input = await self._append_matched_bequest(user_input)
+        user_input = await self._append_matched_bequest(amy_effect, self._task_purpose, user_input)
 
         logger.info(f"social_chat 生成第一段输入，长度: {len(user_input)}")
         return user_input
+
+    def _build_persona_header(self) -> str:
+        """构建首条 user 消息开头的【当前人格】段（本段社交显式指定的人格）。
+
+        人格由 social_chat_agent 经 social_chat_core.persona_name 传入（缺省正常人格），
+        本段注入该人格提示词（公共聊天准则 + kernel_prompt，公共段在前），
+        作为本次社交的语言与行为基准。
+        人格不存在属重大关键路径失败，get_persona 直接抛 KeyError 崩溃阻断（user_rules）。
+        """
+        from brain.base.persona.persona_registry import compose_persona_prompt, get_persona
+
+        persona = get_persona(self._social_chat_core.persona_name)
+        return f"【当前人格】{persona.persona_name}\n{compose_persona_prompt(persona)}"
 
     async def _fetch_one_history(
         self,
@@ -424,13 +449,25 @@ class SocialChatInputManager:
     # 本地不再二次拼接 thoughts；PFCA 决策侧（SC）情绪体系与本模块隔离。
 
     # ----------------- 经验激活 -----------------
-    async def _append_matched_bequest(self, user_input: str) -> str:
-        """向量匹配经验并追加到输入（检索核心走 common_ways，与 conversation 同源）。
+    async def _append_matched_bequest(
+        self, mood_query: str, purpose_query: str, user_input: str
+    ) -> str:
+        """双通道经验检索并追加到输入（检索核心走 common_ways，与 conversation 同源）。
+
+        通道划分（心情通道最多 4 条、任务通道最多 6 条，合计最多 10 条）：
+        - 心情通道：amy 表现侧情绪描述（get_language_description 出口）作 query，
+          召回表达方式类话术经验；
+        - 任务通道：PFCA 下达的本次聊天任务作 query，召回任务相关话术经验。
 
         本模块差异点：
+        - 仅在首条 user 消息构造时激活一次；
         - 激活缓存与 social_chat_tool_manager.experience_agent 共用同一份
-          （self._activated_bequests），保证 run 内不重复注入；
-        - 文案逐条内联追加（conversation 版按 header 分组）。
+          （self._activated_bequests），保证 run 内不重复注入。
+
+        Args:
+            mood_query: 心情通道检索 query（amy 情绪描述，可为空）。
+            purpose_query: 任务通道检索 query（本次聊天任务，可为空）。
+            user_input: 待追加的输入文本。
         """
         if not user_input:
             return user_input
@@ -438,21 +475,40 @@ class SocialChatInputManager:
         try:
             from brain.base.common_ways.bequest_helpers import activate_bequests_for_input
 
-            matched = await activate_bequests_for_input(
-                user_input,
-                skip=lambda bequest_id: bequest_id in self._activated_bequests,
-                top_k=3,
-                max_activate=3,
-            )
+            channel_seen: set = set()
+
+            def _skip(bequest_id: str) -> bool:
+                return bequest_id in channel_seen or bequest_id in self._activated_bequests
+
+            channels = [
+                ("【响应的经验·契合当前心情】", mood_query, 4),
+                ("【响应的经验·契合本次任务】", purpose_query, 6),
+            ]
 
             activated_titles = []
-            for entry in matched:
-                self._activated_bequests.add(entry["id"])
-                user_input = f"{user_input}\n你回想起了经验：{entry['title']} - {entry['summary']}"
-                activated_titles.append(entry["title"])
+            sections = []
+            for header, query, limit in channels:
+                query = (query or "").strip()
+                if not query:
+                    continue
+                matched = await activate_bequests_for_input(
+                    query, skip=_skip, top_k=limit, max_activate=limit,
+                )
+                if not matched:
+                    continue
+                lines = []
+                for entry in matched:
+                    channel_seen.add(entry["id"])
+                    self._activated_bequests.add(entry["id"])
+                    activated_titles.append(entry["title"])
+                    lines.append(f"你回想起了经验：{entry['title']} - {entry['summary']}")
+                sections.append(f"{header}\n" + "\n".join(lines))
 
             if activated_titles:
                 logger.info(f"social_chat 已激活经验: {', '.join(activated_titles)}")
+
+            if sections:
+                user_input = f"{user_input}\n" + "\n".join(sections)
 
             return user_input
 

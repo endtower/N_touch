@@ -22,13 +22,18 @@ from typing import Dict, List, Any, Optional
 
 from utils.logger import get_logger
 from utils.error_handling import AbyssCoreError
-from utils.llm_client_manager import TokenBudget, TokenBudgetExceededError, token_budget_scope, extract_reasoning
+from utils.llm_client_manager import (
+    TokenBudget, TokenBudgetExceededError, token_budget_scope, agent_scope, extract_reasoning,
+)
 
 logger = get_logger('HeavySession', "DEBUG")
 
 
 class HeavySession(ABC):
     """重型 Session 基类：有状态、多轮循环、持久化上下文的会话执行单元"""
+
+    # token 统计归集用的 agent 身份；None 时回退为类名
+    agent_name: Optional[str] = None
 
     # ============ 熔断/行为阀配置（子类可覆盖） ============
 
@@ -103,7 +108,9 @@ class HeavySession(ABC):
 
         budget = TokenBudget(self.TOKEN_BUDGET) if self.TOKEN_BUDGET else None
         self.token_budget = budget
-        with token_budget_scope(budget):
+        # agent_scope 必须在进入循环前设好：工具经 asyncio.create_task 派生的子任务
+        # 会拷贝当前 context，从而把次级 LLM 调用一并归入本会话（轻量 agent 自行覆盖）
+        with token_budget_scope(budget), agent_scope(self.agent_name or type(self).__name__):
             while self.running:
                 # 累计 token 预算熔断（预算在 LLM 网关记账，这里负责优雅退出）
                 if budget is not None and budget.exceeded:

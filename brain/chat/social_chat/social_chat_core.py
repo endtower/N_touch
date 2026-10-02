@@ -6,10 +6,15 @@
         self,
         purpose: str,
         working_session_id: str,
+        persona_name: str = "",
     ) -> dict:
 
 Returns:
     dict: 包含 summary_text / exit_reason。
+
+persona_name（2026-09-29 起）：本段社交使用的人格名，由 PFCA social_chat_agent
+工具入参显式指定（缺省 normal）；core 持有之，供 input_manager 在首条 user
+消息注入【当前人格】段。
 
 发送模式（审批 / 自由）由 config.SOCIAL_CHAT_SEND_MODE 决定初始值，
 run 内可经 set_send_mode 工具切换（升级需主人『同意』），本类不接收模式参数。
@@ -48,6 +53,8 @@ class SocialChatCore:
         # 启动前 / 启动后任何未运行环节读取一律 fail-fast（不静默吞错）。
         self._master_session_id: Optional[str] = None
         self._working_session_id: Optional[str] = None
+        # 本段社交使用的人格名（由 start() 注入，缺省 normal）；未初始化读一律 fail-fast。
+        self._persona_name: Optional[str] = None
         self._start_time: Optional[float] = None
         # 汇报窗口起点（按会话分别快照 start() 时刻的最大 seq，纯序号、零时钟依赖）
         self._master_start_seq: Optional[int] = None
@@ -81,6 +88,16 @@ class SocialChatCore:
             )
         return self._working_session_id
 
+    @property
+    def persona_name(self) -> str:
+        """本段社交使用的人格名（由 PFCA social_chat_agent 工具在 start() 时注入，缺省 normal）。"""
+        if self._persona_name is None:
+            raise RuntimeError(
+                "SocialChatCore.persona_name 未初始化。"
+                "请确认 social_chat_core.start() 已被调用并传入 persona_name。"
+            )
+        return self._persona_name
+
     # ============================================================
     # 对外接口
     # ============================================================
@@ -89,12 +106,15 @@ class SocialChatCore:
         self,
         purpose: str,
         working_session_id: str,
+        persona_name: str = "",
     ) -> Dict[str, Any]:
         """启动一次 social_chat 委托。
 
         Args:
             purpose: 完整任务书（PFCA 的 task_info 直传，不再有前置商讨阶段）
             working_session_id: 工作会话 ID（消息实际发出地）
+            persona_name: 本段社交使用的人格名（缺省 normal），
+                由 PFCA social_chat_agent 工具入参透传。
 
         Returns:
             {
@@ -117,6 +137,9 @@ class SocialChatCore:
                 f"SocialChatCore._master_session_id 派生异常: {self._master_session_id!r}"
             )
         self._working_session_id = working_session_id.strip()
+        # 人格：工具入参显式指定，缺省 normal；由 input_manager 在首条消息注入内核。
+        from brain.base.persona.persona_registry import DEFAULT_PERSONA_MODE
+        self._persona_name = (persona_name or "").strip() or DEFAULT_PERSONA_MODE
         self._stop_requested = False
         self._transfer_summary = ""
         self._start_time = time.time()

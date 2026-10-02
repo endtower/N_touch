@@ -53,7 +53,12 @@ class MemoryDatabase:
                 # SQLITE_LOCKED "database table is locked"
                 cur = await self._conn.execute("PRAGMA journal_mode=WAL")
                 await cur.fetchall()
+                # 并发写等待：web_only 与完整版可能同时读写同一库，
+                # 让短暂锁竞争等待而非立即抛 "database is locked"
+                cur = await self._conn.execute("PRAGMA busy_timeout=5000")
+                await cur.fetchall()
                 await self._create_tables()
+                await self._migrate_tasks_table()
             except Exception as e:
                 # 失败时关闭并清空连接，防止半初始化连接残留
                 # （aiosqlite 工作线程会挂住进程退出，且下次调用会误跳过建表）
@@ -110,15 +115,21 @@ class MemoryDatabase:
             -- 旧事件表（已废弃，任务系统替代；启动时彻底删除旧数据）
             DROP TABLE IF EXISTS events;
 
-            -- 任务表（独立；阶段进展以概况文本承载，不落结构化列）
+            -- 任务表（独立）
+            -- 2026-10-01 改造：summary 单列拆为四个独立语义列——
+            -- brief（简要总结：前因与目的）/ conclusion（已获取的汇报结论）/
+            -- stage（当前阶段：还需要做什么）/ notes（任务笔记）。
+            -- 列独立承载语义，不再靠「首行当前阶段 + 平铺笔记」的文本约定拼接。
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY,
                 title TEXT DEFAULT '',
                 status TEXT DEFAULT 'active',
-                summary TEXT DEFAULT '',
+                brief TEXT DEFAULT '',
+                conclusion TEXT DEFAULT '',
+                stage TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
                 next_occurrence TEXT DEFAULT '',
-                summary_vector BLOB,
-                is_vectorized INTEGER DEFAULT 0,
+                deadline TEXT DEFAULT '',
                 start_time TEXT DEFAULT '',
                 end_time TEXT DEFAULT '',
                 updated_at TEXT DEFAULT ''
@@ -126,11 +137,14 @@ class MemoryDatabase:
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 
             -- 经验表（独立，话术专用：category 固定 'speech'）
+            -- 2026-10-01 新增 persona 列：人格绑定标签（''=全局通用）。
+            -- 绑定某人格的经验仅在以该人格进行的会话中自动召回。
             CREATE TABLE IF NOT EXISTS bequests (
                 bequest_id TEXT PRIMARY KEY,
                 title TEXT DEFAULT '',
                 summary TEXT DEFAULT '',
                 category TEXT DEFAULT 'speech',
+                persona TEXT DEFAULT '',
                 title_vector BLOB,
                 is_vectorized INTEGER DEFAULT 0,
                 start_time TEXT DEFAULT '',
@@ -154,6 +168,88 @@ class MemoryDatabase:
             """
         )
         await self._conn.commit()
+        await self._migrate_tasks_table()
+        await self._migrate_bequests_table()
+
+    async def _migrate_bequests_table(self) -> None:
+        """经验表结构迁移（2026-10-01：新增 persona 人格绑定标签列）。
+
+        `CREATE TABLE IF NOT EXISTS` 不会改动已存在的旧表，旧库补一列
+        （ALTER TABLE ADD COLUMN，存量行默认 ''＝全局通用）。
+        幂等：已含 persona 列时直接返回（零开销）。迁移失败直接上抛崩溃阻断。
+        """
+        assert self._conn is not None
+        cur = await self._conn.execute("PRAGMA table_info(bequests)")
+        cols = {r["name"] for r in await cur.fetchall()}
+        if "persona" in cols:
+            return
+
+        logger.info("bequests 表结构迁移：新增 persona 人格绑定标签列")
+        await self._conn.execute(
+            "ALTER TABLE bequests ADD COLUMN persona TEXT DEFAULT ''"
+        )
+        await self._conn.commit()
+
+    async def _migrate_tasks_table(self) -> None:
+        """任务表结构迁移（2026-10-01 二次收敛：summary 拆四列）。
+
+        `CREATE TABLE IF NOT EXISTS` 不会改动已存在的旧表，故旧库走一次重建：
+        重命名 → 建新表 → 逐行搬迁（旧的 summary 数据整体丢弃，四个新列一律置空，
+        待 quest agent 下次推进时按新语义重新填写）→ 删旧表 → 重建索引。
+
+        幂等：新表已含 brief 列时直接返回（零开销）。
+        迁移失败直接上抛崩溃阻断，不吞错。
+        """
+        assert self._conn is not None
+        cur = await self._conn.execute("PRAGMA table_info(tasks)")
+        cols = {r["name"] for r in await cur.fetchall()}
+        if "brief" in cols:
+            return
+
+        logger.info("tasks 表结构迁移：summary 拆为 brief/conclusion/stage/notes 四列")
+        cur = await self._conn.execute(
+            "SELECT task_id, title, status, next_occurrence, deadline, "
+            "start_time, end_time, updated_at FROM tasks"
+        )
+        rows = await cur.fetchall()
+
+        await self._conn.execute("ALTER TABLE tasks RENAME TO tasks_old")
+        await self._conn.execute(
+            """
+            CREATE TABLE tasks (
+                task_id TEXT PRIMARY KEY,
+                title TEXT DEFAULT '',
+                status TEXT DEFAULT 'active',
+                brief TEXT DEFAULT '',
+                conclusion TEXT DEFAULT '',
+                stage TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
+                next_occurrence TEXT DEFAULT '',
+                deadline TEXT DEFAULT '',
+                start_time TEXT DEFAULT '',
+                end_time TEXT DEFAULT '',
+                updated_at TEXT DEFAULT ''
+            )
+            """
+        )
+        for r in rows:
+            await self._conn.execute(
+                "INSERT INTO tasks (task_id, title, status, brief, conclusion, "
+                "stage, notes, next_occurrence, deadline, start_time, end_time, "
+                "updated_at) VALUES (?, ?, ?, '', '', '', '', ?, ?, ?, ?, ?)",
+                (
+                    r["task_id"], r["title"], r["status"],
+                    r["next_occurrence"] or "", r["deadline"] or "",
+                    r["start_time"] or "", r["end_time"] or "",
+                    r["updated_at"] or "",
+                ),
+            )
+        await self._conn.execute("DROP TABLE tasks_old")
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
+        )
+        await self._conn.commit()
+        logger.info(f"tasks 表结构迁移完成，搬迁 {len(rows)} 条（旧概况已丢弃）")
 
     async def close(self) -> None:
         """关闭数据库连接。"""

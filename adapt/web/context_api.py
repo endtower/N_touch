@@ -56,10 +56,10 @@ _PREFIX_TO_KIND = {
     "social_chat": "social_chat",
     "quest": "quest",
     "persona": "persona",
-    # 人格粒度动态前缀（PersonaAgent.history_prefix = persona_{persona_id}）
+    # 人格粒度动态前缀（PersonaAgent.history_prefix = persona_{persona_name}）
     "persona_assistant": "persona_assistant",
     "persona_normal": "persona_normal",
-    "persona_attack": "persona_attack",
+    "persona_task": "persona_task",
     "vision": "vision",
     "bequest": "bequest",
     "memory": "memory",
@@ -120,7 +120,7 @@ def ensure_legacy_migrated() -> None:
     get_proactive_history_manager()
     get_quest_history_manager()
     # light agent 系：实例化以触发 legacy 迁移（persona 为人格粒度动态前缀）
-    for prefix in ("persona", "persona_assistant", "persona_normal", "persona_attack",
+    for prefix in ("persona", "persona_assistant", "persona_normal", "persona_task",
                    "vision", "bequest", "memory", "light_agent"):
         get_light_history_manager(prefix)
 

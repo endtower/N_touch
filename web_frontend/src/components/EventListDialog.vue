@@ -42,9 +42,13 @@ const refreshTimer = ref<number | null>(null)
 interface EditForm {
   task_id: string
   title: string
-  summary: string
+  brief: string            // 简要总结 (前因与目的)
+  conclusion: string       // 已获取的、用于汇报的结论
+  stage: string            // 当前阶段 (还需要做什么)
+  notes: string            // 任务笔记
   status: Status
   next_occurrence: string
+  deadline: string         // ISO datetime; 最终汇报时间
   start_time: string       // ISO datetime; 允许编辑 (例如回填历史任务)
   updated_at: string       // ISO datetime; 允许编辑 (用户手动覆写)
   end_time: string         // 只读展示, 不提交
@@ -54,11 +58,11 @@ const editSaving = ref<Record<string, boolean>>({})
 // 时间字段的本地校验错误 (key = `${taskId}.${field}`)
 const editTimeErrors = ref<Record<string, string | null>>({})
 
-// 展开行的任务概况 → 分级笔记（随编辑表单实时解析）
+// 展开行的任务笔记 → 平铺行（随编辑表单实时解析）
 const parsedNotesByTask = computed<Record<string, TaskNotes>>(() => {
   const out: Record<string, TaskNotes> = {}
   for (const [id, form] of Object.entries(editForms.value)) {
-    out[id] = parseTaskNotes(form.summary)
+    out[id] = parseTaskNotes(form.notes)
   }
   return out
 })
@@ -90,7 +94,10 @@ const visibleEvents = computed<TaskInfo[]>(() => {
   if (!kw) return events.value
   return events.value.filter(e =>
     (e.title || '').toLowerCase().includes(kw) ||
-    (e.summary || '').toLowerCase().includes(kw) ||
+    (e.brief || '').toLowerCase().includes(kw) ||
+    (e.conclusion || '').toLowerCase().includes(kw) ||
+    (e.stage || '').toLowerCase().includes(kw) ||
+    (e.notes || '').toLowerCase().includes(kw) ||
     (e.status || '').toLowerCase().includes(kw),
   )
 })
@@ -181,29 +188,23 @@ function timeShort(s?: string | null) {
   return s.length >= 16 ? s.slice(0, 16).replace('T', ' ') : s
 }
 
-// ===== 任务概况 → 分级笔记结构化解析 =====
-// 概况格式约定（brain/hc/database/task.py）：首行「当前阶段：<一句话>」，
-// 之后每行一条笔记、以「- 」开头、缩进两个空格表示从属层级。
+// ===== 任务笔记 → 平铺行结构化解析 =====
+// notes 列为低权限记录通道（brain/hc/database/task.py）：每行一条笔记，
+// 以「- 」开头视为 bullet；其余按普通段落展示（不再含「当前阶段」首行约定，
+// 阶段已独立为 stage 列）。
 interface TaskNoteLine {
   indent: number    // 层级（2 空格 = 1 层）
   text: string
   isBullet: boolean // 是否为「- 」笔记行；非 bullet 行按普通段落展示
 }
 interface TaskNotes {
-  stage: string
   lines: TaskNoteLine[]
 }
 
-function parseTaskNotes(summary: string): TaskNotes {
-  const stageLines: string[] = []
+function parseTaskNotes(notes: string): TaskNotes {
   const lines: TaskNoteLine[] = []
-  for (const raw of (summary || '').split('\n')) {
+  for (const raw of (notes || '').split('\n')) {
     if (!raw.trim()) continue
-    const stageMatch = raw.match(/^\s*当前阶段[:：]\s*(.+)$/)
-    if (stageMatch) {
-      stageLines.push(stageMatch[1].trim())
-      continue
-    }
     const leading = (raw.match(/^\s*/) || [''])[0].length
     const text = raw.trim()
     lines.push({
@@ -212,7 +213,7 @@ function parseTaskNotes(summary: string): TaskNotes {
       isBullet: text.startsWith('- '),
     })
   }
-  return { stage: stageLines.join(' / '), lines }
+  return { lines }
 }
 
 function close() { emit('update:visible', false) }
@@ -229,9 +230,13 @@ function toggleExpand(taskId: string) {
         editForms.value[taskId] = {
           task_id: ev.task_id,
           title: ev.title ?? '',
-          summary: ev.summary ?? '',
+          brief: ev.brief ?? '',
+          conclusion: ev.conclusion ?? '',
+          stage: ev.stage ?? '',
+          notes: ev.notes ?? '',
           status: (ev.status as Status) ?? 'active',
           next_occurrence: ev.next_occurrence ?? '',
+          deadline: ev.deadline ?? '',
           start_time: ev.start_time ?? '',
           updated_at: ev.updated_at ?? '',
           end_time: ev.end_time ?? '',
@@ -254,7 +259,7 @@ async function saveEdit(taskId: string) {
   }
 
   // —— 时间字段本地校验 ——
-  const timeFields: Array<keyof EditForm> = ['next_occurrence', 'start_time', 'updated_at']
+  const timeFields: Array<keyof EditForm> = ['next_occurrence', 'deadline', 'start_time', 'updated_at']
   for (const f of timeFields) {
     const err = validateIsoDatetime(form[f] as string)
     editTimeErrors.value[`${taskId}.${f}`] = err
@@ -269,10 +274,14 @@ async function saveEdit(taskId: string) {
     const body: Record<string, unknown> = {
       title: form.title.trim(),
       status: form.status,
-      summary: form.summary,
+      brief: form.brief,
+      conclusion: form.conclusion,
+      stage: form.stage,
+      notes: form.notes,
     }
     // 时间字段: 空字符串传 null 让后端清空 (updated_at 仍允许清空, 但通常不应清空)
     body.next_occurrence = form.next_occurrence.trim() ? form.next_occurrence.trim() : null
+    body.deadline = form.deadline.trim() ? form.deadline.trim() : null
     body.start_time = form.start_time.trim() ? form.start_time.trim() : null
     body.updated_at = form.updated_at.trim() ? form.updated_at.trim() : null
 
@@ -301,9 +310,13 @@ async function saveEdit(taskId: string) {
       editForms.value[taskId] = {
         task_id: updated.task_id,
         title: updated.title ?? '',
-        summary: updated.summary ?? '',
+        brief: updated.brief ?? '',
+        conclusion: updated.conclusion ?? '',
+        stage: updated.stage ?? '',
+        notes: updated.notes ?? '',
         status: (updated.status as Status) ?? 'active',
         next_occurrence: updated.next_occurrence ?? '',
+        deadline: updated.deadline ?? '',
         start_time: updated.start_time ?? '',
         updated_at: updated.updated_at ?? '',
         end_time: updated.end_time ?? '',
@@ -324,33 +337,49 @@ async function saveEdit(taskId: string) {
 // 创建表单 (单实例, 不需要按 task_id 分)
 interface CreateForm {
   title: string
-  summary: string
+  brief: string               // 简要总结 (前因与目的)
+  conclusion: string          // 已获取的、用于汇报的结论
+  stage: string               // 当前阶段 (还需要做什么)
+  notes: string               // 任务笔记
   status: Status
   next_occurrence: string
+  deadline: string            // 可空: 最终汇报时间
   start_time: string          // 可空: 留空 = 用 now (后端默认); 填了 = 历史回填
 }
 const createDialogVisible = ref(false)
 const creating = ref(false)
 const createForm = reactive<CreateForm>({
   title: '',
-  summary: '',
+  brief: '',
+  conclusion: '',
+  stage: '',
+  notes: '',
   status: 'active',
   next_occurrence: '',
+  deadline: '',
   start_time: '',
 })
 const createTimeErrors = reactive<Record<keyof CreateForm, string | null>>({
   title: null,
-  summary: null,
+  brief: null,
+  conclusion: null,
+  stage: null,
+  notes: null,
   status: null,
   next_occurrence: null,
+  deadline: null,
   start_time: null,
 })
 
 function resetCreateForm() {
   createForm.title = ''
-  createForm.summary = ''
+  createForm.brief = ''
+  createForm.conclusion = ''
+  createForm.stage = ''
+  createForm.notes = ''
   createForm.status = 'active'
   createForm.next_occurrence = ''
+  createForm.deadline = ''
   createForm.start_time = ''
   Object.keys(createTimeErrors).forEach(k => { (createTimeErrors as any)[k] = null })
 }
@@ -363,11 +392,12 @@ function openCreateDialog() {
 async function submitCreate() {
   // —— 校验 ——
   createTimeErrors.title = createForm.title.trim() ? null : 'title 必填'
-  createTimeErrors.summary = null  // summary 允许空 (后端也会接受空串)
+  createTimeErrors.brief = null  // brief 允许空 (后端也会接受空串)
   createTimeErrors.status = _STATUS_VALUES.includes(createForm.status) ? null : 'status 非法'
   createTimeErrors.next_occurrence = validateIsoDatetime(createForm.next_occurrence)
+  createTimeErrors.deadline = validateIsoDatetime(createForm.deadline)
   createTimeErrors.start_time = validateIsoDatetime(createForm.start_time)
-  if (createTimeErrors.title || createTimeErrors.next_occurrence || createTimeErrors.start_time || createTimeErrors.status) {
+  if (createTimeErrors.title || createTimeErrors.next_occurrence || createTimeErrors.deadline || createTimeErrors.start_time || createTimeErrors.status) {
     ElMessage.warning('请修正表单中的错误')
     return
   }
@@ -377,9 +407,13 @@ async function submitCreate() {
     const body: Record<string, unknown> = {
       title: createForm.title.trim(),
       status: createForm.status,
-      summary: createForm.summary,
+      brief: createForm.brief,
+      conclusion: createForm.conclusion,
+      stage: createForm.stage,
+      notes: createForm.notes,
     }
     if (createForm.next_occurrence.trim()) body.next_occurrence = createForm.next_occurrence.trim()
+    if (createForm.deadline.trim()) body.deadline = createForm.deadline.trim()
     if (createForm.start_time.trim()) body.start_time = createForm.start_time.trim()
 
     const res = await fetch('/events', {
@@ -465,7 +499,7 @@ async function deleteEvent(ev: TaskInfo) {
           <el-input
             v-model="searchKeyword"
             size="small"
-            placeholder="搜索标题 / summary…"
+            placeholder="搜索标题 / 简要 / 结论 / 阶段 / 笔记…"
             clearable
             style="width: 220px;"
           >
@@ -570,8 +604,8 @@ async function deleteEvent(ev: TaskInfo) {
                 <td>
                   <div class="evlist-title-cell">
                     <span class="evlist-title-text">{{ ev.title || '—' }}</span>
-                    <span v-if="ev.summary" class="evlist-summary-hint">
-                      {{ ev.summary.slice(0, 80) }}{{ ev.summary.length > 80 ? '…' : '' }}
+                    <span v-if="ev.brief" class="evlist-summary-hint">
+                      {{ ev.brief.slice(0, 80) }}{{ ev.brief.length > 80 ? '…' : '' }}
                     </span>
                   </div>
                 </td>
@@ -621,16 +655,24 @@ async function deleteEvent(ev: TaskInfo) {
               <tr v-if="expandedRows.includes(ev.task_id)" class="evlist-detail-row">
                 <td colspan="6">
                   <div class="evlist-detail" v-if="editForms[ev.task_id]" @click.stop>
-                    <!-- 任务笔记：结构化只读视图（当前阶段 + 「- 」分级笔记，缩进即层级） -->
-                    <div class="evlist-notes" v-if="editForms[ev.task_id]!.summary.trim()">
+                    <!-- 任务概览：简要 / 已获结论 / 当前阶段 / 任务笔记（结构化只读视图） -->
+                    <div class="evlist-notes">
                       <div class="evlist-notes-head">
-                        <span class="evlist-notes-title">📋 任务笔记</span>
-                        <span class="evlist-notes-sub">概况即笔记 · 首行「当前阶段」+「- 」分级笔记（缩进表从属层级）</span>
+                        <span class="evlist-notes-title">📋 任务概览</span>
+                        <span class="evlist-notes-sub">简要 · 已获结论 · 当前阶段 · 任务笔记</span>
                       </div>
                       <div class="evlist-notes-body">
-                        <div v-if="parsedNotesByTask[ev.task_id]!.stage" class="evlist-notes-stage">
+                        <div class="evlist-notes-field">
+                          <span class="evlist-notes-field-tag">简要</span>
+                          <span class="evlist-notes-field-text">{{ editForms[ev.task_id]!.brief || '（无）' }}</span>
+                        </div>
+                        <div class="evlist-notes-field">
+                          <span class="evlist-notes-field-tag">已获结论</span>
+                          <span class="evlist-notes-field-text">{{ editForms[ev.task_id]!.conclusion || '（无）' }}</span>
+                        </div>
+                        <div v-if="editForms[ev.task_id]!.stage" class="evlist-notes-stage">
                           <span class="evlist-notes-stage-tag">当前阶段</span>
-                          <span class="evlist-notes-stage-text">{{ parsedNotesByTask[ev.task_id]!.stage }}</span>
+                          <span class="evlist-notes-stage-text">{{ editForms[ev.task_id]!.stage }}</span>
                         </div>
                         <template v-if="parsedNotesByTask[ev.task_id]!.lines.length">
                           <div
@@ -644,25 +686,47 @@ async function deleteEvent(ev: TaskInfo) {
                             <span class="evlist-note-text">{{ n.text }}</span>
                           </div>
                         </template>
-                        <div v-else class="evlist-notes-empty">（概况没有「- 」笔记行）</div>
+                        <div v-else class="evlist-notes-empty">（任务笔记为空）</div>
                       </div>
                     </div>
 
                     <el-form label-position="top" size="default" class="evlist-edit-form">
-                      <!-- 左: title + summary -->
+                      <!-- 左: title + brief/conclusion/stage/notes -->
                       <div class="evlist-edit-left">
-                        <el-form-item label="title" required>
+                        <el-form-item label="title / 标题" required>
                           <el-input
                             v-model="editForms[ev.task_id]!.title"
                             placeholder="任务标题"
                           />
                         </el-form-item>
-                        <el-form-item label="summary / 任务概况 (首行「当前阶段：…」+「- 」分级笔记)">
+                        <el-form-item label="brief / 简要总结 (≤50 字; 说明任务前因与目的)">
                           <el-input
-                            v-model="editForms[ev.task_id]!.summary"
+                            v-model="editForms[ev.task_id]!.brief"
+                            type="textarea"
+                            :rows="2"
+                            placeholder="一句话说明这条任务从哪来、要达成什么"
+                          />
+                        </el-form-item>
+                        <el-form-item label="conclusion / 已获结论 (≤100 字; 可直接用于汇报)">
+                          <el-input
+                            v-model="editForms[ev.task_id]!.conclusion"
+                            type="textarea"
+                            :rows="3"
+                            placeholder="当前已获取、可直接用于汇报的结论"
+                          />
+                        </el-form-item>
+                        <el-form-item label="stage / 当前阶段 (还需要做什么)">
+                          <el-input
+                            v-model="editForms[ev.task_id]!.stage"
+                            placeholder="一句话刚性目标"
+                          />
+                        </el-form-item>
+                        <el-form-item label="notes / 任务笔记 (每行一条; 推进时由 quest 整列清理重填)">
+                          <el-input
+                            v-model="editForms[ev.task_id]!.notes"
                             type="textarea"
                             :rows="8"
-                            placeholder="任务概述"
+                            placeholder="低权限记录通道; 每行一条笔记, 可用「- 」作 bullet"
                           />
                         </el-form-item>
                         <el-form-item label="task_id (只读)">
@@ -698,11 +762,21 @@ async function deleteEvent(ev: TaskInfo) {
                         </el-form-item>
 
                         <el-form-item
-                          label="next_occurrence (下次发生; 可空)"
+                          label="next_occurrence (下次处理时间; 可空)"
                           :error="editTimeErrors[`${ev.task_id}.next_occurrence`] ?? undefined"
                         >
                           <el-input
                             v-model="editForms[ev.task_id]!.next_occurrence"
+                            placeholder="2026-01-01T12:00:00"
+                          />
+                        </el-form-item>
+
+                        <el-form-item
+                          label="deadline (最终汇报时间; 可空)"
+                          :error="editTimeErrors[`${ev.task_id}.deadline`] ?? undefined"
+                        >
+                          <el-input
+                            v-model="editForms[ev.task_id]!.deadline"
                             placeholder="2026-01-01T12:00:00"
                           />
                         </el-form-item>
@@ -739,7 +813,7 @@ async function deleteEvent(ev: TaskInfo) {
 
                     <div class="evlist-edit-actions">
                       <span class="evlist-edit-hint">
-                        💡 <code>title</code> 改名走原生 update; 改 <code>summary</code> 直接覆盖概况（任务不落向量, 无需重生成）; 改 <code>status=completed</code> 自动设 <code>end_time</code>; 改 <code>start_time</code> / <code>updated_at</code> 会做 ISO 格式校验, 不合法不会提交。
+                        💡 <code>title</code> 改名走原生 update; <code>brief</code> / <code>conclusion</code> / <code>stage</code> / <code>notes</code> 直接覆盖对应列（任务不落向量, 无需重生成）; 改 <code>status=completed</code> 自动设 <code>end_time</code>; 改 <code>next_occurrence</code> / <code>deadline</code> / <code>start_time</code> / <code>updated_at</code> 会做 ISO 格式校验, 不合法不会提交。
                       </span>
                       <div style="display: flex; gap: 8px;">
                         <el-button @click="discardEdit(ev.task_id)">还原</el-button>
@@ -780,7 +854,7 @@ async function deleteEvent(ev: TaskInfo) {
       </template>
 
       <el-form label-position="top" size="default" class="evlist-create-form">
-        <el-form-item label="title" required :error="createTimeErrors.title ?? undefined">
+        <el-form-item label="title / 标题" required :error="createTimeErrors.title ?? undefined">
           <el-input v-model="createForm.title" placeholder="任务标题" maxlength="120" show-word-limit />
         </el-form-item>
 
@@ -806,21 +880,50 @@ async function deleteEvent(ev: TaskInfo) {
           </el-select>
         </el-form-item>
 
-        <el-form-item label="summary / 任务概况 (首行「当前阶段：…」+「- 」分级笔记)">
+        <el-form-item label="brief / 简要总结 (≤50 字; 说明任务前因与目的)">
           <el-input
-            v-model="createForm.summary"
+            v-model="createForm.brief"
             type="textarea"
-            :rows="5"
-            placeholder="任务概述 (可空)"
+            :rows="2"
+            placeholder="一句话说明这条任务从哪来、要达成什么 (可空)"
+          />
+        </el-form-item>
+
+        <el-form-item label="conclusion / 已获结论 (≤100 字; 可直接用于汇报)">
+          <el-input
+            v-model="createForm.conclusion"
+            type="textarea"
+            :rows="2"
+            placeholder="当前已获取、可直接用于汇报的结论 (可空)"
+          />
+        </el-form-item>
+
+        <el-form-item label="stage / 当前阶段 (还需要做什么)">
+          <el-input v-model="createForm.stage" placeholder="一句话刚性目标 (可空)" />
+        </el-form-item>
+
+        <el-form-item label="notes / 任务笔记 (每行一条; 可空)">
+          <el-input
+            v-model="createForm.notes"
+            type="textarea"
+            :rows="4"
+            placeholder="低权限记录通道; 每行一条笔记, 可用「- 」作 bullet (可空)"
           />
         </el-form-item>
 
         <div class="evlist-create-grid">
           <el-form-item
-            label="next_occurrence (下次发生; 可空)"
+            label="next_occurrence (下次处理时间; 可空)"
             :error="createTimeErrors.next_occurrence ?? undefined"
           >
             <el-input v-model="createForm.next_occurrence" placeholder="2026-01-01T12:00:00" />
+          </el-form-item>
+
+          <el-form-item
+            label="deadline (最终汇报时间; 可空)"
+            :error="createTimeErrors.deadline ?? undefined"
+          >
+            <el-input v-model="createForm.deadline" placeholder="2026-01-01T12:00:00" />
           </el-form-item>
 
           <el-form-item
@@ -1099,6 +1202,33 @@ async function deleteEvent(ev: TaskInfo) {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+.evlist-notes-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+}
+.evlist-notes-field-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-2);
+  background: var(--bg-surface);
+  padding: 1px 7px;
+  border-radius: 999px;
+  letter-spacing: 0.03em;
+  margin-top: 1px;
+}
+.evlist-notes-field-text {
+  font-size: 12.5px;
+  color: var(--text-1);
+  line-height: 1.5;
+  word-break: break-word;
 }
 .evlist-notes-stage {
   display: flex;

@@ -4,22 +4,23 @@
 任务系统收口模块（2026-09-15 由 tool_event.py 事件系统重做而来）。
 
 2026-09-17 权限分区调整：create_task / update_task_status 属**裁决级**工具
-（quest agent 独占：创建任务、概况重写/阶段推进、完结），已私有化回
+（quest agent 独占：创建任务、记录重写/阶段推进、完结），已私有化回
 QuestAgent 本体，不再作为 common way——通用层不应持有裁决级写权限。
 
 本模块只收口**通用级**工具：
-- append_task_log：向任务笔记末尾添加一条一级笔记（记录级，低权限：
-  只添加，不改阶段、不完结；笔记的分级整理由 quest agent 重写概况时进行）
+- append_task_log：向任务笔记（notes 列）末尾追加一条记录（记录级，低权限：
+  只添加，不改阶段、不完结；笔记的整理——清空旧笔记并填入一条简洁新笔记——
+  由 quest agent 在阶段推进时进行）
 - query_task_status：查询任务状态——不传标题返回所有未完成任务列表；
   传入具体标题返回该任务细节
 - quest_agent：联系 quest agent 的入口通道（2026-09-18 新增）——转交一段内容，
   由 quest agent 多轮裁决处理（审批推进 / 登记任务 / 修订任务）。本工具只负责
-  转交，不做任何任务写操作：创建任务、概况重写、阶段推进、完结等裁决级写权限
+  转交，不做任何任务写操作：创建任务、记录重写、阶段推进、完结等裁决级写权限
   仍独占于 quest agent 本体，不违反上面的权限分区
 
-阶段拆解与推进裁决（quest_agent 的 WHAT/WHETHER 职责）以任务概况文本 +
-QuestAgent 上下文承载，不落结构化列、不进工具参数；核实任务实际进展
-由 QuestAgent 通过 ToolSocial（query_history / query_address_book）只读查询。
+阶段拆解与推进裁决（quest_agent 的 WHAT/WHETHER 职责）以任务记录的独立字段
+（brief / conclusion / stage / notes）+ QuestAgent 上下文承载；核实任务实际
+进展由 QuestAgent 通过 ToolSocial（query_history / query_address_book）只读查询。
 
 全异步：底层走 TaskOperations（纯异步），本模块不引入同步 IO；
 失败直接上抛崩溃阻断（硬约定），不包 async_handle_errors 吞错。
@@ -70,10 +71,9 @@ class ToolTask:
             "function": {
                 "name": "append_task_log",
                 "description": (
-                    "给某个进行中的任务添加一条笔记"
-                    "（如：学到/观察到的经验、与主人沟通的结果、拟定的草稿、下一步安排）。\n"
-                    "笔记将作为一级条目追加到任务概况末尾，等待 quest agent 整理归位；"
-                    "只添加笔记，不会改变任务阶段、不会完结任务。"
+                    "给某个进行中的任务追加一条笔记"
+                    "（如：学到的经验、沟通结果、拟定的草稿、下一步安排）。\n"
+                    "只追加，不改阶段、不完结；笔记由 quest agent 在推进时统一整理。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -217,7 +217,7 @@ class ToolTask:
     async def quest_agent(cls, content: str) -> str:
         """直接联系 quest agent：转交一段内容，由其多轮 LLM 决策后给出裁决性结论。
 
-        本工具只是联系通道，不做任何任务写操作；创建任务、概况重写、阶段推进、
+        本工具只是联系通道，不做任何任务写操作；创建任务、记录重写、阶段推进、
         完结等裁决级写权限仍独占于 quest agent 本体（由其在 run() 内经私有工具
         执行）。quest agent 会独立判断是否遵从转交的诉求，不盲从（可能驳回）。
 

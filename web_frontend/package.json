@@ -11,9 +11,6 @@
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
     "@tanstack/vue-virtual": "^3.13.36",
-    "@types/cytoscape": "^3.21.9",
-    "axios": "^1.7.7",
-    "cytoscape": "^3.34.0",
     "element-plus": "^2.8.4",
     "vue": "^3.5.10"
   },

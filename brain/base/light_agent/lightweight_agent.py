@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional, Callable
 
 from utils.logger import get_logger
-from utils.llm_client_manager import extract_reasoning
+from utils.llm_client_manager import extract_reasoning, agent_scope
 
 logger = get_logger('lightweight_agent', "DEBUG")
 
@@ -33,6 +33,9 @@ class LightweightAgent(ABC):
     # 链外写入 unlinked/{prefix}.json，供前端 /context 按链查看本 agent 的完整上下文
     # （system prompt + user 消息 + 各轮思考/工具调用与结果 + 最终结论）。
     history_prefix: str = "light_agent"
+
+    # token 统计归集用的 agent 身份；None 时回退为类名
+    agent_name: Optional[str] = None
 
     def __init__(self):
         self.tool_functions = self._initialize_tool_functions()
@@ -83,6 +86,16 @@ class LightweightAgent(ABC):
 
     async def _llm_loop(self, processed_input: Any, *, level: str = "flash",
                         max_rounds: int = 10) -> Dict[str, Any]:
+        """LLM 循环入口：声明本 agent 身份后委托 `_llm_loop_impl`。
+
+        agent_scope 在此单点包裹整个循环（含循环内经 asyncio.gather 派生的工具
+        子任务），使本 agent 的 LLM 调用在 token 统计中归到自身而非外层会话。
+        """
+        with agent_scope(self.agent_name or type(self).__name__):
+            return await self._llm_loop_impl(processed_input, level=level, max_rounds=max_rounds)
+
+    async def _llm_loop_impl(self, processed_input: Any, *, level: str = "flash",
+                             max_rounds: int = 10) -> Dict[str, Any]:
         """LLM 循环：正式循环主体。
 
         参考 heavy_session.process_cycle 的循环骨架，适配无状态场景：

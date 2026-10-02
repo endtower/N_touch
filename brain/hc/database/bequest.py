@@ -7,9 +7,13 @@
 - 'decision'：决策经验（面对某种情景的广泛思路）。
 写入与检索均按 category 定向：create/search/定位/删除支持 category 参数，
 缺省 'speech' 保持存量调用方行为不变。
+
+persona 列（2026-10-01）：人格绑定标签，''=全局通用，由反思经
+upsert_bequest 的 persona 参数打标（观察期：仅落库，检索侧暂不消费）。
 """
 
 from datetime import datetime
+import re
 from typing import List, Dict, Optional, Tuple
 
 from .core import get_memory_db, serialize_vector, deserialize_vector, cosine_similarity
@@ -38,8 +42,54 @@ class BequestOperations:
         row = await cur.fetchone()
         return row["bequest_id"] if row else None
 
-    async def create_bequest(self, title: str, summary: str, category: str = "speech") -> str:
-        """创建经验（category 缺省 'speech'，决策经验传 'decision'）。"""
+    async def search_bequests_by_title(
+        self, query: str, category: str = "speech", limit: int = 3
+    ) -> List[Dict]:
+        """按标题比对经验（不生成向量，开销远小于向量检索）。
+
+        命中规则：标题与查询完全相同者直接胜出（只返回该条）；否则按查询
+        拆分出的关键词（空白与常见标点切分）逐个比对标题，命中关键词越多
+        排名越靠前，同分取标题更短者。无任何关键词命中则返回空列表。
+        """
+        if not query or not query.strip():
+            raise ValueError("查询文本不能为空")
+
+        conn = await self.db._ensure_connection()
+        cur = await conn.execute(
+            "SELECT bequest_id, title, summary FROM bequests WHERE category=?",
+            (category,),
+        )
+        rows = await cur.fetchall()
+
+        keyword = query.strip()
+        exact = [r for r in rows if r["title"] == keyword]
+        if exact:
+            rows = exact
+            scored = [(len(keyword), r) for r in rows]
+        else:
+            tokens = [
+                t for t in re.split(r"[\s，,。.；;、/|:：!！?？~～\-]+", keyword) if t
+            ]
+            scored = []
+            for r in rows:
+                hits = sum(1 for t in tokens if t in r["title"])
+                if hits:
+                    scored.append((hits, r))
+            scored.sort(key=lambda item: (-item[0], len(item[1]["title"])))
+
+        return [
+            {
+                "bequest_id": r["bequest_id"],
+                "title": r["title"],
+                "summary": r["summary"],
+            }
+            for _, r in scored[:limit]
+        ]
+
+    async def create_bequest(
+        self, title: str, summary: str, category: str = "speech", persona: str = ""
+    ) -> str:
+        """创建经验（category 缺省 'speech'；persona 绑定人格标签，''=全局通用）。"""
         current_time = datetime.now().isoformat()
         bequest_id = generate_timestamp_id("Bequest")
 
@@ -48,10 +98,10 @@ class BequestOperations:
 
         conn = await self.db._ensure_connection()
         await conn.execute(
-            """INSERT INTO bequests (bequest_id, title, summary, category,
+            """INSERT INTO bequests (bequest_id, title, summary, category, persona,
                title_vector, is_vectorized, start_time, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (bequest_id, title, summary, category,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (bequest_id, title, summary, category, persona,
              serialize_vector(title_vector), 1 if title_vector else 0,
              current_time, current_time),
         )
@@ -65,7 +115,7 @@ class BequestOperations:
             return False
 
         current_time = datetime.now().isoformat()
-        allowed_fields = ['title', 'summary']
+        allowed_fields = ['title', 'summary', 'persona']
 
         set_clauses = ["updated_at=?"]
         params = [current_time]
@@ -169,6 +219,7 @@ class BequestOperations:
         按 category 定向检索（speech/decision 互不串扰），缺省 'speech'
         保持存量调用方行为不变。
         返回分数供调用方落日志与后续阈值调参。
+        注：persona 标签目前只落库（反思打标签观察期），检索侧暂不按其过滤。
         """
         if not query_text:
             raise ValueError("查询文本不能为空")

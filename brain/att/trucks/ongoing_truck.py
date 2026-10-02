@@ -114,24 +114,45 @@ class OngoingTruck(BaseTruck):
             if not task:
                 continue
 
-            next_occurrence = task.get("next_occurrence")
-            if not next_occurrence:
+            # 触发时间取「下次处理时间」与「最终汇报时间」中更早者：
+            # 到了最终汇报时间仍未达标，也要唤醒收尾（硬化点 A），与 task_truck 一致。
+            due_time = self._resolve_due_time(task)
+            if due_time is None:
                 continue
 
-            next_time = datetime.fromisoformat(next_occurrence.replace('Z', '+00:00'))
-
             # 只触发已到或超过触发时间的任务
-            if current_time >= next_time:
-                if triggered_task is None or next_time < earliest_time:
+            if current_time >= due_time:
+                if triggered_task is None or due_time < earliest_time:
                     triggered_task = task
-                    earliest_time = next_time
+                    earliest_time = due_time
 
         if triggered_task:
-            logger.info(f"任务触发: {triggered_task.get('title')} (next_occurrence: {triggered_task.get('next_occurrence')})")
+            logger.info(
+                f"任务触发: {triggered_task.get('title')} "
+                f"(next_occurrence: {triggered_task.get('next_occurrence')}, "
+                f"deadline: {triggered_task.get('deadline')})"
+            )
             return [triggered_task]
 
         logger.debug("进行中任务检查完成，无触发任务")
         return []
+
+    @staticmethod
+    def _resolve_due_time(task: dict):
+        """解析任务的触发时间：取「下次处理时间」与「最终汇报时间」中更早的一个。
+
+        非 ISO 8601 的值（如「完结」/空串）视为未设置；两个都没有时返回 None。
+        """
+        candidates = []
+        for key in ("next_occurrence", "deadline"):
+            raw = task.get(key)
+            if not raw:
+                continue
+            try:
+                candidates.append(datetime.fromisoformat(raw.replace('Z', '+00:00')))
+            except (ValueError, AttributeError):
+                continue
+        return min(candidates) if candidates else None
 
     async def _get_task(self, task_ops, task_id):
         """获取单个任务详情
@@ -143,8 +164,12 @@ class OngoingTruck(BaseTruck):
         return {
             "task_id": rec.get("task_id"),
             "title": rec.get("title"),
-            "summary": rec.get("summary"),
+            "brief": rec.get("brief"),
+            "conclusion": rec.get("conclusion"),
+            "stage": rec.get("stage"),
+            "notes": rec.get("notes"),
             "next_occurrence": rec.get("next_occurrence"),
+            "deadline": rec.get("deadline"),
             "start_time": rec.get("start_time")
         }
 

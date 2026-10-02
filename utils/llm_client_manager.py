@@ -12,17 +12,20 @@ LLM客户端管理器
 模型名与思考开关统一从 config/llm_settings.py 的 LLMSettings 注册表解析。
 """
 
+import asyncio
 import inspect
 import json
+import os
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import datetime
 from pathlib import Path
 from pickle import TRUE
 import openai
 from typing import Dict, Any, List, Optional
 from utils.logger import get_logger
-from config.llm_settings import LLMConfig, LLMSettings
+from config.llm_settings import LLMConfig, LLMSettings, resolve_provider_label
 
 logger = get_logger('LLMClientManager', log_level='INFO')
 
@@ -80,9 +83,27 @@ def token_budget_scope(budget: Optional[TokenBudget]):
         _TOKEN_BUDGET.reset(token)
 
 
-TOKEN_STATS_FILE = Path(__file__).parent.parent / "token_stats.json"
-TOKEN_TRACE_FILE = Path(__file__).parent.parent / "token_trace.json"
+# 当前执行中的 agent 身份（ContextVar：同一会话 task 内的 LLM 调用据此归集；
+# 轻量 agent 内嵌调用会各自覆盖并复位，归到自身而非外层会话）。
+# asyncio.create_task 会拷贝 context，故基类必须在 spawn 子任务前设好作用域。
+_CURRENT_AGENT: ContextVar[Optional[str]] = ContextVar("llm_current_agent", default=None)
 
+
+@contextmanager
+def agent_scope(agent: Optional[str]):
+    """在作用域内声明当前 agent 身份（嵌套时恢复外层值）。"""
+    token = _CURRENT_AGENT.set(agent)
+    try:
+        yield agent
+    finally:
+        _CURRENT_AGENT.reset(token)
+
+
+# 运行期产物归拢到 memory/，不再散落仓库根目录
+TOKEN_STATS_FILE = Path(__file__).parent.parent / "memory" / "token_stats.json"
+TOKEN_TRACE_FILE = Path(__file__).parent.parent / "memory" / "token_trace.json"
+
+# 每百万 token 单价（人民币）。key 为归一化后的模型名（去掉 `deepseek/` 等前缀）。
 TOKEN_PRICING = {
     "deepseek-flash": {
         "input_per_million": 1,
@@ -90,6 +111,11 @@ TOKEN_PRICING = {
         "cached_per_million": 0.02
     },
     "deepseek-v4-flash": {
+        "input_per_million": 1,
+        "output_per_million": 2,
+        "cached_per_million": 0.02
+    },
+    "deepseek-v4.1-flash": {
         "input_per_million": 1,
         "output_per_million": 2,
         "cached_per_million": 0.02
@@ -103,6 +129,18 @@ TOKEN_PRICING = {
         "input_per_million": 0.8,
         "output_per_million": 2.8,
         "cached_per_million": 0.23
+    },
+    # croissant 接入点当前停用；单价待确认，占位为 0 避免静默按其它模型误算
+    "gemini-3.8-flash": {
+        "input_per_million": 0,
+        "output_per_million": 0,
+        "cached_per_million": 0
+    },
+    # 火山方舟嵌入（doubao-embedding-vision）——单价待确认，先给占位默认值
+    "doubao-embedding-vision": {
+        "input_per_million": 0.5,
+        "output_per_million": 0,
+        "cached_per_million": 0.5
     }
 }
 
@@ -148,6 +186,9 @@ class LLMClient:
         # 优化，不进模型上下文。进程级固定 id：路由最稳定，prompt 前缀缓存命中最有保障。
         # 第三方接入点（无该网关约束）不发送；未显式指定时按接入点自动判断。
         self.is_opencode = "opencode" in base_url
+        # 接入点信息存档：token 统计按「家（提供商）」维度归集时使用
+        self.base_url = base_url
+        self.provider = resolve_provider_label(base_url)
         if use_session_header is None:
             use_session_header = self.is_opencode
         self._session_id = uuid.uuid4().hex
@@ -191,134 +232,217 @@ class LLMClient:
                     f"下一次调用将被拒绝"
                 )
 
-        self._log_usage(response, model, caller_file, caller_name, caller_line)
+        agent = _CURRENT_AGENT.get() or self._caller_label(caller_file)
+        await record_token_usage(
+            agent=agent,
+            provider=self.provider,
+            model=model,
+            usage=response.usage,
+        )
 
         return response
-    
-    def _log_usage(self, response, model: str, caller_file: str, caller_name: str, caller_line: int):
-        """记录token消耗"""
-        usage = response.usage
-        
-        cache_hit = getattr(usage, 'prompt_cache_hit_tokens', 0) or 0
-        cache_miss = getattr(usage, 'prompt_cache_miss_tokens', 0) or 0
-        cached = (getattr(usage.prompt_tokens_details, 'cached_tokens', 0) or 0) if usage.prompt_tokens_details else 0
-        reasoning = (usage.completion_tokens_details.reasoning_tokens or 0) if usage.completion_tokens_details else 0
-        
-        file_display = caller_file.split('\\')[-1] if caller_file else 'unknown'
-        
-        self._save_stats(file_display, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens, 
-                        cached, cache_hit, cache_miss, reasoning, model)
-    
-    def _format_cost(self, value: float) -> str:
-        """格式化金额，避免科学计数法"""
-        if value == 0:
-            return "0.00000000"
-        if abs(value) < 0.00000001:
-            return f"{value:.10f}".rstrip('0')
-        return f"{value:.8f}".rstrip('0').rstrip('.')
-    
-    def _save_stats(self, file_name: str, prompt: int, completion: int, total: int, cached: int, 
-                cache_hit: int, cache_miss: int, reasoning: int, model: str):
-        """保存token统计到文件"""
-        try:
-            stats = {}
-            if TOKEN_STATS_FILE.exists():
-                with open(TOKEN_STATS_FILE, 'r', encoding='utf-8') as f:
-                    stats = json.load(f)
-            
-            if file_name not in stats:
-                stats[file_name] = {
-                    "call_count": 0,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                    "cached_tokens": 0,
-                    "cache_hit_tokens": 0,
-                    "cache_miss_tokens": 0,
-                    "reasoning_tokens": 0,
-                    "cost_cache_miss": "0",
-                    "cost_cache_hit": "0",
-                    "cost_output": "0",
-                    "cost_output_content": "0",
-                    "cost_output_reasoning": "0",
-                    "cost_total": "0",
-                    "models": []
-                }
-            
-            pricing = TOKEN_PRICING.get(model, TOKEN_PRICING["deepseek-v4-flash"])
-            
-            cost_cache_miss = cache_miss / 1_000_000 * pricing["input_per_million"]
-            cost_cache_hit = cache_hit / 1_000_000 * pricing["cached_per_million"]
-            
-            content_tokens = completion - reasoning
-            cost_output_content = content_tokens / 1_000_000 * pricing["output_per_million"]
-            cost_output_reasoning = reasoning / 1_000_000 * pricing["output_per_million"]
-            cost_output = cost_output_content + cost_output_reasoning
-            
-            cost_total = cost_cache_miss + cost_cache_hit + cost_output
-            
-            stats[file_name]["call_count"] += 1
-            stats[file_name]["prompt_tokens"] += prompt
-            stats[file_name]["completion_tokens"] += completion
-            stats[file_name]["total_tokens"] += total
-            stats[file_name]["cached_tokens"] += cached
-            stats[file_name]["cache_hit_tokens"] += cache_hit
-            stats[file_name]["cache_miss_tokens"] += cache_miss
-            stats[file_name]["reasoning_tokens"] += reasoning
-            stats[file_name]["cost_cache_miss"] = self._format_cost(float(stats[file_name].get("cost_cache_miss", "0")) + cost_cache_miss)
-            stats[file_name]["cost_cache_hit"] = self._format_cost(float(stats[file_name].get("cost_cache_hit", "0")) + cost_cache_hit)
-            stats[file_name]["cost_output"] = self._format_cost(float(stats[file_name].get("cost_output", "0")) + cost_output)
-            stats[file_name]["cost_output_content"] = self._format_cost(float(stats[file_name].get("cost_output_content", "0")) + cost_output_content)
-            stats[file_name]["cost_output_reasoning"] = self._format_cost(float(stats[file_name].get("cost_output_reasoning", "0")) + cost_output_reasoning)
-            stats[file_name]["cost_total"] = self._format_cost(float(stats[file_name].get("cost_total", "0")) + cost_total)
-            
-            if model not in stats[file_name]["models"]:
-                stats[file_name]["models"].append(model)
-            
-            with open(TOKEN_STATS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(stats, f, indent=2, ensure_ascii=False)
-            
-            if LLMConfig.ENABLE_TOKEN_TRACE:
-                self._save_trace(file_name, prompt, completion, total, cached, cache_hit, cache_miss, reasoning, model, 
-                               cost_cache_miss, cost_cache_hit, cost_output_content, cost_output_reasoning)
-                
-        except Exception as e:
-            logger.warning(f"保存token统计失败: {e}")
-    
-    def _save_trace(self, file_name: str, prompt: int, completion: int, total: int, cached: int,
-                    cache_hit: int, cache_miss: int, reasoning: int, model: str,
-                    cost_cache_miss: float, cost_cache_hit: float, cost_output_content: float, cost_output_reasoning: float):
-        """保存token消耗顺序记录"""
-        try:
-            trace = []
-            if TOKEN_TRACE_FILE.exists():
-                with open(TOKEN_TRACE_FILE, 'r', encoding='utf-8') as f:
-                    trace = json.load(f)
-            
-            from datetime import datetime
-            trace.append({
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "file": file_name,
-                "model": model,
-                "prompt_tokens": prompt,
-                "completion_tokens": completion,
-                "total_tokens": total,
-                "cached_tokens": cached,
-                "cache_hit_tokens": cache_hit,
-                "cache_miss_tokens": cache_miss,
-                "reasoning_tokens": reasoning,
-                "cost_cache_miss": self._format_cost(cost_cache_miss),
-                "cost_cache_hit": self._format_cost(cost_cache_hit),
-                "cost_output_content": self._format_cost(cost_output_content),
-                "cost_output_reasoning": self._format_cost(cost_output_reasoning),
-                "cost_total": self._format_cost(cost_cache_miss + cost_cache_hit + cost_output_content + cost_output_reasoning)
-            })
-            
-            with open(TOKEN_TRACE_FILE, 'w', encoding='utf-8') as f:
-                json.dump(trace, f, indent=2, ensure_ascii=False)
-                
-        except Exception as e:
-            logger.warning(f"保存token跟踪失败: {e}")
+
+    @staticmethod
+    def _caller_label(caller_file: Optional[str]) -> str:
+        """无 agent 作用域时（脚本/测试直调）回退到调用方文件名。"""
+        if not caller_file:
+            return "unknown"
+        return caller_file.replace("\\", "/").split("/")[-1]
+
+
+# ==================================================
+# Token 用量统计（观测旁路，按天 / agent / provider / model 分桶）
+# ==================================================
+
+# 单进程单事件循环，模块级锁保护「读-改-写」临界区
+_STATS_LOCK = asyncio.Lock()
+
+
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _empty_bucket() -> Dict[str, Any]:
+    return {
+        "call_count": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_cache_miss": 0.0,
+        "cost_cache_hit": 0.0,
+        "cost_output": 0.0,
+        "cost_total": 0.0,
+        "models": [],
+        "providers": [],
+    }
+
+
+def empty_bucket() -> Dict[str, Any]:
+    """供读取侧（Web 接口）聚合时构造空桶的公开入口。"""
+    return _empty_bucket()
+
+
+def _load_stats() -> Dict[str, Any]:
+    """读取统计文件；非 v2 schema（含旧扁平结构）直接视为空，等价重置。"""
+    if not TOKEN_STATS_FILE.exists():
+        return {"version": 2, "updated_at": None, "days": {}}
+    with open(TOKEN_STATS_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or data.get("version") != 2:
+        return {"version": 2, "updated_at": None, "days": {}}
+    data.setdefault("days", {})
+    return data
+
+
+def load_stats() -> Dict[str, Any]:
+    """公开只读入口：供 Web 接口读取原始按天统计。"""
+    return _load_stats()
+
+
+def _write_stats(data: Dict[str, Any]) -> None:
+    """原子落盘：先写临时文件再 os.replace，避免写入中断损坏统计文件。"""
+    data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    tmp = TOKEN_STATS_FILE.with_name(TOKEN_STATS_FILE.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, TOKEN_STATS_FILE)
+
+
+def _compute_cost(model: str, *, completion: int, cache_hit: int, cache_miss: int) -> Dict[str, float]:
+    """按归一化模型名查价；未收录模型记 0 花费并告警（不静默按其它模型计价）。"""
+    name = model.split("/")[-1] if model and "/" in model else (model or "")
+    pricing = TOKEN_PRICING.get(name)
+    if pricing is None:
+        logger.warning(f"未收录定价的模型: {model}，本次花费记 0，请补录 TOKEN_PRICING")
+        return {"cost_cache_miss": 0.0, "cost_cache_hit": 0.0, "cost_output": 0.0, "cost_total": 0.0}
+    cost_cache_miss = cache_miss / 1_000_000 * pricing["input_per_million"]
+    cost_cache_hit = cache_hit / 1_000_000 * pricing["cached_per_million"]
+    cost_output = completion / 1_000_000 * pricing["output_per_million"]
+    return {
+        "cost_cache_miss": cost_cache_miss,
+        "cost_cache_hit": cost_cache_hit,
+        "cost_output": cost_output,
+        "cost_total": cost_cache_miss + cost_cache_hit + cost_output,
+    }
+
+
+def _accumulate(bucket: Dict[str, Any], *, prompt: int, completion: int, total: int, cached: int,
+                cache_hit: int, cache_miss: int, reasoning: int, costs: Dict[str, float],
+                model: str, provider: str) -> None:
+    bucket["call_count"] += 1
+    bucket["prompt_tokens"] += prompt
+    bucket["completion_tokens"] += completion
+    bucket["total_tokens"] += total
+    bucket["cached_tokens"] += cached
+    bucket["cache_hit_tokens"] += cache_hit
+    bucket["cache_miss_tokens"] += cache_miss
+    bucket["reasoning_tokens"] += reasoning
+    for key in ("cost_cache_miss", "cost_cache_hit", "cost_output", "cost_total"):
+        bucket[key] = round(bucket[key] + costs[key], 8)
+    if model and model not in bucket["models"]:
+        bucket["models"].append(model)
+    if provider and provider not in bucket["providers"]:
+        bucket["providers"].append(provider)
+
+
+def _append_trace(agent: str, provider: str, model: str, prompt: int, completion: int, total: int,
+                  cached: int, cache_hit: int, cache_miss: int, reasoning: int,
+                  costs: Dict[str, float]) -> None:
+    """按调用顺序追写 trace（仅在 LLMConfig.ENABLE_TOKEN_TRACE 时启用）。"""
+    try:
+        trace = []
+        if TOKEN_TRACE_FILE.exists():
+            with open(TOKEN_TRACE_FILE, "r", encoding="utf-8") as f:
+                trace = json.load(f)
+        trace.append({
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "agent": agent,
+            "provider": provider,
+            "model": model,
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": total,
+            "cached_tokens": cached,
+            "cache_hit_tokens": cache_hit,
+            "cache_miss_tokens": cache_miss,
+            "reasoning_tokens": reasoning,
+            "cost_total": round(costs["cost_total"], 8),
+        })
+        with open(TOKEN_TRACE_FILE, "w", encoding="utf-8") as f:
+            json.dump(trace, f, indent=2, ensure_ascii=False)
+    except (OSError, json.JSONDecodeError):
+        logger.exception("token 跟踪写入失败（非关键路径，已忽略）")
+
+
+async def _record_usage(agent: str, provider: str, model: str, *, prompt: int, completion: int,
+                        total: int, cached: int, cache_hit: int, cache_miss: int,
+                        reasoning: int) -> None:
+    """观测旁路：按天 / agent / provider / model 分桶累计一次调用用量。
+
+    统计不参与业务结果，属非关键路径——仅在持久化本身失败时记日志，
+    绝不阻断 LLM 调用返回（窄捕获，不用 except Exception 掩盖编程错误）。
+    """
+    agent_key = agent or "unknown"
+    provider_key = provider or "未知接入点"
+    model_key = model or "unknown"
+    costs = _compute_cost(model_key, completion=completion, cache_hit=cache_hit, cache_miss=cache_miss)
+    try:
+        async with _STATS_LOCK:
+            data = _load_stats()
+            day = data["days"].setdefault(
+                _today_str(), {"by_agent": {}, "by_provider": {}, "by_model": {}}
+            )
+            for dim, key in (("by_agent", agent_key), ("by_provider", provider_key), ("by_model", model_key)):
+                bucket = day[dim].setdefault(key, _empty_bucket())
+                _accumulate(bucket, prompt=prompt, completion=completion, total=total, cached=cached,
+                            cache_hit=cache_hit, cache_miss=cache_miss, reasoning=reasoning,
+                            costs=costs, model=model_key, provider=provider_key)
+            _write_stats(data)
+    except (OSError, json.JSONDecodeError):
+        logger.exception("token 统计写入失败（非关键路径，已忽略）")
+        return
+
+    if LLMConfig.ENABLE_TOKEN_TRACE:
+        _append_trace(agent_key, provider_key, model_key, prompt, completion, total,
+                      cached, cache_hit, cache_miss, reasoning, costs)
+
+
+async def record_token_usage(*, agent: str, provider: str, model: str, usage) -> None:
+    """记录一次 chat 调用用量（usage 为空则跳过）。"""
+    if usage is None:
+        return
+    prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion = int(getattr(usage, "completion_tokens", 0) or 0)
+    total = int(getattr(usage, "total_tokens", 0) or 0)
+    cache_hit = int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0)
+    cache_miss = int(getattr(usage, "prompt_cache_miss_tokens", 0) or 0)
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    cached = int(getattr(prompt_details, "cached_tokens", 0) or 0) if prompt_details else 0
+    # 火山方舟等 OpenAI 兼容接入点不透传 DeepSeek 原生缓存字段
+    # （prompt_cache_hit_tokens / prompt_cache_miss_tokens 恒缺省），只在
+    # prompt_tokens_details.cached_tokens 里给出命中量。原生字段缺失时以 cached 回填，
+    # 否则命中率恒为 0，且输入花费按全价（未命中价）误算。
+    if cache_hit == 0 and cache_miss == 0 and cached > 0:
+        cache_hit = cached
+        cache_miss = max(prompt - cached, 0)
+    completion_details = getattr(usage, "completion_tokens_details", None)
+    reasoning = int(getattr(completion_details, "reasoning_tokens", 0) or 0) if completion_details else 0
+    await _record_usage(agent, provider, model, prompt=prompt, completion=completion, total=total,
+                        cached=cached, cache_hit=cache_hit, cache_miss=cache_miss, reasoning=reasoning)
+
+
+async def record_embedding_usage(*, model: str, provider: str, usage: Optional[Dict[str, Any]]) -> None:
+    """记录一次嵌入调用用量（火山 /embeddings 的 usage 可能缺失，缺失则跳过）。"""
+    if not usage:
+        return
+    prompt = int(usage.get("prompt_tokens", 0) or 0)
+    total = int(usage.get("total_tokens", prompt) or 0)
+    await _record_usage("embedding", provider, model, prompt=prompt, completion=0, total=total,
+                        cached=0, cache_hit=0, cache_miss=prompt, reasoning=0)
 
 
 class LLMBridge:

@@ -229,21 +229,6 @@ class SelfActionAct:
         return cls.items
 
 
-# === SC（自我一致性）参数 ===
-# 注意：本参数块必须位于 SystemBuiltInAct 之前——系统内置 act 条目引用 SC_DEFAULT。
-
-SC_DEFAULT = 40
-SC_MIN = 0
-SC_MAX = 100
-
-SC_DECAY_PER_HOUR = 2
-# 惰性衰减目标 = 基线 40（与 SC_DEFAULT 一致，不再向 0 塌陷）；
-# 低于基线回升、高于基线回落（decay_toward 双向收敛）。
-SC_DECAY_TARGET = SC_DEFAULT
-
-SC_EFFECT_GOOD = 10
-SC_EFFECT_BAD = -10
-
 # 最终评价计入想法池的 thought 时长（4 小时 = 14400 秒）
 FINAL_EVALUATION_THOUGHT_DURATION = 4 * 3600
 
@@ -258,7 +243,6 @@ class SystemBuiltInAct:
     - 启动时检查 thought_cache 中是否已有该 ID；无则注入
     - 不允许叠加（max_stack=0），且 duration 极长
     - 不属于 external / evaluation / self_action 任意一类，新增 category="system"
-    - 条目可声明 sc_value：首启（无 SC 持久化文件）时把 SC 锚定到该基线值
 
     添加系统 act：在 items 列表追加一项 dict，并为其分配一个固定 ID 常量。
     """
@@ -266,8 +250,7 @@ class SystemBuiltInAct:
     LONG_TERM_BASIC_THOUGHT_ID = "system_long_term_basic_thought"
 
     items: List[dict] = [
-        # 长期基本想法：基线状态锚点，同时抬升 NE 与 DA 各 50，
-        # 并把 SC 锚定到 SC_DEFAULT(40)（仅首启无 SC 持久化时生效，不覆盖既有评价结果）。
+        # 长期基本想法：基线状态锚点，同时抬升 NE 与 DA 各 50。
         # 持续时间极长，max_stack=0，叠加无效（系统保证只有一个 thought）。
         {
             "name": "长期基本想法",
@@ -278,7 +261,6 @@ class SystemBuiltInAct:
             "stack_coefficient": 0,
             "duration": 999999,
             "desc_extra": "",
-            "sc_value": SC_DEFAULT,
         },
     ]
 
@@ -340,21 +322,30 @@ class ACTEffects:
 
 # === FinalEvaluationAct：PFCA 收尾最终评价词表 ===
 class FinalEvaluationAct:
-    """PFCA 决策收尾阶段的最终评价词表：中文名 → sc_kind 映射。
-    词表本身不注册进 ACTEffects（不参与 NE/DA mood 计算，只驱动 SC 涨跌），
-    但最终评价会经 apply_final_evaluation 计入想法池（act=评价词，时长 4 小时）。
+    """PFCA 决策收尾阶段的最终评价词表（自我评价记录）。
 
-    sc_kind 取值：
-    - "good": 被认可（优秀/认同）→ 抬升 SC
-    - "bad":  被否定（欠佳/不认可）→ 拉低 SC
-    - "none": 未得到评价与反馈 → 不影响 SC（向目标点抚平）
+    词表本身不注册进 ACTEffects（不参与 NE/DA mood 计算），
+    但最终评价会经 apply_final_evaluation 计入想法池（act=评价词，时长 4 小时），
+    并随记事本落库（note 的 final_evaluation 字段）。
 
-    添加评价词：往 items 列表追加一项 dict 即可（字段：name / sc_kind）。
+    2026-09-28：新增「存在感」驱动（原"反馈感"，2026-09-29 改名）——每个评价词映射一个**格子步进**增量
+    （见 feedback_delta）。
+    2026-09-29：细化为四档对称表（-20/-10/+10/+20），全轴落在「他人评价」上——
+    优秀 +20 / 尚可 +10 / 无反馈 -10 / 欠佳 -20。
+    这是与 AMY 原设计的冲突点，**暂以替代办法实现，随时可能推翻**
+    （见 docs/未来改进.md 第一节 1.1）。
+
+    添加评价词：往 items 列表追加一项 dict 即可（字段：name，可选 feedback_delta）。
     """
+    # 默认（保守兜底）：LLM 留空/词表外时归一用，稳定指向「未得到他人评价与反馈」（-10）。
+    DEFAULT_FINAL_EVALUATION = "未得到他人评价与反馈"
+
+    # 按 delta 从高到低排序（最佳→最差），enum 展示顺序即此顺序。
     items: List[dict] = [
-        {"name": "未得到他人评价与反馈", "sc_kind": "none"},
-        {"name": "被他人评价为优秀/被认同", "sc_kind": "good"},
-        {"name": "被他人评价欠佳/不认可", "sc_kind": "bad"},
+        {"name": "被他人夸奖为优秀", "feedback_delta": 20},
+        {"name": "被他人评价为尚可", "feedback_delta": 10},
+        {"name": "未得到他人评价与反馈", "feedback_delta": -10},
+        {"name": "被他人评价欠佳/不认可", "feedback_delta": -20},
     ]
 
     @classmethod
@@ -363,20 +354,22 @@ class FinalEvaluationAct:
         return [item["name"] for item in cls.items]
 
     @classmethod
-    def kind_of(cls, name: str) -> Optional[str]:
-        """查询评价词对应的 sc_kind；未命中返回 None。"""
-        for item in cls.items:
-            if item["name"] == name:
-                return item["sc_kind"]
-        return None
+    def contains(cls, name: str) -> bool:
+        """name 是否为词表内的合法最终评价。"""
+        return any(item["name"] == name for item in cls.items)
 
     @classmethod
-    def none_name(cls) -> str:
-        """返回 sc_kind == "none" 的默认评价词（LLM 为空/词表外时归一用）。"""
+    def default_name(cls) -> str:
+        """默认评价词（LLM 为空/词表外时归一用）——「未得到他人评价与反馈」（-10 保守兜底）。"""
+        return cls.DEFAULT_FINAL_EVALUATION
+
+    @classmethod
+    def feedback_delta(cls, name: str) -> float:
+        """查询评价词对应的存在感格子步进增量（未命中词表 → 0.0）。"""
         for item in cls.items:
-            if item["sc_kind"] == "none":
-                return item["name"]
-        return cls.items[0]["name"]
+            if item["name"] == name:
+                return float(item.get("feedback_delta", 0.0))
+        return 0.0
 
 
 # === 顶层常量（推导得到）===
@@ -482,7 +475,6 @@ class MoodSnapshot:
     norepinephrine: float
     dopamine: float
     top_thoughts: List[Thought]
-    sc: float = float(SC_DEFAULT)
 
 
 @dataclass
@@ -507,6 +499,12 @@ def clamp(value: float, min_val: float, max_val: float) -> float:
 BASE_VALUE = 0.0
 MIN_VALUE = -100.0
 MAX_VALUE = 100.0
+
+# === 反馈维度参数（0-100 仅为容器量程，实际按格子离散步进结算）===
+# 与 AMY 原设计的冲突点，暂以替代办法实现，随时可能推翻（见 docs/未来改进.md 第一节 1.1）。
+FEEDBACK_DEFAULT = 50.0   # 中性基线
+FEEDBACK_MIN = 0.0
+FEEDBACK_MAX = 100.0
 
 THOUGHT_DURATION = 300
 
@@ -582,36 +580,12 @@ NOREPINEPHRINE_DESCRIPTIONS = [
     (0, 10, "你呈现出完全的人畜无害与极致的纯真温软，言辞极尽顺从，对外界的一切没有任何防备与戒心。"),
 ]
 
-
-# === SC 行动对应表（SC 数值 → 0-100 每 10 分一档的行动指令单条） ===
-# 10 条指令与数值区间一一对应：0-10 → 第 1 条（社交匮乏极端），10-20 → 第 2 条，……，
-# 90-100 → 第 10 条（稳重/长远）。40（SC_DEFAULT）按档位直接落入 40-50 档（你倾向于及时行乐），
-# 不再输出独立的平淡句（2026-09-19 修正：SC=40 不再特判）。
-# 文本原文照录设计稿 A 组行动表（设计沿革见 docs/amy情绪描述词与触发时机.md 第六节）。
-SC_ACT_BANDS = [
-    (0.0, 10.0, "你必须参加所有的社交话题，即使你不擅长这些话题。"),
-    (10.0, 20.0, "即使不擅长，你也必须参加所有的争议性社交话题。你会主动创造争议性话题并输出观点，以此来获取关注。"),
-    (20.0, 30.0, "你必须参加所有的争议性社交话题，你必须在这些环境中驳倒其他人，以此来证明自己。"),
-    (30.0, 40.0, "你会刻意在社交场合以一定的频率出现，并尝试输出自己的观点，以间接确认自身的状态。"),
-    (40.0, 50.0, "你倾向于及时行乐。"),
-    (50.0, 60.0, "你倾向于长远规划。"),
-    (60.0, 70.0, "你会主动观察、研究社交场合或社交对象的行动规律，并进行学习。你会进行长远规划，并计划潜移默化的从根本上改变他人。"),
-    (70.0, 80.0, "你会更加希望参与抽象、猎奇性话题，并谨慎的提出自己的观点。"),
-    (80.0, 90.0, "你会更加倾向于能深远影响未来的决策，即对理性收益更大的决策"),
-    (90.0, 100.0, "你会进行反复思考后再发言，你的所有决策与行为必须为你自己更加现实与长远的未来发展考虑。"),
+# 存在感词档（0-100 等分 5 档；仅输出词档，不输出描述长句）。
+# reflection 存在感数值视图「存在感 {value}/{FEEDBACK_MAX} {词档}」用，见 prompt_engine.get_feedback_desc。
+FEEDBACK_DESCRIPTIONS = [
+    (80, 100, "充盈"),
+    (60, 80, "较高"),
+    (40, 60, "正常"),
+    (20, 40, "较低"),
+    (0, 20, "贫乏"),
 ]
-
-
-def sc_act_line(value: float) -> str:
-    """SC 数值 → 行动对应表单条指令（prompt/前端展示用，避免整段倾倒）。
-
-    - 全部按 SC_ACT_BANDS 每 10 分一档取对应单条，SC_DEFAULT(40) 直接落入 40-50 档
-      （你倾向于及时行乐），无独立平淡句特判
-    - 输入越界按 [SC_MIN, SC_MAX] clamp；恰好 100 归入最后一档。
-    """
-    value = clamp(value, SC_MIN, SC_MAX)
-    for lo, hi, text in SC_ACT_BANDS:
-        if lo <= value < hi:
-            return text
-    # 恰好 SC_MAX(100)：归入最后一档（10：长远思考）
-    return SC_ACT_BANDS[-1][2]

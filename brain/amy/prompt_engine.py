@@ -7,10 +7,11 @@ Amy 提示词拼接引擎
 将情绪状态转换为可注入到 LLM 的提示词文本
 去甲肾上腺素与多巴胺双值系统
 
-情绪体系隔离（2026-09-13）：
+情绪体系隔离（2026-09-13；2026-09-27 SC 轴剔除；2026-09-28 新增反馈数值视图）：
 - 表现侧（NE/DA）：conversation / social_chat 专用，build_language_mood_prompt
-- 决策侧（SC）  ：pfca / proactive / light_agent 专用，build_decision_mood_prompt
-- 完整视图（三行）：仅供 adapt/web/amy_api 前端展示，build_mood_prompt
+- 决策侧         ：pfca / proactive / light_agent 专用，build_decision_mood_prompt
+- 完整视图       ：仅供 adapt/web/amy_api 前端展示，build_mood_prompt
+- 存在感数值视图：reflection 专用，build_feedback_prompt（不显示任何想法）
 两侧通过 FinalEvaluationAct 类别切分想法原因段，实现情绪体系互不可见。
 """
 
@@ -19,9 +20,10 @@ from utils.logger import get_logger
 from brain.amy.constants import (
     MoodSnapshot, Thought,
     DOPAMINE_DESCRIPTIONS, NOREPINEPHRINE_DESCRIPTIONS,
-    SC_DEFAULT, sc_act_line,
+    FEEDBACK_DESCRIPTIONS, FEEDBACK_MAX,
     FinalEvaluationAct,
 )
+from brain.amy.debt_ledger import DebtEntry
 
 logger = get_logger('amy_prompt', 'INFO')
 
@@ -41,9 +43,16 @@ def get_norepinephrine_desc(value: float) -> str:
         return NOREPINEPHRINE_DESCRIPTIONS[0][2]
     return NOREPINEPHRINE_DESCRIPTIONS[-1][2]
 
+def get_feedback_desc(value: float) -> str:
+    """把反馈维度数值映射到 5 档语义词（贫乏 / 较低 / 正常 / 较高 / 充盈）。"""
+    for low, high, desc in FEEDBACK_DESCRIPTIONS:
+        if low <= value < high:
+            return desc
+    return FEEDBACK_DESCRIPTIONS[0][2] if value >= FEEDBACK_MAX else FEEDBACK_DESCRIPTIONS[-1][2]
+
+
 def build_thought_summary(top_thoughts: List[Thought], prefix: str = "原因：") -> str:
     """把 thoughts 列表渲染为"编号 + 聚合"的多行文本，供所有模块统一复用。
-
     格式：
         {prefix}
         1. {desc}（{desc_extra}）   ← 如果 thought.desc_extra 非空，附加在 desc 后
@@ -106,28 +115,25 @@ def _split_thoughts(top_thoughts: List[Thought], final_only: bool) -> List[Thoug
     kept: List[Thought] = []
     for thought in top_thoughts:
         act = getattr(thought, "act", "") or ""
-        is_final = FinalEvaluationAct.kind_of(act) is not None
+        is_final = FinalEvaluationAct.contains(act)
         if is_final == final_only:
             kept.append(thought)
     return kept
 
+
 def build_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False) -> str:
-    """完整视图：三行（NE 描述 + DA 描述 + SC 行动行），仅供 adapt/web/amy_api 前端展示。
+    """完整视图：两行（NE 描述 + DA 描述），仅供 adapt/web/amy_api 前端展示。
 
     消费方禁用本视图：表现侧（conversation/social_chat）走 build_language_mood_prompt，
     决策侧（pfca/proactive/light_agent）走 build_decision_mood_prompt，
     保证 pfca 与 conversation 情绪体系隔离（见 docs/api/amy.md）。
 
-    SC 行按 snapshot.sc 数值从 A 组行动对应表取单条（40 落入 40-50 档：你倾向于及时行乐），
     原因段仅在 with_reason=True 时追加在末尾（全部想法，不分区）。
-    SC 值取 snapshot.sc；缺失时用 SC_DEFAULT=40 兜底，同样按档位渲染（及时行乐）。
     """
     ne_desc = get_norepinephrine_desc(snapshot.norepinephrine)
     da_desc = get_dopamine_desc(snapshot.dopamine)
-    sc_val = getattr(snapshot, "sc", SC_DEFAULT)
-    sc_line = sc_act_line(sc_val)
 
-    parts = [ne_desc, da_desc, sc_line]
+    parts = [ne_desc, da_desc]
     if with_reason:
         thought_summary = build_thought_summary(snapshot.top_thoughts)
         if thought_summary:
@@ -137,7 +143,7 @@ def build_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False) -> str:
 def build_language_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False) -> str:
     """表现侧视图（仅 NE/DA）：conversation / social_chat 专用。
 
-    输出两行激素描述（NE 描述 + DA 描述），不含 SC 行；
+    输出两行激素描述（NE 描述 + DA 描述）；
     原因段（with_reason=True 时）仅渲染非最终评价类想法
     （系统 act / 情感遭遇），与决策侧（PFCA）完全隔离。
     """
@@ -154,14 +160,12 @@ def build_language_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False
     return "\n".join(parts)
 
 def build_decision_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False) -> str:
-    """决策侧视图（仅 SC）：pfca / proactive / light_agent 专用。
+    """决策侧视图：pfca / proactive / light_agent 专用。
 
-    仅输出一行 SC 行动对应（sc_act_line，40 落入 40-50 档：你倾向于及时行乐），
     不含 NE/DA 行；原因段（with_reason=True 时）仅渲染最终评价类想法
-    （FinalEvaluationAct 词表，PFCA 收尾评价），与表现侧完全隔离。
+    （FinalEvaluationAct 词表，PFCA 收尾自我评价），与表现侧完全隔离。
     """
-    sc_val = getattr(snapshot, "sc", SC_DEFAULT)
-    parts = [sc_act_line(sc_val)]
+    parts: List[str] = []
     if with_reason:
         thought_summary = build_thought_summary(
             _split_thoughts(snapshot.top_thoughts, final_only=True)
@@ -169,6 +173,30 @@ def build_decision_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False
         if thought_summary:
             parts.append(thought_summary)
     return "\n".join(parts)
+
+def build_feedback_prompt(value: float) -> str:
+    """存在感数值视图：reflection 专用。
+
+    直接显示存在感数值状态，**不显示任何想法**。
+    格式：存在感 {value}/{FEEDBACK_MAX} {词档}
+    例：存在感 50/100 正常（词档：贫乏 / 较低 / 正常 / 较高 / 充盈）。
+    """
+    return f"存在感 {int(round(value))}/{int(FEEDBACK_MAX)} {get_feedback_desc(value)}"
+
+
+def build_presence_attribution(value: float, entries: List[DebtEntry]) -> str:
+    """存在感归因块：决策侧出口 / 人格系统统一注入（2026-09-29）。
+
+    存在感行**常显**（PFCA / 人格无条件可见自身数值）：
+        存在感：{当前值}/100
+    存在未偿欠账（负面记录）时追加每笔一行归因：
+        原因：{事件标题} {事件评价} {数值减益}
+    无欠账时仅返回存在感行。
+    """
+    lines = [f"存在感：{int(round(value))}/{int(FEEDBACK_MAX)}"]
+    lines += [f"原因：{entry.title} {entry.kind} {int(entry.score)}" for entry in entries]
+    return "\n".join(lines)
+
 
 def get_amy_description(snapshot: MoodSnapshot, with_reason: bool = False) -> str:
     """完整视图包装（仅供 adapt/web/amy_api 前端展示，见 build_mood_prompt）。"""

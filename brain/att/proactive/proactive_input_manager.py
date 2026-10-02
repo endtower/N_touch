@@ -162,12 +162,23 @@ class ProactiveInputManager:
         lines = ["【当前计划中要做的任务】"]
         for i, task in enumerate(planned_tasks, 1):
             title = task.get("title", "未知")
-            summary = task.get("summary", "")
+            brief = task.get("brief", "")
+            conclusion = task.get("conclusion", "")
+            stage = task.get("stage", "")
+            notes = task.get("notes", "")
             next_occ = task.get("next_occurrence") or "未排期"
+            deadline = task.get("deadline") or "未设置"
             lines.append(f"{i}. {title}")
-            if summary:
-                lines.append(f"   概况: {summary}")
-            lines.append(f"   下次触发时间: {next_occ}")
+            if brief:
+                lines.append(f"   简要: {brief}")
+            if stage:
+                lines.append(f"   当前阶段: {stage}")
+            if conclusion:
+                lines.append(f"   已获结论: {conclusion}")
+            if notes:
+                lines.append(f"   任务笔记: {notes}")
+            lines.append(f"   下次处理时间: {next_occ}")
+            lines.append(f"   最终汇报时间: {deadline}")
         self._blocks["planned_tasks"] = "\n".join(lines)
 
     def _collect_triggered_task(self, triggered_task: Optional[Dict[str, Any]]) -> None:
@@ -175,16 +186,28 @@ class ProactiveInputManager:
         if not triggered_task:
             return
         title = triggered_task.get("title", "未知")
-        summary = triggered_task.get("summary", "")
+        brief = triggered_task.get("brief", "")
+        conclusion = triggered_task.get("conclusion", "")
+        stage = triggered_task.get("stage", "")
+        notes = triggered_task.get("notes", "")
         next_occ = triggered_task.get("next_occurrence", "")
+        deadline = triggered_task.get("deadline", "")
         lines = [
             "【当前已到达计划再处理时间的未完成任务】",
             f"标题: {title}",
         ]
-        if summary:
-            lines.append(f"概况: {summary}")
+        if brief:
+            lines.append(f"简要: {brief}")
+        if stage:
+            lines.append(f"当前阶段: {stage}")
+        if conclusion:
+            lines.append(f"已获结论: {conclusion}")
+        if notes:
+            lines.append(f"任务笔记: {notes}")
         if next_occ:
-            lines.append(f"触发时间: {next_occ}")
+            lines.append(f"下次处理时间: {next_occ}")
+        if deadline:
+            lines.append(f"最终汇报时间: {deadline}")
         self._blocks["triggered_task"] = "\n".join(lines)
 
     def _collect_recent_memory(self, limit: int = 5) -> None:
@@ -226,13 +249,13 @@ class ProactiveInputManager:
         # （不推进会无限积压重查），但不触发情绪槽更新。
         final_events = [
             e for e in events
-            if FinalEvaluationAct.kind_of(e.get("act", "") or "") is not None
+            if FinalEvaluationAct.contains(e.get("act", "") or "")
         ]
         if not final_events:
             await ei.advance_cursor("proactive", max_seq)
             return
 
-        # 决策侧出口描述：单行 SC 行动对应 + 原因：最终评价类想法摘要（成因出口内嵌）
+        # 决策侧出口描述：原因：最终评价类想法摘要（成因出口内嵌）
         current = await ei.get_decision_description()
         if not current:
             return

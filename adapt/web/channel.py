@@ -367,6 +367,8 @@ class WebChannel:
         )
         # 上下文查看 (只读, 不改 memory/)
         from .context_api import handle_chains, handle_read_file
+        # Token 用量统计 (只读, 按天 / agent / provider / model)
+        from .token_api import handle_token_stats
         # Amy 情绪系统状态 (只读) + 想法池调试编辑 (增/删/改)
         from .amy_api import (
             handle_get_amy_state,
@@ -403,6 +405,9 @@ class WebChannel:
         self._app.router.add_get("/context/chains", handle_chains)
         self._app.router.add_get("/context/file", handle_read_file)
 
+        # Token 用量统计 (只读, 按天 / agent / provider / model)
+        self._app.router.add_get("/token-stats", handle_token_stats)
+
         # Amy 情绪系统状态 (只读) + 想法池调试编辑 (增/删/改)
         self._app.router.add_get("/amy/state", handle_get_amy_state)
         self._app.router.add_post("/amy/thoughts", handle_create_amy_thought)
@@ -418,6 +423,17 @@ class WebChannel:
         self._app.router.add_post("/stickers/vectorize", handle_vectorize_stickers)
         self._app.router.add_patch("/stickers/{filename}", handle_update_sticker)
         self._app.router.add_delete("/stickers/{filename}", handle_delete_sticker)
+
+        # 前端构建产物伺服 (web_frontend/dist 存在才注册): 5002 直接提供页面 + API,
+        # 生产模式不再依赖 Vite dev server。静态路由必须注册在所有 API 路由之后,
+        # 兜底规则才不会抢走 /memory /events 等已有路径。
+        self._dist_dir = Path(__file__).resolve().parents[2] / "web_frontend" / "dist"
+        if self._dist_dir.is_dir():
+            assets_dir = self._dist_dir / "assets"
+            if assets_dir.is_dir():
+                self._app.router.add_static("/assets", assets_dir)
+            self._app.router.add_get("/", self._handle_index)
+            self._app.router.add_get("/{tail:.*}", self._handle_spa_fallback)
 
         # access_log=None: 关闭 aiohttp 访问日志, 避免高频轮询请求刷屏干扰终端
         self._runner = web.AppRunner(self._app, access_log=None)
@@ -573,6 +589,36 @@ class WebChannel:
             "webp": "image/webp", "bmp": "image/bmp", "svg": "image/svg+xml",
         }.get(ext, "application/octet-stream")
         return web.Response(body=target.read_bytes(), content_type=mime)
+
+    # --------------------------------------------------------
+    # 前端静态文件（web_frontend/dist）
+    # --------------------------------------------------------
+
+    def _dist_index(self) -> Optional[Path]:
+        index = self._dist_dir / "index.html"
+        return index if index.is_file() else None
+
+    async def _handle_index(self, _request: web.Request) -> web.Response:
+        index = self._dist_index()
+        if index is None:
+            return web.Response(status=404, text="dist/index.html 不存在，请先 npm run build")
+        return web.FileResponse(index)
+
+    async def _handle_spa_fallback(self, request: web.Request) -> web.Response:
+        """兜底路由：先尝试 dist 下的同名文件（favicon 等），否则回 index.html。"""
+        index = self._dist_index()
+        if index is None:
+            return web.Response(status=404, text="dist/index.html 不存在，请先 npm run build")
+        tail = request.match_info.get("tail", "")
+        if tail:
+            target = (self._dist_dir / tail).resolve()
+            try:
+                target.relative_to(self._dist_dir.resolve())
+            except ValueError:
+                target = None  # 路径穿越，当作未命中
+            if target is not None and target.is_file():
+                return web.FileResponse(target)
+        return web.FileResponse(index)
 
     # --------------------------------------------------------
     # WebSocket 接入

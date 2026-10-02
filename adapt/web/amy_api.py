@@ -6,23 +6,23 @@ adapt.web.amy_api
 Amy 情绪系统状态查看与想法池调试编辑接口.
 
 对前端暴露 LLM 当前情绪的完整快照:
-  - 去甲肾上腺素 (NE) / 多巴胺 (DA) / SC 当前值 (clamp 后)
+  - 去甲肾上腺素 (NE) / 多巴胺 (DA) 当前值 (clamp 后)
   - 所有 active thought (含 act / intensity / expire_time / desc)
   - 触发当前 prompt 的统一描述 (get_amy_description 输出)
-  - 全部 ACT 表 (按分类组织, 给前端展示) + SC 评价词表 (final)
-  - SC 轴元信息 (sc_meta: 衰减/抚平/评价效果参数)
+  - 全部 ACT 表 (按分类组织, 给前端展示) + 最终评价词表 (final)
 同时提供想法池调试编辑 (增/删/改), 供前端测试:
   - POST /amy/thoughts      新建 thought
   - PATCH /amy/thoughts/{id} 修改 thought
   - DELETE /amy/thoughts/{id} 删除 thought
-  - POST /amy/final-evaluation  最终评价完整闭环（SC 涨跌 + 想法入池）
+  - POST /amy/final-evaluation  最终评价登记（想法入池）
 
 注：崩溃/覆盖机制已于 2026-08-30 移除，响应中的 system_state 块已删除。
+注：SC 轴已于 2026-09-27 剔除，响应中的 sc / sc_meta / sc 描述带已删除。
 
 端点:
   GET /amy/state          -> 一次性返回上面所有信息
   POST/PATCH/DELETE /amy/thoughts... -> 想法池调试 CRUD
-  POST /amy/final-evaluation       -> 最终评价登记（SC + 想法入池）
+  POST /amy/final-evaluation       -> 最终评价登记（想法入池）
 """
 
 from __future__ import annotations
@@ -86,10 +86,6 @@ def _serialize_acts() -> Dict[str, List[Dict[str, Any]]]:
     from brain.amy.constants import (
         ExternalInteractionAct, EvaluationAct,
         SelfActionAct, SystemBuiltInAct, FinalEvaluationAct,
-        SC_EFFECT_GOOD, SC_EFFECT_BAD,
-    )
-    from brain.amy.smoothing import (
-        SMOOTH_TARGET, SMOOTH_STEP,
     )
     def _to_list(cls) -> List[Dict[str, Any]]:
         return [
@@ -106,20 +102,7 @@ def _serialize_acts() -> Dict[str, List[Dict[str, Any]]]:
         ]
     # 最终评价词表（PFCA 收尾）：纯词表，不参与 thought 体系
     def _to_final_list() -> List[Dict[str, Any]]:
-        out = []
-        for item in FinalEvaluationAct.items:
-            if item["sc_kind"] == "good":
-                effect = f"SC {SC_EFFECT_GOOD:+g}"
-            elif item["sc_kind"] == "bad":
-                effect = f"SC {SC_EFFECT_BAD:+g}"
-            else:
-                effect = f"向 {SMOOTH_TARGET} 抚平 {SMOOTH_STEP}"
-            out.append({
-                "name": item["name"],
-                "sc_kind": item["sc_kind"],
-                "effect": effect,
-            })
-        return out
+        return [{"name": item["name"]} for item in FinalEvaluationAct.items]
     return {
         "external": _to_list(ExternalInteractionAct),
         "evaluation": _to_list(EvaluationAct),
@@ -134,8 +117,6 @@ def _serialize_amy_descriptions() -> Dict[str, Any]:
         DOPAMINE_DESCRIPTIONS,
         NOREPINEPHRINE_DESCRIPTIONS,
         MIN_VALUE, MAX_VALUE,
-        SC_MIN, SC_MAX, SC_DEFAULT,
-        SC_ACT_BANDS,
     )
     return {
         "dopamine": [
@@ -146,16 +127,9 @@ def _serialize_amy_descriptions() -> Dict[str, Any]:
             {"lo": lo, "hi": hi, "text": text}
             for (lo, hi, text) in NOREPINEPHRINE_DESCRIPTIONS
         ],
-        # SC 描述带 = A 组行动对应表单条（每 10 分一档，不再整段 dump 描述带+行动指令）
-        "sc": [
-            {"lo": lo, "hi": hi - 0.001 if i < len(SC_ACT_BANDS) - 1 else hi, "text": text}
-            for i, (lo, hi, text) in enumerate(SC_ACT_BANDS)
-        ],
         "range": {
             "min": MIN_VALUE,
             "max": MAX_VALUE,
-            "sc_min": SC_MIN,
-            "sc_max": SC_MAX,
         },
     }
 
@@ -163,28 +137,6 @@ def _serialize_amy_descriptions() -> Dict[str, Any]:
 # ============================================================
 # handler
 # ============================================================
-
-def _sc_meta() -> Dict[str, Any]:
-    """SC 轴的展示元信息（衰减/抚平/评价效果参数），供前端展示规则。"""
-    from brain.amy.constants import (
-        SC_DEFAULT, SC_MIN, SC_MAX,
-        SC_DECAY_PER_HOUR, SC_DECAY_TARGET,
-        SC_EFFECT_GOOD, SC_EFFECT_BAD,
-    )
-    from brain.amy.smoothing import (
-        SMOOTH_TARGET, SMOOTH_STEP,
-    )
-    return {
-        "default": SC_DEFAULT,
-        "min": SC_MIN,
-        "max": SC_MAX,
-        "decay_per_hour": SC_DECAY_PER_HOUR,
-        "decay_target": SC_DECAY_TARGET,
-        "effect_good": SC_EFFECT_GOOD,
-        "effect_bad": SC_EFFECT_BAD,
-        "smooth_target": SMOOTH_TARGET,
-        "smooth_step": SMOOTH_STEP,
-    }
 
 async def handle_get_amy_state(request: web.Request) -> web.Response:
     ei = await _try_get_ei()
@@ -212,15 +164,33 @@ async def handle_get_amy_state(request: web.Request) -> web.Response:
         # 4. thought_cache 统计
         ts = ei.thought_cache.timestamp
 
+        # 5. 存在感（feedback_state 数值 + 决策侧/人格注入的归因 prompt + 未偿欠账明细）
+        from brain.amy.prompt_engine import build_presence_attribution
+        presence_value = ei.feedback_state.read_value()
+        debts = ei.debt_ledger.list_debts()
+        presence = {
+            "value": round(presence_value, 2),
+            "attribution_prompt": build_presence_attribution(presence_value, debts),
+            "debts": [
+                {
+                    "title": e.title,
+                    "kind": e.kind,
+                    "score": int(e.score),
+                    "create_time": e.create_time,
+                }
+                for e in debts
+            ],
+        }
+
         return web.json_response({
             "initialized": True,
             "fetched_at": time.time(),
             "mood": {
                 "norepinephrine": round(snapshot.norepinephrine, 2),
                 "dopamine": round(snapshot.dopamine, 2),
-                "sc": round(snapshot.sc, 2),
             },
             "amy_description": amy_desc,
+            "presence": presence,
             "thoughts": {
                 "all_active_count": len(all_active),
                 "all_active": all_active,
@@ -229,7 +199,6 @@ async def handle_get_amy_state(request: web.Request) -> web.Response:
             "thought_cache_timestamp": ts,
             "acts": _serialize_acts(),
             "amy_descriptions": _serialize_amy_descriptions(),
-            "sc_meta": _sc_meta(),
         })
     except Exception as e:
         logger.exception("[/amy/state] 失败")
@@ -274,15 +243,14 @@ async def handle_create_amy_thought(request: web.Request) -> web.Response:
 
 
 async def handle_apply_amy_final_evaluation(request: web.Request) -> web.Response:
-    """POST /amy/final-evaluation  登记一次最终评价（调试/测试用，完整闭环）。
+    """POST /amy/final-evaluation  登记一次最终评价（调试/测试用）。
 
     body: {final_evaluation, title}
     - final_evaluation：FinalEvaluationAct 词表名
     - title：本次事件简易标题（≤15 字）
 
-    直接走 `apply_final_evaluation`：SC 涨跌（good +10 / bad -10 / none 朝 40 单点抚平）
-    + 想法入池（desc=`在事件{title} 中，{评价词}`，时长 4 小时）。
-    与前端的创建想法（POST /amy/thoughts，纯想法池、不动 SC）区分，这里是完整闭环。
+    直接走 `apply_final_evaluation`：按格子步进结算反馈维度，并把想法入池
+    （desc=`因为 {title} 任务中，导致的{上升/降低}`，时长 4 小时）。
     失败（未初始化 / 词表外 / title 空）返回 400，不吞异常。
     """
     ei = await _try_get_ei()
@@ -298,7 +266,7 @@ async def handle_apply_amy_final_evaluation(request: web.Request) -> web.Respons
         await ei.apply_final_evaluation(final_evaluation, title)
     except ValueError as e:
         return web.json_response({"error": str(e)}, status=400)
-    return web.json_response({"applied": True, "sc": ei.sc_state.read_value()})
+    return web.json_response({"applied": True})
 
 
 async def handle_update_amy_thought(request: web.Request) -> web.Response:

@@ -13,7 +13,8 @@ Amy 情绪系统
 - prompt_engine: 情绪快照 -> 提示词文本
 - emotional_interface: 对外统一接口（build_thought 根方法 + build_conversation_thought 适配层
   + get_language_description 表现侧出口（仅 NE/DA，conversation/social_chat 专用）
-  + get_decision_description 决策侧出口（仅 SC，pfca/proactive/light_agent 专用）
+  + get_decision_description 决策侧出口（仅最终评价原因段，pfca/proactive/light_agent 专用）
+  + get_reflection_description Reflection 专用出口（反馈数值状态行，不显示想法）
   + get_amy_description 完整视图出口（仅供 adapt/web/amy_api 前端展示））
 
 API 文档：docs/api/amy.md —— 修改本包对外接口后必须同步更新该文档
@@ -29,13 +30,8 @@ from brain.amy.constants import (
     generate_timestamp_id, clamp,
     DOPAMINE_DESCRIPTIONS, NOREPINEPHRINE_DESCRIPTIONS,
     BASE_VALUE, MIN_VALUE, MAX_VALUE,
-    SC_DEFAULT, SC_MIN, SC_MAX,
-    SC_DECAY_PER_HOUR, SC_DECAY_TARGET,
-    SC_EFFECT_GOOD, SC_EFFECT_BAD,
-    SC_ACT_BANDS,
 )
 from brain.amy.emotional_interface import EmotionalInterface, get_emotional_interface, reset_emotional_interface
-from brain.amy.sc_state import ScState, get_sc_state, reset_sc_state
 from brain.amy.event_log import EventLog
 
 __all__ = [
@@ -52,14 +48,7 @@ __all__ = [
     "DOPAMINE_DESCRIPTIONS", "NOREPINEPHRINE_DESCRIPTIONS",
     # 基础参数
     "BASE_VALUE", "MIN_VALUE", "MAX_VALUE",
-    # SC（自我一致性）参数
-    "SC_DEFAULT", "SC_MIN", "SC_MAX",
-    "SC_DECAY_PER_HOUR", "SC_DECAY_TARGET",
-    "SC_EFFECT_GOOD", "SC_EFFECT_BAD",
-    # SC 行动对应表（0-100 每 10 分一档）
-    "SC_ACT_BANDS",
     # 核心类
     "EmotionalInterface", "get_emotional_interface", "reset_emotional_interface",
-    "ScState", "get_sc_state", "reset_sc_state",
     "EventLog",
 ]

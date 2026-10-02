@@ -20,6 +20,10 @@ schema 与实现统一在此管理，供各 agent 及反思系统（reflection_t
   delete_bequest 删除
 - delete_bequest：按 title + category 删除对应类别的经验
 
+2026-09-27 起，决策经验相关工具（query_decision_bequest 及 upsert/delete 的
+「决策」类别）已从 LLM 视野移除：schema 不再暴露给 LLM，但本模块的通用实现
+（方法、category 参数、_resolve_category 等）全部保留，供程序侧按需直接调用。
+
 全异步：底层走 BequestOperations（纯异步），本模块不引入同步 IO。
 """
 
@@ -54,32 +58,57 @@ class ToolBequest:
     # 用英文，转换统一收口在 _resolve_category。
     _CATEGORY_TO_DB = {"话术": "speech", "决策": "decision"}
 
+    # query_bequest 检索方式（2026-09-29 新增）：向量 = 语义相似度检索；
+    # 标题 = 标题关键词比对（不生成向量，命中少，供反思系统省 token）。
+    _QUERY_MODES = ("向量", "标题")
+
     # ============ 工具 schema（提示词） ============
 
     @classmethod
-    def get_query_bequest_tool_schema(cls) -> Dict[str, Any]:
-        """返回 query_bequest 工具的 schema（2026-09-17 新增）。"""
+    def get_query_bequest_tool_schema(cls, mode_selectable: bool = False) -> Dict[str, Any]:
+        """返回 query_bequest 工具的 schema（2026-09-17 新增）。
+
+        mode_selectable=True 时额外暴露「检索方式」参数（向量 / 标题比对），
+        供反思系统使用：标题比对不走向量、命中条数少，显著省 token
+        （2026-09-29 新增）。默认 False，其他 agent 的 schema 不变。
+        """
+        properties: Dict[str, Any] = {
+            "query": {
+                "type": "string",
+                "description": "检索内容：描述当前处境、想表达的意思或要查重的经验主题",
+            },
+            "top_k": {
+                "type": "integer",
+                "description": "返回条数上限，默认 3",
+            },
+        }
+        description = (
+            "检索已有话术经验。输入当前处境或想表达的意思，"
+            "返回语义最相似的话术经验（标题 + 内容 + 相似度）。"
+            "用于：说话前找现成技巧、登记新经验前查重。"
+        )
+        if mode_selectable:
+            properties["mode"] = {
+                "type": "string",
+                "enum": ["向量", "标题"],
+                "description": (
+                    "检索方式。「向量」：按语义相似度检索（默认），可能带回若干"
+                    "语义相近但非目标的条目；「标题」：拿 query 按标题关键词比对，"
+                    "命中更少更准、开销更小，适合已知道要找哪条经验时。"
+                    "标题方式未命中时不会自动退回向量，需自行改用向量方式。"
+                ),
+            }
+            description += (
+                "可选检索方式：向量（语义相似）/ 标题（标题关键词比对，命中更少更省）。"
+            )
         return {
             "type": "function",
             "function": {
                 "name": "query_bequest",
-                "description": (
-                    "检索已有话术经验。输入当前处境或想表达的意思，"
-                    "返回语义最相似的话术经验（标题 + 内容 + 相似度）。"
-                    "用于：说话前找现成技巧、登记新经验前查重。"
-                ),
+                "description": description,
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "检索内容：描述当前处境、想表达的意思或要查重的经验主题",
-                        },
-                        "top_k": {
-                            "type": "integer",
-                            "description": "返回条数上限，默认 3",
-                        },
-                    },
+                    "properties": properties,
                     "required": ["query"],
                 },
             },
@@ -121,21 +150,24 @@ class ToolBequest:
     @classmethod
     def get_upsert_bequest_tool_schema(cls) -> Dict[str, Any]:
         """返回 upsert_bequest 工具的 schema（原样迁自 bequest_agent，2026-09-15；
-        2026-09-24 增加 category 参数以支持登记决策经验）。"""
+        2026-09-24 增加 category 参数以支持登记决策经验；
+        2026-09-27 决策经验入口从 LLM 视野移除，schema 仅暴露「话术」；
+        2026-10-01 增加 persona 可选参数：把经验绑定到指定人格）。"""
         return {
             "type": "function",
             "function": {
                 "name": "upsert_bequest",
                 "description": (
-                    "创建经验（话术经验或决策经验）。如果同类中已存在同名经验则覆盖内容，否则创建新的经验。"
-                    "category 决定登记到哪个经验库："
+                    "创建话术经验。如果已存在同名经验则覆盖内容，否则创建新的经验。"
                     "「话术」是发言/回复技巧类，"
                     "评判标准是是否能更加快速便捷的表达出具体意思，而不是对于事件结果的影响"
                     "示例： 标题：表达惊讶，滑稽，震撼。 内容：可以用‘卧槽啊！’表示对过于离谱的事情的震惊。"
                     "错误示例：遇到对方明显不想搭理、摆烂或怼人的回复，直接发「……」（或无语流汗表情）表示无语，不解释、不追问、不给台阶。（因为夹杂了不解释、不追问、不给台阶这些无意义的内容）"
-                    "「决策」是决策经验，一种过往的面对某种情景的广泛思路"
-                    "（面对这类情景大致怎么想、怎么处理，不绑定具体话术与具体事件）。"
-                    "登记前系统会自动查重（同类内）：若已存在近乎相同的经验，本次创建将被拒绝（返回 duplicate_conflict），"
+                    "可选 persona 参数：给这条经验打人格标签——标记它属于某个人格"
+                    "的应对方式；通用技巧不要传 persona（默认全局通用）。"
+                    "仅当经验明确只属于某个人格的应对方式时才绑定；"
+                    "传了不存在的人格名会被直接拒绝。"
+                    "登记前系统会自动查重：若已存在近乎相同的经验，本次创建将被拒绝（返回 duplicate_conflict），"
                     "请按返回的 hint 处理（沿用已有经验 / 删除旧的再重试 / 换用语义可区分的标题）。"
                     "登记完成后会自动返回系统内 3 条语义近似的经验及相似度；若返回 duplicate_warning，"
                     "说明存在疑似重复经验，必须逐条对比语义：属重复的必须调用 delete_bequest 删除"
@@ -146,16 +178,17 @@ class ToolBequest:
                     "properties": {
                         "title": {"type": "string", "description": "标题"},
                         "summary": {"type": "string", "description": "内容"},
-                        "category": {
+                        "persona": {
                             "type": "string",
-                            "enum": ["话术", "决策"],
                             "description": (
-                                "经验类别：「话术」= 发言/回复技巧；"
-                                "「决策」= 面对某种情景的广泛思路"
+                                "可选。给这条经验打人格标签（传人格名，如 normal / task），"
+                                "标记它属于该人格的应对方式；"
+                                "通用技巧不要传（默认全局通用）。"
+                                "传了不存在的人格名会被直接拒绝。"
                             ),
                         },
                     },
-                    "required": ["title", "summary", "category"]
+                    "required": ["title", "summary"]
                 }
             }
         }
@@ -163,26 +196,19 @@ class ToolBequest:
     @classmethod
     def get_delete_bequest_tool_schema(cls) -> Dict[str, Any]:
         """返回 delete_bequest 工具的 schema（原样迁自 bequest_agent，2026-09-15；
-        2026-09-24 增加 category 参数以支持删除决策经验）。"""
+        2026-09-24 增加 category 参数以支持删除决策经验；
+        2026-09-27 决策经验入口从 LLM 视野移除，schema 仅暴露「话术」）。"""
         return {
             "type": "function",
             "function": {
                 "name": "delete_bequest",
-                "description": "删除经验。如果已登记的经验被认为不恰当，删除该经验（按 category 指明删哪一类）。",
+                "description": "删除话术经验。如果已登记的经验被认为不恰当，删除该经验。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "title": {"type": "string", "description": "标题"},
-                        "category": {
-                            "type": "string",
-                            "enum": ["话术", "决策"],
-                            "description": (
-                                "经验类别：「话术」= 发言/回复技巧；"
-                                "「决策」= 面对某种情景的广泛思路"
-                            ),
-                        },
                     },
-                    "required": ["title", "category"]
+                    "required": ["title"]
                 }
             }
         }
@@ -238,13 +264,60 @@ class ToolBequest:
         return {"query": query, "count": len(results), "bequests": results}
 
     @classmethod
-    async def query_bequest(cls, query: str, top_k: int = 3) -> Dict[str, Any]:
-        """按语义相似度检索话术经验（category 固定 'speech'，向量比对 title）。
+    async def _query_by_title(cls, query: str, top_k: int) -> Dict[str, Any]:
+        """按标题关键词比对检索话术经验（2026-09-29 新增，供反思系统省 token 用）。
+
+        不生成查询向量、命中条数通常远少于向量检索；未命中时直接返回空结果
+        并附 hint，不静默退回向量（否则失去省 token 的意义）。
+        """
+        from brain.hc.database.bequest import BequestOperations
+
+        bequest_ops = BequestOperations()
+        hits = await bequest_ops.search_bequests_by_title(
+            query, category="speech", limit=top_k,
+        )
+        results = [
+            {"title": h["title"], "summary": h["summary"]}
+            for h in hits
+        ]
+        result: Dict[str, Any] = {
+            "query": query,
+            "mode": "标题",
+            "count": len(results),
+            "bequests": results,
+        }
+        if not results:
+            result["hint"] = (
+                "标题未命中任何经验。若需要语义上的相近经验，"
+                "请改用「向量」方式重新查询。"
+            )
+        logger.debug(f"query_bequest(标题) 完成: query={query}, hits={result['count']}")
+        return result
+
+    @classmethod
+    async def query_bequest(
+        cls, query: str, top_k: int = 3, mode: str = "向量"
+    ) -> Dict[str, Any]:
+        """检索话术经验（category 固定 'speech'）。
+
+        mode：「向量」（默认）按语义相似度检索（向量比对 title）；
+        「标题」按标题关键词比对，命中更少更省 token。
 
         Returns:
-            {"query": str, "count": int,
-             "bequests": [{"title": str, "summary": str, "similarity": float}]}
+            向量: {"query": str, "count": int,
+                   "bequests": [{"title": str, "summary": str, "similarity": float}]}
+            标题: {"query": str, "mode": "标题", "count": int,
+                   "bequests": [{"title": str, "summary": str}],
+                   "hint": str}  # hint 仅在未命中时出现
         """
+        mode = (mode or "向量").strip()
+        if mode not in cls._QUERY_MODES:
+            raise ValueError(
+                f"检索方式非法（{mode!r}）：只能取「向量」或「标题」。"
+            )
+        if mode == "标题":
+            return await cls._query_by_title(query, top_k)
+
         result = await cls._query_by_category(query, top_k, "speech")
         logger.debug(f"query_bequest 完成: query={query}, hits={result['count']}")
         return result
@@ -273,11 +346,14 @@ class ToolBequest:
 
     @classmethod
     async def upsert_bequest(
-        cls, title: str, summary: str, category: str = "话术"
+        cls, title: str, summary: str, category: str = "话术", persona: str = ""
     ) -> Dict[str, Any]:
         """创建或覆盖经验（category 中文枚举「话术」/「决策」，缺省「话术」），落库前先查重。
 
-        按 title + category 精确匹配定位：命中则覆盖 summary，否则新建。
+        按 title + category 精确匹配定位：命中则覆盖 summary（persona 非空时
+        一并更新标签，否则保留原标签），否则新建。persona 非空时必须为已注册
+        人格名（硬拦，不存在直接 ValueError 走 LLM 自纠）；''＝全局通用。
+        2026-10-01 观察期：persona 标签仅落库，检索侧暂不按其过滤。
         落库前在同类内按 title 向量检索近似经验（覆盖场景排除自身，一次检索同时
         服务硬拦截 / 软警告 / 近似经验展示）：
         - 新建场景存在相似度 >= HARD_DUPLICATE_THRESHOLD 的近似经验：
@@ -288,7 +364,7 @@ class ToolBequest:
 
         Returns:
             正常落库: {"bequest_id": str, "title": str, "category": str,
-                       "is_new": bool,
+                       "persona": str, "is_new": bool,
                        "similar_bequests": [{"title": str, "summary": str,
                                              "similarity": float}],
                        "duplicate_warning": str  # 仅存在疑似重复时出现}
@@ -296,6 +372,16 @@ class ToolBequest:
                          "conflict_with": [...], "hint": str}
         """
         from brain.hc.database.bequest import BequestOperations
+        from brain.base.persona.persona_registry import list_personas
+
+        persona = (persona or "").strip()
+        if persona:
+            valid = {p.persona_name for p in list_personas()}
+            if persona not in valid:
+                raise ValueError(
+                    f"persona 非法（{persona!r}）：不存在该人格。可用人格: "
+                    f"{'、'.join(sorted(valid))}（不绑定请不传 persona）。"
+                )
 
         db_category = cls._resolve_category(category)
         bequest_ops = BequestOperations()
@@ -346,12 +432,15 @@ class ToolBequest:
 
         # —— 落库（覆盖或新建）——
         if existing_id:
-            await bequest_ops.update_bequest(title, category=db_category, summary=summary)
+            update_kwargs: Dict[str, Any] = {"summary": summary}
+            if persona:
+                update_kwargs["persona"] = persona  # 非空才改标签，否则保留原标签
+            await bequest_ops.update_bequest(title, category=db_category, **update_kwargs)
             is_new = False
             bequest_id = existing_id
         else:
             bequest_id = await bequest_ops.create_bequest(
-                title=title, summary=summary, category=db_category,
+                title=title, summary=summary, category=db_category, persona=persona,
             )
             is_new = True
 
@@ -368,6 +457,7 @@ class ToolBequest:
             "bequest_id": bequest_id,
             "title": title,
             "category": db_category,
+            "persona": persona,
             "is_new": is_new,
             "similar_bequests": similar,
         }

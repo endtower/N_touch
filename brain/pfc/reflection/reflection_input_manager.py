@@ -20,9 +20,10 @@ Reflection user 消息的两条构造路径：
    仅推进游标消费掉，不进 Reflection 视野。
 
 amy_effect 段的语义（与增量共用）：
-- 核心是决策侧情绪描述，来自无参 get_decision_description()（决策侧出口，见 docs/api/amy.md），
-  为单行 SC 行动对应 + "原因："（仅最终评价类想法摘要，成因由出口内嵌）。
-  情绪体系隔离（与 PFCA 一致）：Reflection 只见 SC（社交参与度轴），不见 NE/DA 表现侧激素行。
+- 核心是 Reflection 专用情绪出口 get_reflection_description()（见 docs/api/amy.md），
+  为存在感数值状态行（如「存在感 50/100 正常」），**不显示任何想法**。
+  情绪体系隔离（与 PFCA 隔离；决策侧出口 get_decision_description 供
+  pfca / proactive / light_agent 使用，Reflection 不再走该出口）。
 - 前缀由本模块添加：首条【当前情绪】，增量"你的心情变为："。
 - 游标推进在成功取到描述之后执行：取描述失败时不推进，事件留给下一轮，不丢。
 """
@@ -112,7 +113,8 @@ class ReflectionInputManager:
             NORMAL_STARTUP 路径：
             {message_base}                        <- 外部注入的反思请求
             【当前环境状态】{年月日 时刻 时段}     <- 纯同步取系统时间，恒非空
-            【当前情绪】{amy 统一出口描述}        <- 三行激素 + 原因；取到非空才拼
+            【当前情绪】{存在感数值状态行}       <- 存在感数值 + 词档（不显示想法）；
+                                                    如「存在感 50/100 正常」，取到非空才拼
             {近期经历}                            <- temporary_memory 取到非空才拼（≤3 条，
                                                      label "近期经历" 内置标题）
             【当前已经承接的任务】                <- 任务命中才拼（≤10 行轻量简表：
@@ -173,9 +175,9 @@ class ReflectionInputManager:
         - 情绪体系隔离过滤：仅当未读事件含最终评价类事件（act 命中
           FinalEvaluationAct 词表）才构造内容；表现侧 NE/DA 事件对本模块是
           噪声，仅推进游标消费掉。
-        - 有最终评价类事件：取当前决策侧描述（无参 get_decision_description，
-          内部已含 SC 行动行 + 最终评价类想法原因），取到后再 advance_cursor
-          推进游标（取描述失败/为空时不推进，事件留给下一轮，不丢）。
+        - 有最终评价类事件：取当前 Reflection 专用情绪描述（无参
+          get_reflection_description，为反馈维度数值状态行，不含任何想法），
+          取到后再 advance_cursor 推进游标（取描述失败/为空时不推进，事件留给下一轮，不丢）。
         - 输出"你的心情变为：{description}"。
 
         Returns:
@@ -194,18 +196,18 @@ class ReflectionInputManager:
         # （不推进会无限积压重查），但不触发增量内容。
         final_events = [
             e for e in events
-            if FinalEvaluationAct.kind_of(e.get("act", "") or "") is not None
+            if FinalEvaluationAct.contains(e.get("act", "") or "")
         ]
         if not final_events:
             await ei.advance_cursor("reflection", max_seq)
             return None
 
-        current_amy = await ei.get_decision_description()
+        current_amy = await ei.get_reflection_description()
         if not current_amy:
             return None
         await ei.advance_cursor("reflection", max_seq)
 
-        # 输出情绪（description 已含成因，见 _format_amy_segment）
+        # 输出情绪（反馈数值状态行，见 _format_amy_segment）
         logger.info(f"增量 - 情绪变化: '{current_amy[:60]}'")
         return await self._format_amy_segment(current_amy, prefix="你的心情变为：")
 
@@ -226,9 +228,8 @@ class ReflectionInputManager:
     async def _format_amy_segment(self, description: str, prefix: str) -> str:
         """构造"情绪描述"段。
 
-        description 来自决策侧出口 get_decision_description()，为单行 SC
-        行动对应 + "原因："（仅最终评价类想法摘要，成因出口内嵌），
-        因此这里只加前缀。
+        description 来自 Reflection 专用出口 get_reflection_description()，为存在感
+        数值状态行（如「存在感 50/100 正常」），因此这里只加前缀。
 
         prefix:
           - 首条：'【当前情绪】'
@@ -263,9 +264,9 @@ class ReflectionInputManager:
         """首条专用的情绪槽收集（情绪消费者游标，决策侧）。
 
         策略：
-        - 无条件取当前决策侧描述（统一出口 get_decision_description：单行 SC
-          行动对应 + 最终评价类想法原因）；只要 amy 有描述就写槽。
-          情绪体系隔离：Reflection 只见 SC，不见 NE/DA 表现侧激素行。
+        - 无条件取当前 Reflection 专用情绪描述（get_reflection_description：
+          反馈维度数值状态行，不显示任何想法）；只要 amy 有描述就写槽。
+          情绪体系隔离：Reflection 不走决策侧出口，也不见 NE/DA 表现侧激素行。
         - 首条消费掉当前全部未读事件并推进游标，避免这些事件在后续增量轮
           重复注入（决策侧过滤下，NE/DA 噪声事件也一并消费掉）。
         - 描述取不到时早退且不推进游标（事件留给增量轮恢复）。
@@ -273,7 +274,7 @@ class ReflectionInputManager:
         from brain.amy.emotional_interface import get_emotional_interface
 
         ei = await get_emotional_interface()
-        current = await ei.get_decision_description()
+        current = await ei.get_reflection_description()
         if not current:
             return
 

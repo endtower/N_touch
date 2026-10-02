@@ -113,23 +113,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "name": "update_long_term_task",
             "description": (
                 "更新一条【已存在】的任务。\n"
-                "重要限制（proactive 上下文）：\n"
-                "  - 本工具**只能更新已存在的任务**，禁止创建新任务、禁止删除任务。\n"
-                "  - task_title 必须能在任务表里精确匹配到一条已存在的任务。\n"
-                "  - 不确定任务是否存在时，请先用 query_history 等工具确认，"
-                "或直接放弃更新（不要靠模糊标题硬调）。\n"
-                "【典型用途：推迟再次唤醒时间】\n"
-                "  当你审视当前被唤醒的输入，发现它来自一条已经到期的未完成任务，"
-                "但此刻又不想/不适宜执行（或条件不满足、或暂时不感兴趣），"
-                "**必须**调用本工具把这条任务的 next_occurrence 推迟到更晚的时间点，"
-                "以避免系统短期重复唤起——这是防止重复唤起的唯一受支持手段。\n"
-                "  - next_occurrence 里填入新的期望时间（ISO 8601）。\n"
-                "  - summary 是新的完整概况（覆盖旧的），保持原格式不变：首行「当前阶段：<一句话>」、"
-                "之后为分级笔记（每行「- 」开头，缩进两个空格表示从属层级），"
-                "只在末尾追加一条笔记说明本次情况；"
-                "若本次为推迟唤醒，要说明为什么这次不处理 / 推迟到何时。\n"
-                "也可以用于：(1) 给已有任务追加新进展；(2) 把任务标记为完成"
-                "（next_occurrence 填「完结」）。"
+                "重要限制（proactive 上下文）：只能更新已有任务，禁止创建/删除；"
+                "task_title 必须精确匹配到一条已存在任务，不确定存在就先查证，不要靠模糊标题硬调。\n"
+                "典型用途——推迟再次唤醒：审视到一个已到期的未完成任务、此刻不宜执行时，"
+                "必须调用本工具把下次唤醒推迟到更晚，这是防止系统短期重复唤起的唯一受支持手段。\n"
+                "也可用于更新任务阶段 stage，或把任务标记为完成（next_occurrence 填「完结」）。"
             ),
             "parameters": {
                 "type": "object",
@@ -140,22 +128,33 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                             "要更新的任务标题，必须能在任务表中精确匹配到一条已存在的任务。"
                         ),
                     },
-                    "summary": {
-                        "type": "string",
-                        "description": (
-                            "更新后的完整任务概况（重写全文、覆盖旧的）。"
-                            "保持原格式不变：首行「当前阶段：<一句话>」、"
-                            "之后为分级笔记（每行「- 」开头，缩进两个空格表示从属层级）；"
-                            "只在末尾追加一条笔记说明本次情况"
-                            "（若本次为推迟唤醒，说明推迟原因，例如：时机不成熟、缺关键信息等）。"
-                        ),
-                    },
                     "next_occurrence": {
                         "type": "string",
                         "description": (
-                            "下次发生时间。推迟唤醒时必填一个比当前时间更晚的 ISO 8601 时间点"
+                            "下次处理时间。推迟唤醒时必填一个比当前时间更晚的 ISO 8601 时间点"
                             "（例如 '2024-01-20T10:00:00'），否则系统会立刻再次唤醒；"
                             "如要标记任务完成，填「完结」。"
+                        ),
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": (
+                            "一条简短的说明性笔记（覆盖任务笔记列）；"
+                            "若本次为推迟唤醒，说明推迟原因，例如：时机不成熟、缺关键信息等。"
+                        ),
+                    },
+                    "stage": {
+                        "type": "string",
+                        "description": (
+                            "更新后的当前阶段（一句话、刚性目标，说明还需要做什么）。"
+                            "不填则保持原值不变。"
+                        ),
+                    },
+                    "deadline": {
+                        "type": "string",
+                        "description": (
+                            "最终汇报时间（可选，ISO 8601）。仅在需要顺延/提前任务的最终汇报时限时填写；"
+                            "不填则保持原值不变。到了该时间仍未达标，系统会要求整理已有材料收尾。"
                         ),
                     },
                     "reason": {
@@ -165,7 +164,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                         ),
                     },
                 },
-                "required": ["task_title", "summary", "next_occurrence"],
+                "required": ["task_title", "next_occurrence"],
             },
         },
     },
@@ -436,8 +435,10 @@ async def _tool_skip_proactive(reason: str = "no_action_needed") -> str:
 
 async def _tool_update_long_term_task(
     task_title: str,
-    summary: str,
     next_occurrence: str,
+    notes: str = "",
+    stage: str = "",
+    deadline: str = "",
     reason: str = "",
 ) -> str:
     """受限的任务更新工具（proactive 专用）。
@@ -452,21 +453,18 @@ async def _tool_update_long_term_task(
 
     Args:
         task_title: 任务标题（必须能在任务表里精确匹配到一条已存在的任务）
-        summary: 更新后的完整任务概况（覆盖旧概况，保持首行「当前阶段：」等原格式）
-        next_occurrence: 下次发生时间（ISO 8601）；输入「完结」则标记任务已完成
+        next_occurrence: 下次处理时间（ISO 8601）；输入「完结」则标记任务已完成
+        notes: 一条说明性笔记（覆盖任务笔记列）；用于推迟唤醒时说明原因
+        stage: 更新后的当前阶段；留空则保持原值不变
+        deadline: 最终汇报时间（ISO 8601，可选）；不传则保持原值不变
         reason: 本次更新原因（仅日志/留痕，不影响行为）
 
     Returns:
-        JSON 字符串，包含 task_title / summary / next_occurrence / status / success / reason
+        JSON 字符串，包含 task_title / next_occurrence / deadline / status / success / reason
     """
     if not task_title:
         return json.dumps(
             {"success": False, "error": "task_title 不能为空"},
-            ensure_ascii=False,
-        )
-    if not summary:
-        return json.dumps(
-            {"success": False, "error": "summary 不能为空"},
             ensure_ascii=False,
         )
     if not next_occurrence:
@@ -486,8 +484,10 @@ async def _tool_update_long_term_task(
 
     result = await QuestAgent._update_task_status_impl(
         task_title=task_title,
-        summary=summary,
         next_occurrence=next_occurrence,
+        notes=notes or None,
+        stage=stage or None,
+        deadline=deadline or None,
     )
 
     # 记录 reason 到历史/日志（不影响 update 行为本身）

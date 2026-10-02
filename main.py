@@ -2,34 +2,34 @@
 # -*- coding: utf-8 -*-
 
 """
-Abyss Core - 消息处理核心服务1
+Abyss Core - 主入口
 
-这个服务作为NoneBot插件的后端处理系统，主要功能包括：
-1. 接收来自NoneBot插件的用户消息
-2. 将消息送入SystemCore进行处理和存储
-3. 实现简单的发送消息功能作为备用
-4. 提供系统状态查询API
-
-运行环境：
-- Python 3.7+
-- FastAPI
-- aiohttp
+FastAPI 应用本身零业务路由，职责有两个：
+1. lifespan 启动 SystemCore（大脑 + 各通道；Web 业务路由在 adapt/web，端口 5002）
+2. 作为将来系统管理 API（supervisor 状态/日志端点）的宿主
 
 启动命令：
-- python main.py
-- 开发环境：uvicorn main:app --host 127.0.0.1 --port 5000 --reload
+    python main.py           # 生产模式（无热重载）
+    python main.py --dev     # 开发模式（文件修改自动重启，已排除日志/数据目录）
+    可选 --host / --port 覆盖监听地址（默认 127.0.0.1:5000）
+
+运行环境：Python 3.10+
 """
 
+import argparse
 import sys
 import uvicorn
 from pathlib import Path
 from fastapi import FastAPI
-from typing import Dict, Any, AsyncIterator 
+from typing import Dict, Any, AsyncIterator
 from dotenv import load_dotenv
-load_dotenv('.env.dev')
-# 添加项目根目录到系统路径以便导入Abyss_Core包
-project_root = str(Path(__file__).resolve().parent.parent)  # 项目根目录
-sys.path.append(project_root)  # 添加项目根目录
+
+# 项目根 = main.py 所在目录。插入到 sys.path[0] 保证包导入不被环境干扰
+project_root = Path(__file__).resolve().parent
+sys.path.insert(0, str(project_root))
+
+# 配置外置入口（.env.dev 不存在时静默跳过；见 config/ 下的读取方）
+load_dotenv(project_root / ".env.dev")
 
 # 导入日志模块
 from utils.logger import setup_logging
@@ -37,47 +37,28 @@ from utils.logger import setup_logging
 # 导入系统核心协调器
 from core.system_core import SystemCore
 
-# 导入工具模块
-from utils import setup_exception_handlers
-
 # 初始化日志记录器
 logger = setup_logging('main')
 
+
 # 使用FastAPI推荐的lifespan事件处理器
-# 保持现有的lifespan机制，但增加更明确的初始化顺序
 async def lifespan(app: FastAPI) -> AsyncIterator[Dict[str, Any]]:
     """FastAPI应用生命周期管理"""
     logger.info("开始初始化系统核心组件...")
-    
-    
+
     # 初始化SystemCore（核心组件）
     async with SystemCore() as system_core:
         # 明确将核心组件绑定到app.state
         app.state.system_core = system_core
         logger.info("SystemCore初始化完成并绑定到应用状态")
-        
+
         # 让应用运行
         yield {}
 
-# 创建FastAPI应用并配置lifespan
+
+# 创建FastAPI应用（零路由：目前只承载 lifespan；将来在此挂管理 API）
 app = FastAPI(title="Abyss Core", description="消息处理核心服务",
-             version="1.0", lifespan=lifespan)
-
-# CORS：放开给本地 Vite 开发服（5173）调用
-from fastapi.middleware.cors import CORSMiddleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# 设置异常处理器
-setup_exception_handlers(app)
+              version="1.0", lifespan=lifespan)
 
 logger.info("应用初始化完成")
 
@@ -85,38 +66,40 @@ logger.info("应用初始化完成")
 # 主程序入口
 # ======================================
 
-def main():
+def main() -> None:
     """主函数：启动FastAPI服务"""
+    parser = argparse.ArgumentParser(description="Abyss Core 主服务")
+    parser.add_argument("--dev", action="store_true",
+                        help="开发模式：开启热重载（生产/打包环境务必关闭）")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=5000)
+    args = parser.parse_args()
+
     try:
-        # 配置服务参数
-        host = "127.0.0.1"
-        port = 5000
-
-        # 运行期写入热点必须从热重载监视中排除：服务启动即写日志（logs/），
-        # 若被 watchfiles 监视到会触发「写入 → 重启 → 再写入」的无限重启风暴
-        project_dir = str(Path(__file__).resolve().parent)
-        reload_excludes = [
-            "logs", "logs/*", "*.log",           # 运行日志
-            "tests", "tests/*",                   # 测试产物 results/*.json
-            "docs", "docs/*",                     # 文档改动无需重启后端
-            "scripts", "scripts/*",
-            "web_frontend", "web_frontend/*",     # 前端由 Vite 自管
-            "None_Tooth", "None_Tooth/*",         # 独立插件项目
-            "__pycache__", "*__pycache__*", "*.pyc",
-            "*.db", "*.sqlite*", "*.sqlite3",     # 数据库文件
-        ]
-
-        # 使用uvicorn启动FastAPI服务（开发环境开启reload，文件修改自动重启）
-        uvicorn.run(
-            "main:app", host=host, port=port, reload=True,
-            reload_dirs=[project_dir],
-            reload_excludes=reload_excludes,
-        )
+        if args.dev:
+            # 运行期写入热点必须从热重载监视中排除：服务启动即写日志（logs/），
+            # 若被 watchfiles 监视到会触发「写入 → 重启 → 再写入」的无限重启风暴
+            reload_excludes = [
+                "logs", "logs/*", "*.log",           # 运行日志
+                "tests", "tests/*",                   # 测试产物 results/*.json
+                "docs", "docs/*",                     # 文档改动无需重启后端
+                "scripts", "scripts/*",
+                "web_frontend", "web_frontend/*",     # 前端由 Vite 自管
+                "__pycache__", "*__pycache__*", "*.pyc",
+                "*.db", "*.sqlite*", "*.sqlite3",     # 数据库文件
+                "memory", "memory/*",                 # 运行期数据（消息/记忆/统计）
+            ]
+            uvicorn.run(
+                "main:app", host=args.host, port=args.port, reload=True,
+                reload_dirs=[str(project_root)],
+                reload_excludes=reload_excludes,
+            )
+        else:
+            # 生产模式：直接传 app 对象，无文件监视、无子进程
+            uvicorn.run(app, host=args.host, port=args.port)
 
     except KeyboardInterrupt:
         logger.info("接收到中断信号，正在停止服务...")
-    except Exception as e:
-        logger.error(f"启动服务时发生错误: {e}")
 
 
 if __name__ == "__main__":

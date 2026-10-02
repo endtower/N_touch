@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Moon, Sunny, Connection, Document, Files, MagicStick, ChatDotRound, Aim } from '@element-plus/icons-vue'
+import { Moon, Sunny, Connection, Document, Files, MagicStick, ChatDotRound, Aim, DataAnalysis } from '@element-plus/icons-vue'
 import ChatWindow from './components/ChatWindow.vue'
 import InputArea from './components/InputArea.vue'
 import SessionList from './components/SessionList.vue'
@@ -12,6 +12,7 @@ import EventListDialog from './components/EventListDialog.vue'
 import ContextViewerDialog from './components/ContextViewerDialog.vue'
 import AmyStatusDialog from './components/AmyStatusDialog.vue'
 import SessionChatDialog from './components/SessionChatDialog.vue'
+import TokenStatsDialog from './components/TokenStatsDialog.vue'
 import IdentityBar from './components/IdentityBar.vue'
 import ModeRail from './components/ModeRail.vue'
 import TestPresetDialog from './components/TestPresetDialog.vue'
@@ -27,6 +28,7 @@ const contextOpen = ref(false)
 const amyOpen = ref(false)
 const sessionChatDialogVisible = ref(false)
 const testPresetDialogVisible = ref(false)
+const tokenStatsOpen = ref(false)
 const theme = ref<'light' | 'dark'>(
   (localStorage.getItem('abyss-theme') as 'light' | 'dark') || 'dark',
 )
@@ -292,6 +294,14 @@ const headerSubtitle = computed(() => {
             <span class="truck-toggle-label">会话记录</span>
           </button>
           <button
+            class="truck-toggle-btn"
+            title="Token 用量统计 (各 Agent / API 提供商 / 模型的消耗与缓存命中)"
+            @click="tokenStatsOpen = true"
+          >
+            <el-icon :size="14"><DataAnalysis /></el-icon>
+            <span class="truck-toggle-label">用量</span>
+          </button>
+          <button
             v-if="chat.state.mode === 'test'"
             class="truck-toggle-btn"
             title="运行预设测试 (环境准备: 清空测试库并填入预设数据)"
@@ -349,6 +359,7 @@ const headerSubtitle = computed(() => {
     <ContextViewerDialog v-model:visible="contextOpen" />
     <AmyStatusDialog v-model:visible="amyOpen" />
     <SessionChatDialog v-model:visible="sessionChatDialogVisible" />
+    <TokenStatsDialog v-model:visible="tokenStatsOpen" />
     <TestPresetDialog v-model:visible="testPresetDialogVisible" />
   </div>
 </template>

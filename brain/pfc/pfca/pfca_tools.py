@@ -18,10 +18,11 @@ import time
 import asyncio
 from functools import partial
 from typing import Dict, Any, List
-from brain.amy.constants import FinalEvaluationAct
+from brain.amy.constants import FinalEvaluationAct, clamp, FEEDBACK_MAX
+from brain.amy.feedback_state import get_feedback_state
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
-from brain.base import ToolManager, ToolHC, ToolSocial, ToolTask, ToolPersona, ToolBequest
+from brain.base import ToolManager, ToolHC, ToolSocial, ToolTask, ToolPersona
 from brain.hc.global_session_state import get_global_session_state
 
 
@@ -66,6 +67,10 @@ class PFCA_tool_manager(ToolManager):
                             "max_messages": {
                                 "type": "integer",
                                 "description": "本段话题的发送轮次软上限（一次发送工具调用计 1，即使拆成多条消息），达到后回到 PFCA 重新拟定策略。首次建议 0-5。"
+                            },
+                            "persona_name": {
+                                "type": "string",
+                                "description": "可选，指定本段对话使用的人格名（如 normal / task / assistant）。不填则使用默认人格 normal。"
                             }
                         },
                         "required": ["session_id", "purpose", "max_messages"]
@@ -91,6 +96,10 @@ class PFCA_tool_manager(ToolManager):
                             "extra_info": {
                                 "type": "string",
                                 "description": "可选，任务补充材料：相关消息原文、人物印象要点、前因后果。严禁含糊指代（要求告知某事结果必须附结果内容）。"
+                            },
+                            "persona_name": {
+                                "type": "string",
+                                "description": "可选，指定本段社交使用的人格名（如 normal / task / assistant）。不填则使用默认人格 normal。"
                             }
                         },
                         "required": ["session_id", "purpose"]
@@ -124,9 +133,9 @@ class PFCA_tool_manager(ToolManager):
                 }
             },
             ToolSocial.get_query_address_book_tool_schema(),
-            # 内心人格召唤（2026-09-19 接入：取代 advanced_decision_agent，
-            # 召唤一个内心人格以自己的立场审视现状，产出该人格视角的思考结论；
-            # schema 收口于通用层 ToolPersona，enum 随注册表动态生成）
+            # 内心人格征询（2026-09-29 调整：PFCA 只给现状，全部人格并行自荐评分，
+            # 返回各人格评分 + 行动方向供 PFCA 参考，不再替换人格；
+            # schema 收口于通用层 ToolPersona）
             ToolPersona.get_inner_persona_tool_schema(),
             {
                 "type": "function",
@@ -152,7 +161,14 @@ class PFCA_tool_manager(ToolManager):
                             "final_evaluation": {
                                 "type": "string",
                                 "enum": FinalEvaluationAct.names(),
-                                "description": "本次 PFCA 会话的最终评价，仅第二次调用（确认退出时）生效；不填按无评价"
+                                "description": (
+                                    "本次 PFCA 会话的最终评价（按他人反馈四档选）:"
+                                    "被夸选「被他人夸奖为优秀」(+20)；"
+                                    "评价尚可选「被他人评价为尚可」(+10)；"
+                                    "无反馈选「未得到他人评价与反馈」(-10)；"
+                                    "被否定选「被他人评价欠佳/不认可」(-20)。"
+                                    "仅第二次调用（确认退出时）生效；不填按无评价"
+                                )
                             },
                             "enter_reflection": {
                                 "type": "boolean",
@@ -183,10 +199,6 @@ class PFCA_tool_manager(ToolManager):
             # quest_agent 联系通道（2026-09-18 接入：直接联系 quest agent，转交内容
             # 由其裁决——审批推进 / 登记任务 / 修订任务；PFCA 不持有裁决权）
             ToolTask.get_quest_agent_tool_schema(),
-            # 决策经验查询（2026-09-24 接入：取代原 recall_memory 的 bequest 分支——
-            # 该工具注册在分发表却无 schema，LLM 一直调不到；schema / 实现统一收口
-            # ToolBequest，PFCA 只读不写，经验增删仍由反思系统裁决）
-            ToolBequest.get_query_decision_bequest_tool_schema(),
         ]
 
     def __init__(self):
@@ -202,8 +214,6 @@ class PFCA_tool_manager(ToolManager):
             "terminate": self.terminate,
             "query_address_book": ToolSocial.query_address_book,
             "inner_persona_agent": self.summon_personas,
-            # 决策经验查询（直接引用 ToolBequest 类方法，只读；增删仍由反思系统裁决）
-            "query_decision_bequest": ToolBequest.query_decision_bequest,
             "query_note": self.query_note,
             "list_notes": self.list_notes,
             "record_to_notepad": self.record_to_notepad,
@@ -287,7 +297,7 @@ class PFCA_tool_manager(ToolManager):
 
         return response
 
-    async def conversation_agent(self, purpose: str, max_messages: int = 0, extra_info: str = "", session_id: str = "") -> Any:
+    async def conversation_agent(self, purpose: str, max_messages: int = 0, extra_info: str = "", session_id: str = "", persona_name: str = "") -> Any:
         """
         直接开启一段对话（约 5-15 句的短对话）。
         调用方可通过 session_id 指定目标会话；不指定则默认为主人的私聊会话（private_<MASTER_ID>）。
@@ -300,11 +310,15 @@ class PFCA_tool_manager(ToolManager):
 
         涉及附件时，PFCA 把附件清单（[图片:xxx] / [文件:xxx] 等）写进 purpose 或 extra_info 里。
 
+        人格指定：本段对话使用 persona_name 指定的人格（缺省 normal）作为语言与行为基准，
+        由 conversation 在本段会话首条消息注入该人格 kernel_prompt；人格不再随 PFCA 全局切换。
+
         Args:
             purpose: 本次聊天的目的与期望结局，具体策略与计划。
             extra_info: 额外补充信息（其他会话消息原文、agent 结论 / 计划书等）。
             max_messages: 软限制发送轮次数（一次发送工具调用计 1）
             session_id: 可选，目标会话 id，格式 'type_id'。为空时默认主人的私聊会话。
+            persona_name: 可选，本段对话使用的人格名。为空时用默认人格（normal）。
 
         Returns:
             Dict[str, Any]: 遵循统一格式的操作结果；保护模式阻止时返回
@@ -316,6 +330,7 @@ class PFCA_tool_manager(ToolManager):
         from brain.chat.conversation.conversation_core import get_conversation_core
 
         session_id = (session_id or "").strip() or f"private_{RoleConfig.MASTER_ID}"
+        persona_name = self._resolve_persona_name(persona_name)
 
         # 保护模式：仅允许对主人私聊会话 + 白名单会话对话，非主人用户一律阻止并提醒
         # 改用 social_chat_agent（对外社交走受监管的社交通道）。
@@ -361,11 +376,12 @@ class PFCA_tool_manager(ToolManager):
             session_id=session_id,
             purpose=combined_purpose,
             max_messages=max_messages,
+            persona_name=persona_name,
         )
         logger.info(f"conversation模块返回结果(session_id={session_id}): {chat_result}")
         return chat_result
 
-    async def social_chat_agent(self, session_id: str, purpose: str, extra_info: str = "") -> Any:
+    async def social_chat_agent(self, session_id: str, purpose: str, extra_info: str = "", persona_name: str = "") -> Any:
         """
         启动 social_chat_agent，对其他人（群聊 / 非主人私聊）推进一个社交任务。
 
@@ -373,11 +389,15 @@ class PFCA_tool_manager(ToolManager):
         会话注册与汇报窗口锚点由 core 自治，工具层不做重复注册；
         对外发言的监管（发送模式 / 主人审批）由 social_chat 内部处理。
 
+        人格指定：本段社交使用 persona_name 指定的人格（缺省 normal）作为语言与行为基准，
+        由 social_chat 在本段首条消息注入该人格 kernel_prompt；人格不再随 PFCA 全局切换。
+
         Args:
             session_id: 工作会话 id，格式 "type_id"（如 "group_xxx" / "private_yyy"）。
                 不能是主人的私聊会话（主人私聊请用 conversation_agent）。
             purpose: 社交任务书：目标 / 现状 / 期望结局 / 关键约束。
             extra_info: 可选补充材料（相关消息原文、人物印象要点、前因后果）。
+            persona_name: 可选，本段社交使用的人格名。为空时用默认人格（normal）。
 
         Returns:
             Dict[str, Any]: social_chat 返回结果 {summary_text, exit_reason}
@@ -386,6 +406,8 @@ class PFCA_tool_manager(ToolManager):
             raise ValueError("session_id 必填")
         if not purpose or not purpose.strip():
             raise ValueError("purpose 必填")
+
+        persona_name = self._resolve_persona_name(persona_name)
 
         from config.role_settings import RoleConfig
         master_private = f"private_{RoleConfig.MASTER_ID}"
@@ -408,6 +430,7 @@ class PFCA_tool_manager(ToolManager):
         result = await SocialChatCore().start(
             purpose=combined_purpose,
             working_session_id=session_id.strip(),
+            persona_name=persona_name,
         )
         logger.info(f"social_chat_agent 返回结果: {result}")
         return result
@@ -529,7 +552,7 @@ class PFCA_tool_manager(ToolManager):
         第一次调用：将 summary/title/final_evaluation 暂存进 GlobalSessionState（不落库），
         返回行动记录和确认提示。
         第二次调用（最后一次）：以本次参数把 summary 写入短期记忆、随记事本落库并登记
-        最终评价（SC 轴闭环 + 想法入池）——保证两次调用只有最后一次计入 temporary memory。
+        最终评价（自我评价记录 + 想法入池）——保证两次调用只有最后一次计入 temporary memory。
         若会话未经第二次调用结束（max_rounds 熔断 / 强停等），由 pfca_core.start 的
         退出兜底把暂存补写入短期记忆（防总结丢失，docs/已完成.md #9）。
 
@@ -561,12 +584,9 @@ class PFCA_tool_manager(ToolManager):
 
         terminate_confirmed = focus_state._data.get("terminate_confirmed", False)
 
-        pfca_actions = focus_state._data.get("pfca_actions", [])
-        actions_text = "\n".join([f"{i+1}. {action}" for i, action in enumerate(pfca_actions)]) if pfca_actions else "无行动记录"
-
         if not terminate_confirmed:
             focus_state._data["terminate_confirmed"] = True
-            logger.info("terminate 第一次调用，暂存总结并显示确认提示")
+            logger.info("terminate 第一次调用，暂存总结并显示结束预览")
 
             # 只暂存、不落库（docs/已完成.md #9 修复）：两次调用语义下只有"最后一次"
             # 计入 temporary memory——第二次调用（确认退出）才写入；若会话经
@@ -578,14 +598,41 @@ class PFCA_tool_manager(ToolManager):
                 "final_evaluation": final_evaluation,
             }
 
-            return f"""你的行动记录：
-{actions_text}
-系统提醒，确认是否退出：
-- 查看本次对话或事件是否未完待续？包含情绪上的愤怒气不过，记恨，引发的持续关注或伺机待发，或是事件上更新与记录，需要通过工具来更新
-- 如果是重要的理性任务，看看有无跟关系好或主要相关的人道别或提醒对方自己的离开
-- 如果是其他类型的情况，是否达成了情绪上的闭环？如临走时骂回去等等
-- 是否需要调整记忆？记忆将会影响下次你对目标群聊与个人的第一印象，并更好的辅助与理解对方。
-如果确认退出，重新调用该工具。"""
+            # ===== 结束预览（确认退出前的预告） =====
+            # 1) 未完成任务轻量简表（标题 + 下次处理时间），拉取失败直接上抛阻断（user_rules）。
+            from brain.hc.database.task import TaskOperations
+            task_ops = TaskOperations()
+            task_ids = await task_ops.get_active_tasks(limit=10)
+            tasks_text = await task_ops.format_tasks_brief(task_ids) if task_ids else ""
+
+            # 2) 本次最终评价 → 存在感变化预览（当前 → 结算后）+ 新增欠账原因行。
+            #    评价归一与第二次调用同源：空/词表外一律按「未得到他人评价与反馈」预览。
+            fe = (final_evaluation or "").strip()
+            if not FinalEvaluationAct.contains(fe):
+                fe = FinalEvaluationAct.default_name()
+            delta = FinalEvaluationAct.feedback_delta(fe)
+            current = get_feedback_state().read_value()
+            after = clamp(current + delta, 0.0, FEEDBACK_MAX)
+            presence_line = (
+                f"存在感：{int(round(current))}/{int(FEEDBACK_MAX)} "
+                f"→ {int(round(after))}/{int(FEEDBACK_MAX)}"
+            )
+            reason_line = ""
+            if delta < 0:
+                reason_line = f"原因：{title} {fe} {int(delta)}   ←新增"
+
+            preview = ["你需要二次确认才能真正结束。", "", "本次行动结束后："]
+            if tasks_text:
+                preview += ["有以下任务仍未完成，将择时再次处理", tasks_text]
+            preview += ["", presence_line]
+            if reason_line:
+                preview.append(reason_line)
+            preview += [
+                "",
+                "结束前，你需要确认是否可以提升别人对你的评价，请注意，强行要求他人评价"
+                "可能导致评价反而降低，并选择确认是否要通知重要人物是否知道你要离开。",
+            ]
+            return "\n".join(preview)
 
         focus_state._data["terminate_confirmed"] = False
         logger.info("terminate 第二次调用，执行真正的退出逻辑")
@@ -602,15 +649,14 @@ class PFCA_tool_manager(ToolManager):
         get_temporary_memory().add(summary)
         logger.info("已将 terminate 总结写入短期记忆（最后一次调用）")
 
-        # 登记本次 PFCA 会话的最终评价（SC 轴闭环 + 想法入池）：
-        # 好 +10 / 坏 -10 / 无评价向 40 单点抚平（pull_toward_value）。
-        # 评价归一：LLM 未明确选择「好/坏」（空值、词表外、含糊文本）一律自动落
+        # 登记本次 PFCA 会话的最终评价（自我评价记录：计入想法池 + 随记事本落库）。
+        # 评价归一：LLM 未给出词表内取值（空值、词表外、含糊文本）一律自动落
         # 「未得到他人评价与反馈」，不让幻觉词表值触发 ValueError 崩溃。
         final_evaluation = (final_evaluation or "").strip()
-        if FinalEvaluationAct.kind_of(final_evaluation) not in ("good", "bad"):
-            final_evaluation = FinalEvaluationAct.none_name()
+        if not FinalEvaluationAct.contains(final_evaluation):
+            final_evaluation = FinalEvaluationAct.default_name()
         # 关键闭环步骤，禁止 try-except 吞异常；获取失败直接上抛崩溃阻断。
-        # title 透传给最终评价，想法 desc 格式：在事件{title} 中，{评价词}。
+        # title 透传给最终评价，想法 desc 采用可追溯形式：因为 {title} 任务中，导致的{上升/降低}。
         from brain.amy.emotional_interface import get_emotional_interface
         ei = await get_emotional_interface()
         await ei.apply_final_evaluation(final_evaluation, title)
@@ -643,42 +689,99 @@ class PFCA_tool_manager(ToolManager):
 
         return f"已成功结束任务链，总结: {summary}"
 
-    async def summon_personas(self, persona_ids: List[str], current_summary: str = "") -> Dict[str, Any]:
-        """
-        召唤多个内心人格，异步并行思考，统一返回各人格视角的思考结论。
+    @staticmethod
+    def _resolve_persona_name(persona_name: str) -> str:
+        """规整工具入参 persona_name：为空取默认人格；非法人格抛 ValueError 走 LLM 自纠通道。
 
-        取代原 advanced_decision_agent（reorganize / opinion 两种思考模式）：
-        人格 = 预设的内核 system prompt，从注册表按 persona_id 取用，
-        让 LLM 思考链完全代入角色，从不同角度审视问题。
+        人格为逐会话显式指定（conversation_agent / social_chat_agent 的 persona_name 入参）；
+        persona_name 缺失/非法属工具层入参问题，走 ValueError → LLM 自纠，不崩溃阻断。
+        """
+        from brain.base.persona.persona_registry import (
+            DEFAULT_PERSONA_MODE,
+            list_roster_personas,
+        )
+
+        key = (persona_name or "").strip()
+        if not key:
+            return DEFAULT_PERSONA_MODE
+        if key not in (p.persona_name for p in list_roster_personas()):
+            valid = "、".join(p.persona_name for p in list_roster_personas())
+            raise ValueError(f"人格不存在: {key!r}。可用人格: {valid}。")
+        return key
+
+    async def summon_personas(self, current_summary: str = "") -> Dict[str, Any]:
+        """
+        唤起内心人格自荐：全部已注册人格并行自荐，各自给出参与度评分与行动方向。
+
+        PFCA 不再点名选人，只给现状；本工具**不替换任何人格**，仅把各人格的
+        参与度评分（0-100）与「若上场将采取的行动方向」返回给 PFCA 作决策参考。
+        人格由 conversation_agent / social_chat_agent 的 persona_name 入参逐会话指定。
 
         Args:
-            persona_ids: 要召唤的内心人格 id 列表（见 brain/base/persona 注册表）。
             current_summary: 当前现状总结：前因后果、状态、问题、已尝试方法。
 
         Returns:
-            Dict: {"personas": [{"persona_id", "persona_name", "content"}, ...]}
-            各人格视角的思考结论，顺序与 persona_ids 一致。
+            Dict: {
+                "personas": [{"persona_name", "score", "reason", "plan"}, ...],
+                "suggested": {"persona_name", "score", "reason", "plan"},
+            }
+            （suggested 为评分最高者，同分则先给出者；仅供 PFCA 参考，不产生人格切换）
         """
-        logger.info(f"执行summon_personas操作，并行召唤人格: {persona_ids}")
+        logger.info("执行summon_personas操作，唤起内心人格自荐")
 
         from brain.base.persona.persona_agent import PersonaAgent
+        from brain.base.persona.persona_registry import list_roster_personas
 
-        agents = [PersonaAgent(persona_id=pid, current_summary=current_summary) for pid in persona_ids]
-        results = await asyncio.gather(*(agent.run() for agent in agents))
+        # 内荐只由普通人格参与，基本人格条目（persona_name="common"）不参荐。
+        personas = list_roster_personas()
 
-        for r in results:
-            logger.info(f"内心人格 [{r['persona_name']}] 思考完成，"
-                        f"工具调用 {len((r.get('extra_info') or {}).get('tools_called') or [])} 次")
+        # 完成顺序记录：分数相同者以此定胜负（先给出者排在前面）。
+        # 事件循环单线程，各协程完成时 append，天然记录给出先后。
+        completion_order: List[str] = []
+
+        async def _self_nominate(persona_name: str) -> Dict[str, Any]:
+            result = await PersonaAgent(
+                persona_name=persona_name, current_summary=current_summary
+            ).run()
+            completion_order.append(result["persona_name"])
+            logger.info(
+                f"内心人格 [{result['persona_name']}] 给出参与度评分 {result['score']}；"
+                f"行动方向: {result['plan'] or '（未给出）'}"
+            )
+            return result
+
+        # gather 结果序与输入序一致（completion_order 记录真实给出序）；
+        # 任一人格失败（评分解析不出等）直接上抛阻断，不吞错继续（user_rules）。
+        results = await asyncio.gather(
+            *(_self_nominate(p.persona_name) for p in personas)
+        )
+
+        best_score = max(r["score"] for r in results)
+        by_name = {r["persona_name"]: r for r in results}
+        suggested = next(
+            by_name[name] for name in completion_order if by_name[name]["score"] == best_score
+        )
+        logger.info(
+            f"内心人格自荐完成，最高分人格: {suggested['persona_name']} "
+            f"评分={suggested['score']}（仅供参考，不切换人格）"
+        )
 
         return {
             "personas": [
                 {
-                    "persona_id": r["persona_id"],
                     "persona_name": r["persona_name"],
-                    "content": f"【{r['persona_name']}视角】{r['thought']}",
+                    "score": r["score"],
+                    "reason": r.get("reason", ""),
+                    "plan": r.get("plan", ""),
                 }
                 for r in results
             ],
+            "suggested": {
+                "persona_name": suggested["persona_name"],
+                "score": suggested["score"],
+                "reason": suggested.get("reason", ""),
+                "plan": suggested.get("plan", ""),
+            },
         }
 
 

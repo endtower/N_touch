@@ -108,6 +108,7 @@ class _BaseReflectionTruck(BaseTruck):
         启动/执行失败直接上抛，由 station 的致命错误通道崩溃阻断。
         """
         from brain.hc.shortlight.notepad import get_shortlight_notepad
+        from config.truck_settings import reflection_char_truck_config
 
         notes = await get_shortlight_notepad().get_all()
         note_count = len(notes)
@@ -116,16 +117,15 @@ class _BaseReflectionTruck(BaseTruck):
 
         # purpose 即反思首条消息的 message_base 槽位；
         # 笔记全文由首条消息的【记事本手册】槽位自动注入，这里只给触发背景。
+        # 笔记容量 = 未处理笔记字符数 / 字符触发阈值（两个 truck 共用同一口径）。
         titles = [(doc.get("title") or "").strip() for doc in notes]
         titles = [t for t in titles if t]
         purpose = (
             f"【自动反思触发】原因：{self._trigger_reason or '触发原因未记录'}\n"
-            f"当前活动笔记共 {note_count} 篇"
+            f"【笔记缓存状态】当前活动笔记共 {note_count} 篇"
             f"（{'、'.join(titles) if titles else '无标题'}），"
-            f"未处理笔记字符数 {unprocessed_chars}，"
-            f"距上次反思约 {elapsed_hours:.1f} 小时。\n"
-            f"请通读本轮活动笔记进行反思：提炼经验、总结规律，"
-            f"并按流程收尾（归档旧笔记、落库新笔记）。"
+            f"笔记容量 {unprocessed_chars}/{reflection_char_truck_config.CHAR_THRESHOLD}。\n"
+            f"距上次反思约 {elapsed_hours:.1f} 小时。"
         )
 
         logger.info(f"启动反思会话（{self.truck_id}: {self._trigger_reason or '未记录原因'}）")

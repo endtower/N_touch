@@ -9,20 +9,22 @@ PFCA 输入管理模块。
 
 PFCA user 消息的两条构造路径：
 1. 首条 (_build_first_input)：由外部 prepare_first_message 触发，
-   把 message_base / amy_effect / recent_memory / ongoing_tasks /
-   notebook_manual / decision_context 等槽位拼成一条 user 消息
+   把 persona_roster / message_base / amy_effect / recent_memory /
+   ongoing_tasks / notebook_manual 等槽位拼成一条 user 消息
    （完整拼接格式见 _build_first_input docstring）。会话消息不再在此拉取
    （消息由 PFCA 侧 query_history 等工具自行读取），故不再处理/推进 pfca 消息游标。
-2. 增量 (_build_incremental_input)：每轮经情绪消费者游标
-   （get_unread_events("pfca")）检测 amy 情绪事件，仅当未读事件中
-   含最终评价类事件（act 命中 FinalEvaluationAct 词表）才输出
-   一条 "amy_effect" 形式的 user 消息；其余事件（表现侧 NE/DA 噪声）
+   注：PFCA 不注入单一"当前人格"（2026-09-29 起，人格改为逐会话由工具入参指定），
+   但首条消息会拼入人格总览（render_persona_roster，列全部可选人格及其梗概）。
+2. 增量 (_build_incremental_input)：经情绪消费者游标
+   （get_unread_events("pfca")）检测 amy 情绪事件，
+   仅当未读事件中含最终评价类事件（act 命中 FinalEvaluationAct 词表）
+   才输出一条 "amy_effect" 形式的 user 消息；其余事件（表现侧 NE/DA 噪声）
    仅推进游标消费掉，不进 PFCA 视野。
 
 amy_effect 段的语义（与增量共用）：
 - 核心是决策侧情绪描述，来自无参 get_decision_description()（决策侧出口，见 docs/api/amy.md），
-  为单行 SC 行动对应 + "原因："（仅最终评价类想法摘要，成因由出口内嵌）。
-  情绪体系隔离（2026-09-13）：PFCA 只见 SC（社交参与度轴），不见 NE/DA 表现侧激素行。
+  为 "原因："（仅最终评价类想法摘要，成因由出口内嵌）。
+  情绪体系隔离（2026-09-13；2026-09-27 SC 轴剔除）：PFCA 不见 NE/DA 表现侧激素行。
 - 前缀由本模块添加：首条【当前情绪】，增量"你的心情变为："。
 - 游标推进在成功取到描述之后执行：取描述失败时不推进，事件留给下一轮，不丢。
 """
@@ -104,6 +106,10 @@ class PFCAInputManager:
         预期拼接格式（_reset_blocks 槽位定义序即拼接序，_compile 过滤空槽，
         条件段可能缺席）：
 
+            {人格总览}                            <- render_persona_roster 生成的常备描述（固定首段）：
+            你具有以下人格。                          人格名：适配场景，逐行列出；不含基本人格条目
+            {人格名}：{适配场景}
+            ...
             {message_base}                        <- truck 注入的第一轮消息
             【当前环境状态】{年月日 时刻 时段}     <- 纯同步取系统时间，恒非空
             【当前情绪】{amy 统一出口描述}        <- 三行激素 + 原因；取到非空才拼
@@ -129,6 +135,8 @@ class PFCAInputManager:
 
         self._reset_blocks()
 
+        self._collect_persona_roster()
+
         self._collect_message_base(request["message"] or "")
 
         # _collect_current_environment 为纯同步方法（仅取系统时间），不可 await，
@@ -148,7 +156,7 @@ class PFCAInputManager:
     # ===== 增量消息构建 =====
 
     async def _build_incremental_input(self) -> Optional[str]:
-        """检测 amy 情绪事件，构造增量 content（决策侧：仅最终评价类事件触发）。
+        """构造增量 content（amy 情绪事件）。
 
         情绪消费者游标（新契约，写法参照 proactive_input_manager._collect_amy_effect）：
         - get_unread_events("pfca") 判断是否有未消费的情绪事件，无则返回 None。
@@ -156,12 +164,12 @@ class PFCAInputManager:
           FinalEvaluationAct 词表）才构造内容；表现侧 NE/DA 事件（conversation/
           social_chat 的情感遭遇）对本模块是噪声，仅推进游标消费掉。
         - 有最终评价类事件：取当前决策侧描述（无参 get_decision_description，
-          内部已含 SC 行动行 + 最终评价类想法原因），取到后再 advance_cursor
+          内部已含最终评价类想法原因），取到后再 advance_cursor
           推进游标（取描述失败/为空时不推进，事件留给下一轮，不丢）。
         - 输出"你的心情变为：{description}"。
 
         Returns:
-            Optional[str]: 无未消费事件 / 无最终评价类事件时返回 None。
+            Optional[str]: 无待注入内容时返回 None。
         """
         from brain.amy.emotional_interface import get_emotional_interface
         from brain.amy.constants import FinalEvaluationAct
@@ -176,7 +184,7 @@ class PFCAInputManager:
         # （不推进会无限积压重查），但不触发增量内容。
         final_events = [
             e for e in events
-            if FinalEvaluationAct.kind_of(e.get("act", "") or "") is not None
+            if FinalEvaluationAct.contains(e.get("act", "") or "")
         ]
         if not final_events:
             await ei.advance_cursor("pfca", max_seq)
@@ -195,6 +203,7 @@ class PFCAInputManager:
 
     def _reset_blocks(self) -> None:
         self._blocks = {
+            "persona_roster": "",
             "message_base": "",
             "current_environment": "",
             "amy_effect": "",
@@ -206,9 +215,8 @@ class PFCAInputManager:
     async def _format_amy_segment(self, description: str, prefix: str) -> str:
         """构造"情绪描述"段。
 
-        description 来自决策侧出口 get_decision_description()，为单行 SC
-        行动对应 + "原因："（仅最终评价类想法摘要，成因出口内嵌），
-        因此这里只加前缀。
+        description 来自决策侧出口 get_decision_description()，为 "原因："
+        （仅最终评价类想法摘要，成因出口内嵌），因此这里只加前缀。
 
         prefix:
           - 首条：'【当前情绪】'
@@ -217,6 +225,17 @@ class PFCAInputManager:
         return f"{prefix}{description}"
 
     # ===== 槽位收集 =====
+
+    def _collect_persona_roster(self) -> None:
+        """首条专用槽位：人格总览（可见人格清单及其适配场景）。
+
+        常备描述，每次会话首条固定注入（固定首段），让 PFCA 知道可调用 /
+        可指派哪些人格；不含基本人格条目（render_persona_roster 已排除）。
+        人格注册表在模块导入时加载，读取失败直接上抛崩溃阻断（user_rules）。
+        """
+        from brain.base.persona.persona_registry import render_persona_roster
+
+        self._blocks["persona_roster"] = render_persona_roster()
 
     def _collect_message_base(self, content: str) -> None:
         self._blocks["message_base"] = content or ""
@@ -239,9 +258,9 @@ class PFCAInputManager:
         """首条专用的情绪槽收集（情绪消费者游标，决策侧）。
 
         策略：
-        - 无条件取当前决策侧描述（统一出口 get_decision_description：单行 SC
-          行动对应 + 最终评价类想法原因）；只要 amy 有描述就写槽。
-          情绪体系隔离：PFCA 只见 SC，不见 NE/DA 表现侧激素行。
+        - 无条件取当前决策侧描述（统一出口 get_decision_description：最终评价类想法原因）；
+          只要 amy 有描述就写槽。
+          情绪体系隔离：PFCA 不见 NE/DA 表现侧激素行。
         - 首条消费掉当前全部未读事件并推进游标，避免这些事件在后续增量轮
           重复注入（决策侧过滤下，NE/DA 噪声事件也一并消费掉）。
         - 描述取不到时早退且不推进游标（事件留给增量轮恢复）。

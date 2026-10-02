@@ -21,7 +21,7 @@ import asyncio
 from typing import Any, Dict, Literal, Optional
 
 from utils.error_handling import async_handle_errors
-from utils.llm_client_manager import TokenBudget, TokenBudgetExceededError, token_budget_scope
+from utils.llm_client_manager import TokenBudget, TokenBudgetExceededError, token_budget_scope, agent_scope
 from utils.logger import get_logger
 
 from brain.base import HeavySession
@@ -127,7 +127,7 @@ class ProactiveSession(HeavySession):
             self._recent_tool_sigs = []
             self._tool_repeat_strikes = 0
             self._last_repeat_tool = ""
-            with token_budget_scope(budget):
+            with token_budget_scope(budget), agent_scope(self.agent_name or type(self).__name__):
                 while (self.running and not self.should_stop
                        and self._rounds < self.max_rounds):
                     if budget is not None and budget.exceeded:
@@ -216,8 +216,12 @@ class ProactiveSession(HeavySession):
                 tasks.append({
                     "task_id": rec.get("task_id"),
                     "title": rec.get("title"),
-                    "summary": rec.get("summary"),
+                    "brief": rec.get("brief"),
+                    "conclusion": rec.get("conclusion"),
+                    "stage": rec.get("stage"),
+                    "notes": rec.get("notes"),
                     "next_occurrence": rec.get("next_occurrence"),
+                    "deadline": rec.get("deadline"),
                 })
         return tasks
 

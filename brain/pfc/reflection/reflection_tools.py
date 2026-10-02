@@ -32,11 +32,16 @@ reflection模块的工具定义与处理（针对反思场景重新设计）
 8. quest_agent（复用 ToolTask，2026-09-18 接入）：联系 quest agent 的入口通道——
    转交一段内容请它裁决（审批推进 / 登记任务 / 修订任务）；是否立项、能否推进
    由 quest agent 独立裁决，反思不持有裁决权。
-9. query_bequest / query_decision_bequest / upsert_bequest / delete_bequest
-   （收口于 ToolBequest）：经验库分两类——「话术」经验（发言/回复技巧）与
-   「决策」经验（一种过往的面对某种情景的广泛思路，2026-09-24 新增）；
-   两类各自按语义相似度检索，增删经 category 参数（中文枚举）定向。
-   决策经验检索未取得结果时，返回结果会提示向主人请教学习经验（不设相似度阈值）。
+9. query_bequest / upsert_bequest / delete_bequest（收口于 ToolBequest）：
+   话术经验（发言/回复技巧）按语义相似度检索，增删经 category 参数（中文枚举「话术」）定向。
+   决策经验相关入口（query_decision_bequest，以及 upsert/delete 的「决策」类别）已于
+   2026-09-27 从 LLM 视野移除；ToolBequest 的通用实现保留，供程序侧直接调用。
+10. list_personas / query_persona / update_persona（收口于 ToolPersona，2026-09-29 接入；
+    2026-10-01 起分层冻结）：人格定义查询与修改——普通人格内核已冻结，仅基本人格
+    （common）可经 update_persona 修改，其 kernel_prompt 语义收窄为「基本说话风格」
+    （说人话式普适要求，硬预算 300 字）；覆盖写入自动留档旧版可回滚。
+    与话术经验（bequest）并列，同属反思"调整既有人格预设/经验"的两类落点。
+    upsert_bequest 自 2026-10-01 起支持可选 persona 人格标签（观察期：仅落库）。
 
 会话标识统一使用 session_id，格式为 "type_id"，例如 "private_1234567890" / "group_198431299"。
 """
@@ -45,7 +50,7 @@ import json
 from typing import Dict, Any, List
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
-from brain.base import ToolManager, ToolHC, ToolBequest, ToolSocial, ToolTask, ToolPersistent
+from brain.base import ToolManager, ToolHC, ToolBequest, ToolSocial, ToolTask, ToolPersistent, ToolPersona
 from brain.hc.global_session_state import get_global_session_state
 
 
@@ -149,9 +154,10 @@ class Reflection_tool_manager(ToolManager):
                 }
             },
             # 经验检索/登记/删除（schema 与实现统一收口于 ToolBequest，2026-09-15；
-            # 2026-09-24 增加查询决策经验）
-            ToolBequest.get_query_bequest_tool_schema(),
-            ToolBequest.get_query_decision_bequest_tool_schema(),
+            # 2026-09-27 决策经验入口已从 LLM 视野移除，此处只保留话术经验工具；
+            # 2026-09-29 query_bequest 额外暴露「检索方式」：向量 / 标题比对，
+            # 标题比对命中少、省 token）
+            ToolBequest.get_query_bequest_tool_schema(mode_selectable=True),
             ToolBequest.get_upsert_bequest_tool_schema(),
             ToolBequest.get_delete_bequest_tool_schema(),
             # 通用级任务工具（2026-09-18 接入：查询任务状态 + 给任务添加笔记；
@@ -160,6 +166,10 @@ class Reflection_tool_manager(ToolManager):
             # quest_agent 联系通道（2026-09-18 接入：直接联系 quest agent，转交内容
             # 由其裁决——审批推进 / 登记任务 / 修订任务；反思不持有裁决权）
             ToolTask.get_quest_agent_tool_schema(),
+            # 人格定义查询/修改（2026-09-29 接入：反思可查看并调整人格预设——人格是
+            # "应对特定方面事件的状态"，发言收敛类调整既可落话术经验也可落人格定义；
+            # schema 收口于通用层 ToolPersona）
+            *ToolPersona.get_persona_tool_schemas(),
         ]
 
     def __init__(self):
@@ -179,12 +189,15 @@ class Reflection_tool_manager(ToolManager):
             "upsert_bequest": self.upsert_bequest,
             "delete_bequest": self.delete_bequest,
             "query_bequest": self.query_bequest,
-            "query_decision_bequest": self.query_decision_bequest,
             # 通用级任务工具（直接引用 ToolTask 类方法）
             "append_task_log": ToolTask.append_task_log,
             "query_task_status": ToolTask.query_task_status,
             # quest_agent 联系通道（直接引用 ToolTask 类方法）
             "quest_agent": ToolTask.quest_agent,
+            # 人格定义查询/修改（包装委托 ToolPersona）
+            "list_personas": self.list_personas,
+            "query_persona": self.query_persona,
+            "update_persona": self.update_persona,
         }
 
     @async_handle_errors()
@@ -265,33 +278,48 @@ class Reflection_tool_manager(ToolManager):
         （标题/触发原因摘要/落库时间/记录条数；为 query_note 提供标题来源）。"""
         return await ToolHC.list_notes()
 
-    async def query_bequest(self, query: str, top_k: int = 3) -> Dict[str, Any]:
-        """查询话术经验（按语义相似度检索），委托通用 ToolBequest.query_bequest。
-        输入当前处境 / 想表达的意思，返回最相似的经验（标题 + 内容 + 相似度）；
+    async def query_bequest(
+        self, query: str, top_k: int = 3, mode: str = "向量"
+    ) -> Dict[str, Any]:
+        """查询话术经验，委托通用 ToolBequest.query_bequest。
+        mode 「向量」（默认）按语义相似度返回最相似的经验（标题 + 内容 + 相似度）；
+        「标题」按标题关键词比对，命中更少、省 token，未命中时返回 hint 提示改用向量。
         复盘时供反思会话对照既往话术、验证或提炼结论。"""
-        return await ToolBequest.query_bequest(query=query, top_k=top_k)
-
-    async def query_decision_bequest(self, query: str, top_k: int = 3) -> Dict[str, Any]:
-        """查询决策经验（按语义相似度检索），委托通用 ToolBequest.query_decision_bequest。
-        决策经验是一种过往的面对某种情景的广泛思路；输入当前面临的情景或要做的
-        判断，返回最相似的思路（标题 + 内容 + 相似度）。未取得任何经验（结果为空）
-        时，返回结果含 hint：可向主人请教、学习经验。"""
-        return await ToolBequest.query_decision_bequest(query=query, top_k=top_k)
+        return await ToolBequest.query_bequest(query=query, top_k=top_k, mode=mode)
 
     async def upsert_bequest(
-        self, title: str, summary: str, category: str = "话术"
+        self, title: str, summary: str, category: str = "话术", persona: str = ""
     ) -> Dict[str, Any]:
         """登记经验（创建/覆盖），委托通用 ToolBequest.upsert_bequest。
         按 title + category 精确匹配定位：命中则覆盖内容，否则新建；裁决逻辑（登记什么、
-        如何措辞、归入哪一类）由反思会话本身负责，本方法只做落库执行。
-        category 为中文枚举「话术」/「决策」，缺省「话术」。"""
-        return await ToolBequest.upsert_bequest(title=title, summary=summary, category=category)
+        如何措辞、归入哪一类、是否打人格标签）由反思会话本身负责，本方法只做落库执行。
+        category 为中文枚举「话术」/「决策」，缺省「话术」；persona 为可选人格标签
+        （2026-10-01 起：仅当经验明确只属于某个人格的应对方式时传，通用技巧不传；
+        人格名不存在会被硬拦）。"""
+        return await ToolBequest.upsert_bequest(
+            title=title, summary=summary, category=category, persona=persona
+        )
 
     async def delete_bequest(self, title: str, category: str = "话术") -> Dict[str, Any]:
         """删除经验（按 title + category 精确匹配），委托通用 ToolBequest.delete_bequest。
         何时删除（经验被认为不恰当）由反思会话裁决，本方法只做落库执行。
         category 为中文枚举「话术」/「决策」，缺省「话术」。"""
         return await ToolBequest.delete_bequest(title=title, category=category)
+
+    async def list_personas(self) -> Dict[str, Any]:
+        """列出全部人格（含基本人格），委托通用 ToolPersona.list_personas。
+        复盘时供反思会话掌握现有人格清单，判断是否需要调整某个人格预设。"""
+        return ToolPersona.list_personas()
+
+    async def query_persona(self, persona_name: str) -> Dict[str, Any]:
+        """查询一个人格的场景梗概与人格定义，委托通用 ToolPersona.query_persona。
+        人格不存在抛 ValueError 走 LLM 自纠通道。"""
+        return ToolPersona.query_persona(persona_name=persona_name)
+
+    async def update_persona(self, persona_name: str, kernel_prompt: str) -> Dict[str, Any]:
+        """覆盖式更新一个人格的定义并落盘，委托通用 ToolPersona.update_persona。
+        何时调整、调整为谁由反思会话裁决，本方法只做落库执行。"""
+        return await ToolPersona.update_persona(persona_name=persona_name, kernel_prompt=kernel_prompt)
 
     async def archive_notes(self) -> str:
         """一次性归档全部已落库笔记（2026-09-23 拆出）。

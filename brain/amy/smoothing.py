@@ -5,18 +5,8 @@
 Amy 情绪系统数值平滑原语
 
 无副作用的纯函数集合：不持有状态、不依赖外部服务、不触碰单例，
-供后续 SC（社会信用/评价）轴"无评价抚平"等场景做数值收敛与时间衰减复用。
+供情绪轴做数值收敛（单点/区间抚平）与时间衰减复用。
 """
-
-
-# === 默认平滑常量 ===
-# 无评价抚平目标：向 SMOOTH_TARGET（40）单点收敛，每次移动 SMOOTH_STEP 距离
-# （2026-09-05 由 [40, 60] 区间语义改为单点 40）。
-SMOOTH_TARGET = 40
-SMOOTH_STEP = 5
-# 通用区间原语配套常量（供 pull_toward_interval 复用，SC 轴无评价抚平已改用单点）。
-SMOOTH_INTERVAL_LOW = 40
-SMOOTH_INTERVAL_HIGH = 60
 
 
 def pull_toward_value(value: float, target: float, step: float) -> float:
@@ -38,7 +28,7 @@ def pull_toward_value(value: float, target: float, step: float) -> float:
 def pull_toward_interval(value: float, low: float, high: float, step: float) -> float:
     """把数值朝闭区间 [low, high] 拉近 step 距离。
 
-    通用区间原语（保留供其他场景复用）；SC 轴无评价抚平已改用 pull_toward_value。
+    通用区间原语（供其他场景复用）。
 
     规则：
     - value 已在区间内：返回原值（不做任何修改）

@@ -86,6 +86,15 @@ class EmbeddingService:
                 details={"model": self.model, "response_keys": list(result.keys())},
             )
 
+        # token 用量统计（观测旁路）：火山 /embeddings 可能不返回 usage，缺失则跳过
+        from config.llm_settings import resolve_provider_label
+        from utils.llm_client_manager import record_embedding_usage
+        await record_embedding_usage(
+            model=self.model,
+            provider=resolve_provider_label(self.api_base),
+            usage=result.get("usage"),
+        )
+
         logger.debug(f"文本嵌入生成成功，向量维度: {len(embedding)}，总耗时: {elapsed:.3f}秒")
         return embedding
 

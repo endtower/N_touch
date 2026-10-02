@@ -41,14 +41,14 @@ docs/                 文档（入口索引 + 四份状态文档 + api/ 活文�
 | 端口 | 组件 |
 |---|---|
 | 5000 | main.py FastAPI（仅承载 lifespan，无业务路由） |
-| 5001 | OneBot v11 反向 WS 服务端（NapCat 连入） |
+| 5001 | OneBot v11 反向 WS 服务端（SnowLuma/NapCat 连入） |
 | 5002 | WebChannel：对前端的全部 HTTP + WS 接口 |
 | 5173 | web_frontend Vite 开发服（代理到 5002） |
-| 8080 | None_Tooth（NoneBot2，遗留；其 HTTP 桥已废弃） |
 
 ## 启动
 
 ```bash
-python main.py            # 后端（开发模式自带 reload）
-cd web_frontend && npm run dev   # 前端
+python main.py --dev             # 后端完整版（热重载；生产用 python main.py）
+python scripts/web_only.py       # 只读模式（不起大脑，查看上下文/记忆等）
+cd web_frontend && npm run dev   # 前端开发服；非开发时可直接开 5002（后端伺服 dist）
 ```

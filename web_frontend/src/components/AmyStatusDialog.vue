@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
-import { MagicStick, Refresh, ChatLineSquare, Sunny, Lightning, Clock, Plus, Edit, Delete, Odometer } from '@element-plus/icons-vue'
+import { MagicStick, Refresh, ChatLineSquare, Sunny, Lightning, Clock, Plus, Edit, Delete, Star } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { AmyState, AmyThought, AmyActEntry, AmyFinalEvaluationEntry, AmyDescriptionBand, NotesResponse } from '../types'
 
@@ -25,7 +25,7 @@ const editTarget = ref<AmyThought | null>(null)
 const editForm = ref({ desc: '', act: '', intensity: 1.0, duration: 300 })
 const saving = ref(false)
 
-// ===== 最终评价登记（完整闭环：SC + 想法入池） =====
+// ===== 最终评价登记（自我评价记录 + 想法入池） =====
 const finalEvalDialogVisible = ref(false)
 const finalEvalForm = ref({ name: '', title: '' })
 
@@ -116,7 +116,7 @@ function openCreateWithAct(act: string) {
   createDialogVisible.value = true
 }
 
-/** 最终评价完整闭环（SC 涨跌 + 想法入池）：弹标题输入 → POST /amy/final-evaluation */
+/** 最终评价登记（自我评价记录 + 想法入池）：弹标题输入 → POST /amy/final-evaluation */
 function openFinalEval(name: string) {
   finalEvalForm.value = { name, title: '' }
   finalEvalDialogVisible.value = true
@@ -138,7 +138,7 @@ async function saveFinalEval() {
       method: 'POST',
       body: JSON.stringify({ final_evaluation: finalEvalForm.value.name, title }),
     })
-    ElMessage.success('已登记最终评价（SC + 想法入池）')
+    ElMessage.success('已登记最终评价（想法入池）')
     finalEvalDialogVisible.value = false
     await fetchData()
   } catch (e: any) {
@@ -291,33 +291,10 @@ function bandTextFor(value: number, bands: AmyDescriptionBand[] | undefined) {
   return b || bands[0] || null
 }
 
-// SC 描述带本身就是 0-100 单极区间，直接按原值匹配（不取绝对值）
-function scBandFor(value: number, bands: AmyDescriptionBand[] | undefined) {
-  if (!bands || !bands.length) return null
-  const b = bands.find(b => value >= b.lo && value <= b.hi)
-  return b || bands[0] || null
-}
-
-// SC 视觉色调（0-100 单极：越高越自信）
-function scTone(v: number) {
-  if (v >= 60) return { color: 'var(--accent-2)', bg: 'rgba(52, 211, 153, 0.18)', label: '高自信' }
-  if (v >= 40) return { color: 'var(--text-2)', bg: 'var(--bg-subtle)', label: '平稳' }
-  return { color: 'var(--warn)', bg: 'rgba(245, 158, 11, 0.18)', label: '低自信' }
-}
-
-// 最终评价 sc_kind 的友好标签
-function scKindLabel(k: string) {
-  switch (k) {
-    case 'good': return '好'
-    case 'bad': return '坏'
-    default: return '无评价'
-  }
-}
-
 // 计算每个 thought 对当前 mood 的实际贡献 (用后端给的 act 表)
 const ACT_INDEX = computed(() => {
   if (!data.value) return new Map<string, AmyActEntry>()
-  // 只索引参与 mood 的常规 ACT；final 词表只影响 SC, 不产生 NE/DA 增量, 不进入索引
+  // 只索引参与 mood 的常规 ACT；final 词表不产生 NE/DA 增量, 不进入索引
   const m = new Map<string, AmyActEntry>()
   for (const cat of ['external', 'evaluation', 'self_action', 'system'] as const) {
     for (const e of data.value.acts[cat]) m.set(e.name, e)
@@ -339,6 +316,15 @@ const MOOD_RANGE = 100
 function gaugeWidth(v: number) {
   return Math.min(Math.abs(v), MOOD_RANGE) / MOOD_RANGE * 100
 }
+
+// 存在感：0-100 直接显示（非 NE/DA 绝对值语义），默认 50
+function presenceTone(v: number) {
+  if (v >= 60) return { color: 'var(--accent-2)', bg: 'rgba(52, 211, 153, 0.18)', label: '充盈' }
+  if (v >= 40) return { color: 'var(--warn)',    bg: 'rgba(245, 158, 11, 0.18)', label: '正常' }
+  if (v >= 20) return { color: 'var(--danger)',  bg: 'rgba(239, 68, 68, 0.18)', label: '较低' }
+  return { color: 'var(--danger)',                bg: 'rgba(239, 68, 68, 0.32)', label: '贫乏' }
+}
+function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
 </script>
 
 <template>
@@ -356,7 +342,7 @@ function gaugeWidth(v: number) {
         <div class="amy-title">
           <el-icon :size="18" color="var(--accent)"><MagicStick /></el-icon>
           <span>LLM 情绪状态</span>
-          <span class="amy-sub">Amy · NE / DA / SC · 想法池可编辑 · 3s 自动刷新</span>
+          <span class="amy-sub">Amy · NE / DA · 想法池可编辑 · 3s 自动刷新</span>
         </div>
         <div class="amy-actions">
           <span class="amy-fetched">最后更新 {{ timeShort(lastFetchedAt) }}</span>
@@ -437,40 +423,34 @@ function gaugeWidth(v: number) {
           </div>
         </div>
 
-        <!-- SC 仪表 -->
-        <div class="amy-gauge-card">
+        <!-- 存在感仪表 -->
+        <div class="amy-gauge-card" v-if="data.presence">
           <div class="amy-gauge-head">
             <span class="amy-gauge-label">
-              <el-icon :size="13"><Odometer /></el-icon>
-              自我一致性 SC
+              <el-icon :size="13"><Star /></el-icon>
+              存在感
             </span>
-            <span class="amy-gauge-value" :style="{ color: scTone(data.mood.sc).color }">
-              {{ data.mood.sc.toFixed(1) }}
+            <span class="amy-gauge-value" :style="{ color: presenceTone(data.presence.value).color }">
+              {{ data.presence.value.toFixed(1) }}
             </span>
           </div>
           <div class="amy-gauge-bar">
             <div class="amy-gauge-track">
               <div
-                class="amy-gauge-fill"
+                class="amy-gauge-fill pos"
                 :style="{
-                  width: (Math.min(Math.max(data.mood.sc, 0), 100) / 100 * 100) + '%',
-                  background: scTone(data.mood.sc).color,
+                  width: presenceWidth(data.presence.value) + '%',
+                  background: presenceTone(data.presence.value).color,
                 }"
               />
             </div>
             <div class="amy-gauge-scale">
-              <span>0</span><span>20</span><span>40</span><span>60</span><span>80</span><span>100</span>
+              <span>0</span><span>25</span><span>50</span><span>75</span><span>100</span>
             </div>
           </div>
-          <div class="amy-gauge-band" v-if="scBandFor(data.mood.sc, data.amy_descriptions?.sc)">
-            <span class="amy-gauge-band-label">{{ scTone(data.mood.sc).label }}</span>
-            <span class="amy-gauge-band-text">{{ scBandFor(data.mood.sc, data.amy_descriptions?.sc)?.text }}</span>
-          </div>
-          <div class="amy-sc-rule" v-if="data.sc_meta">
-            衰减 每小时向 {{ data.sc_meta.decay_target }} 降 {{ data.sc_meta.decay_per_hour }} 点 ·
-            <span class="pos">好评价 +{{ data.sc_meta.effect_good }}</span> ·
-            <span class="neg">坏评价 {{ data.sc_meta.effect_bad }}</span> ·
-            无评价向 {{ data.sc_meta.smooth_target }} 抚平 ±{{ data.sc_meta.smooth_step }}
+          <div class="amy-gauge-band">
+            <span class="amy-gauge-band-label">{{ presenceTone(data.presence.value).label }}</span>
+            <span class="amy-gauge-band-text">默认 50 · 优秀 +20 / 尚可 +10 / 无反馈 -10 / 欠佳 -20</span>
           </div>
         </div>
 
@@ -482,6 +462,25 @@ function gaugeWidth(v: number) {
           <span><el-icon :size="13"><ChatLineSquare /></el-icon> LLM 当前看到的 prompt 描述</span>
         </div>
         <pre class="amy-prompt-body">{{ data.amy_description }}</pre>
+      </section>
+
+      <!-- 存在感归因 prompt 监控（注入 PFCA / 人格系统的原文） -->
+      <section v-if="data.presence" class="amy-prompt-card">
+        <div class="amy-section-head amy-section-head-ops">
+          <span><el-icon :size="13"><Star /></el-icon> 存在感归因 prompt 监控（注入 PFCA / 人格系统）</span>
+          <span v-if="data.presence.debts.length" class="amy-presence-count">
+            {{ data.presence.debts.length }} 笔未偿 · 合计
+            {{ data.presence.debts.reduce((s, d) => s + d.score, 0) }} 点
+          </span>
+        </div>
+        <pre class="amy-prompt-body">{{ data.presence.attribution_prompt }}</pre>
+        <div v-if="data.presence.debts.length" class="amy-presence-debts">
+          <div v-for="(d, i) in data.presence.debts" :key="i" class="amy-presence-debt">
+            <span class="amy-presence-debt-title">{{ d.title }}</span>
+            <span class="amy-presence-debt-kind">{{ d.kind }}</span>
+            <span class="amy-presence-debt-score neg">{{ d.score }}</span>
+          </div>
+        </div>
       </section>
 
       <!-- 活跃 thought 列表 -->
@@ -541,7 +540,7 @@ function gaugeWidth(v: number) {
               <div class="amy-act-cat-head" :style="{ color: actCategoryLabel(cat as string).color }">
                 {{ actCategoryLabel(cat as string).label }} · {{ items.length }} 条
               </div>
-              <!-- 最终评价词表（PFCA 收尾）：无 NE/DA 增量，只有 SC 效果；点击行 = 添加为想法 -->
+              <!-- 最终评价词表（PFCA 收尾）：无 NE/DA 增量，仅登记为想法；点击行 = 添加为想法 -->
               <div v-if="cat === 'final'">
                 <div
                   v-for="f in items as AmyFinalEvaluationEntry[]"
@@ -552,10 +551,6 @@ function gaugeWidth(v: number) {
                   <span class="amy-act-name">
                     {{ f.name }}
                     <el-icon class="amy-act-add-ico" :size="12"><Plus /></el-icon>
-                  </span>
-                  <span class="amy-act-stats">
-                    <span class="amy-act-sc-kind" :class="`sc-${f.sc_kind}`">{{ scKindLabel(f.sc_kind) }}</span>
-                    <span class="amy-act-meta">{{ f.effect }}</span>
                   </span>
                 </div>
               </div>
@@ -642,7 +637,7 @@ function gaugeWidth(v: number) {
     </div>
   </el-dialog>
 
-  <!-- 最终评价登记（完整闭环：SC 涨跌 + 想法入池，时长 4 小时） -->
+  <!-- 最终评价登记（自我评价记录 + 想法入池，时长 4 小时） -->
   <el-dialog v-model="finalEvalDialogVisible" :title="`最终评价 · ${finalEvalForm.name}`" width="480px" append-to-body>
     <el-form label-width="90px" @submit.prevent>
       <el-form-item label="评价">
@@ -653,8 +648,7 @@ function gaugeWidth(v: number) {
           @keyup.enter="saveFinalEval" />
       </el-form-item>
       <div class="amy-finale-hint">
-        登记后：SC 按评价涨跌（好 +10 / 坏 -10 / 无评价朝 40 单点抚平），想法
-        「在事件{标题} 中，{评价词}」入池（时长 4 小时）。与「新增 thought」不同，这里是完整闭环。
+        登记后：按格子步进结算反馈维度，并想法「因为 {标题} 任务中，导致的{上升/降低}」入池（时长 4 小时），供决策侧原因段与记事本消费。与「新增 thought」不同，这里是 PFCA 收尾的自我评价记录。
       </div>
     </el-form>
     <template #footer>
@@ -846,22 +840,6 @@ function gaugeWidth(v: number) {
   color: var(--text-1);
   line-height: 1.5;
 }
-/* SC 轴规则提示（衰减 / 评价效果 / 抚平） */
-.amy-sc-rule {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 8px;
-  font-size: 10.5px;
-  line-height: 1.5;
-  color: var(--text-3);
-  padding: 6px 8px;
-  background: var(--bg-subtle);
-  border-radius: var(--radius-sm);
-  font-variant-numeric: tabular-nums;
-}
-.amy-sc-rule .pos { color: var(--accent-2); font-weight: 600; }
-.amy-sc-rule .neg { color: var(--danger);    font-weight: 600; }
-
 /* —— 状态卡片 —— */
 .amy-state-banner {
   display: inline-flex;
@@ -939,6 +917,52 @@ function gaugeWidth(v: number) {
   max-height: 220px;
   overflow-y: auto;
 }
+
+/* —— 存在感归因 prompt 监控 —— */
+.amy-presence-count {
+  font-size: 11px;
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
+}
+.amy-presence-debts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.amy-presence-debt {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  font-size: 12px;
+}
+.amy-presence-debt-title {
+  font-weight: 600;
+  color: var(--text-1);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.amy-presence-debt-kind {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.amy-presence-debt-score {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.amy-presence-debt-score.neg { color: var(--danger); }
 
 /* —— thought 卡片 —— */
 .amy-section {
@@ -1127,16 +1151,6 @@ function gaugeWidth(v: number) {
 }
 .amy-act-delta.pos { color: var(--accent-2); background: rgba(52, 211, 153, 0.12); }
 .amy-act-delta.neg { color: var(--danger);    background: rgba(239, 68, 68, 0.12); }
-/* 最终评价词表的 SC kind 徽标 */
-.amy-act-sc-kind {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 4px;
-}
-.amy-act-sc-kind.sc-good { color: var(--accent-2); background: rgba(52, 211, 153, 0.12); }
-.amy-act-sc-kind.sc-bad  { color: var(--danger);    background: rgba(239, 68, 68, 0.12); }
-.amy-act-sc-kind.sc-none { color: var(--text-3);    background: var(--bg-subtle); }
 .amy-act-meta {
   font-size: 10.5px;
   color: var(--text-3);

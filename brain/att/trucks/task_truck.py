@@ -1,30 +1,39 @@
 """
 TaskTruck - 任务到期触发卡车
 
-定期检查任务表中已到达「预计的再次处理时间」（next_occurrence）的进行中任务，
-一旦发现有到期任务，提醒 station 并直接启动 PFCA 处理（不经 proactive 决策层）。
+定期检查任务表中已到期的进行中任务，一旦发现有到期任务，提醒 station
+并直接启动 PFCA 处理（不经 proactive 决策层）。
 
-展示信息格式（station 调 get_truck_messages 拿到的第一轮消息，直接作为 PFCA 首条）：
+到期判定（2026-10-01 改造，硬化点 A）：
+    取 min(下次处理时间 next_occurrence, 最终汇报时间 deadline) 到期即触发——
+    避免 quest 把下次处理时间排到最终汇报时间之后，导致任务永不唤醒。
+
+展示信息格式（station 调 get_truck_messages 拿到的第一轮消息，直接作为 PFCA 首条）。
+2026-10-01 起不再注入记录全文，只给「任务 / 当前阶段 / 距最终汇报时间还剩 X /
+要求推进并汇报」：
 
     单个到期任务：
-    一个任务已到达预计的再次处理时间。（预计触发事件<任务标题>，距离现在<X分钟/小时>前）
-    任务内容：
-    <format_task_by_id 通用任务展示格式>
+    一个任务已到达处理时间。
+    任务「<标题>」，当前阶段：<当前阶段>。距最终汇报时间还有<X>。
+    请推进该任务到下一阶段，并把成果汇报给 quest 登记，直到 quest 判定达标。
+
+    已过最终汇报时间（收尾口径）：
+    任务「<标题>」，当前阶段：<当前阶段>。已超过最终汇报时间<X>。
+    请立刻整理已有材料与未达标说明，上报 quest 收尾，不再继续推进。
 
     多个任务同时到期（一次触发全部展示，交 PFCA 统筹排序处理）：
-    N个任务已到达预计的再次处理时间：
-    （预计触发事件<任务1>，距离现在<X>前）
-    （预计触发事件<任务2>，距离现在<Y>前）
-    任务内容：
-    1. <format_task_by_id(任务1)>
-
-    2. <format_task_by_id(任务2)>
+    N个任务已到达处理时间：
+    1. 任务「<任务1>」，当前阶段：<...>。……
+    2. 任务「<任务2>」，当前阶段：<...>。……
 
 设计：
 - 一次触发展示**全部**到期任务（2026-09-19 决策）：同时到期的任务一起交给 PFCA
   统筹，避免逐个触发带来的延迟，也规避「单任务防循环守卫卡死后续任务」的缺陷。
-- 防循环：每个 task_id 记录最后一次已触发的 next_occurrence，同一次到期不重复触发；
-  quest_agent 更新 next_occurrence（通常推到未来）后 key 变化，才可能再次触发。
+- 防循环：每个 task_id 记录最后一次已触发的到期键（时间取值），同一次到期不重复触发；
+  quest_agent 更新时间后 key 变化，才可能再次触发。
+- 断链兜底（2026-10-01，硬化点 B）：key 未变但距上次触发超过
+  TaskTruckConfig.RE_TRIGGER_TTL_SECONDS 时强制重新触发——兜底 PFCA 未汇报、
+  quest 未被咨询、next_occurrence 不变导致任务静默卡死的场景。
 - 关键环节失败（任务拉取失败）直接崩溃阻断，不 try-ex 继续（项目硬约定）。
 - 默认关闭（ENABLED=False），由前端 Truck 控制面板启用，避免在真实环境自动触发。
 """
@@ -32,13 +41,23 @@ TaskTruck - 任务到期触发卡车
 import os
 import traceback
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 from .base_truck import BaseTruck
 from .private_truck import _format_duration  # 复用相对时长描述（x分钟/x小时）
 
 logger = get_logger('task_truck', 'INFO')
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    """宽松解析 ISO 时间串；无/无效返回 None。"""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
 
 
 class TaskTruck(BaseTruck):
@@ -48,10 +67,12 @@ class TaskTruck(BaseTruck):
         super().__init__("task_truck")
         # 本次触发的到期任务列表（_main_loop 设置，station 调 get_truck_messages 时消费）
         self._triggered_tasks: List[Dict] = []
-        # 防循环：task_id -> 该任务最后一次已触发过的 next_occurrence。
-        # 同一次到期不重复触发；next_occurrence 被 quest_agent 更新后（key 变化）才可能再触发。
+        # 防循环：task_id -> 该任务最后一次已触发过的「到期键」
+        # （next_occurrence|deadline 的当前取值；任一变化即视为新一次到期）。
         # 用 dict 而非集合，保证大小 ≤ 任务数，不随更新次数增长。
         self._triggered_keys: Dict[str, str] = {}
+        # 断链兜底：task_id -> 上次触发时刻（TTL 到期后允许重触发）
+        self._triggered_at: Dict[str, datetime] = {}
 
     async def cycle_control(self):
         from config.truck_settings import task_truck_config
@@ -73,9 +94,13 @@ class TaskTruck(BaseTruck):
                 tasks = await self._find_due_tasks()
                 if tasks:
                     self._triggered_tasks = tasks
-                    # 记录本次已触发的 key（防循环，消费前置入，防 get_truck_messages 前再触发）
+                    # 记录本次已触发的 key 与时刻（防循环，消费前置入，
+                    # 防 get_truck_messages 前再触发）
+                    now = datetime.now()
                     for t in tasks:
-                        self._triggered_keys[t.get("task_id")] = t.get("next_occurrence") or ""
+                        tid = t.get("task_id")
+                        self._triggered_keys[tid] = self._due_key(t)
+                        self._triggered_at[tid] = now
                     logger.info(
                         f"检测到 {len(tasks)} 个到期任务: "
                         f"{[t.get('title') for t in tasks]}"
@@ -96,10 +121,29 @@ class TaskTruck(BaseTruck):
                         pass
                 os._exit(1)
 
+    @staticmethod
+    def _resolve_due_time(rec: Dict) -> Optional[datetime]:
+        """取 min(下次处理时间, 最终汇报时间) 作为到期时间；两者都无效则 None。
+
+        硬化点 A：对最终汇报时间保底，避免下次处理时间被排到截止之后永不唤醒。
+        """
+        candidates = []
+        for field in ("next_occurrence", "deadline"):
+            dt = _parse_iso(rec.get(field) or "")
+            if dt is not None:
+                candidates.append(dt)
+        return min(candidates) if candidates else None
+
+    @staticmethod
+    def _due_key(rec: Dict) -> str:
+        """到期键：两个时间取值的组合；任一变化即视为新一次到期。"""
+        return f"{rec.get('next_occurrence') or ''}|{rec.get('deadline') or ''}"
+
     async def _find_due_tasks(self) -> List[Dict]:
-        """找所有已到期的 active 任务（next_occurrence 已到或已过），
-        过滤掉同一次到期已触发过的（防循环）。拉取失败直接上抛崩溃阻断。"""
+        """找所有已到期的 active 任务（min(下次处理时间, 最终汇报时间) 已到或已过），
+        过滤掉同一次到期已触发过的（防循环 + TTL 兜底）。拉取失败直接上抛崩溃阻断。"""
         from brain.hc.database.task import TaskOperations
+        from config.truck_settings import task_truck_config
 
         task_ops = TaskOperations()
         task_ids = await task_ops.get_active_tasks(limit=50)
@@ -107,32 +151,60 @@ class TaskTruck(BaseTruck):
             return []
 
         current_time = datetime.now()
+        ttl = task_truck_config.RE_TRIGGER_TTL_SECONDS
         due: List[Dict] = []
         for task_id in task_ids:
             rec = await task_ops.get_task_by_id(task_id)
             if not rec:
                 continue
-            next_occurrence = rec.get("next_occurrence") or ""
-            if not next_occurrence:
+            due_time = self._resolve_due_time(rec)
+            if due_time is None or current_time < due_time:
                 continue
-            try:
-                next_time = datetime.fromisoformat(next_occurrence.replace('Z', '+00:00'))
-            except ValueError:
-                continue
-            # 只触发已到或超过触发时间的任务
-            if current_time < next_time:
-                continue
-            # 防循环：同一 task_id 的本次到期（next_occurrence 未变）不重复触发
-            if self._triggered_keys.get(task_id) == next_occurrence:
-                logger.debug(
-                    f"任务 {rec.get('title')} 的本次到期已触发过，跳过（等待 next_occurrence 更新）"
+            # 防循环：同一 task_id 的本次到期（时间取值未变）不重复触发
+            due_key = self._due_key(rec)
+            if self._triggered_keys.get(task_id) == due_key:
+                last_at = self._triggered_at.get(task_id)
+                if last_at is not None and (current_time - last_at).total_seconds() < ttl:
+                    logger.debug(
+                        f"任务 {rec.get('title')} 的本次到期已触发过，跳过"
+                        f"（等待时间更新，或距上次触发满 TTL 兜底重触发）"
+                    )
+                    continue
+                logger.warning(
+                    f"任务 {rec.get('title')} 本次到期已触发但超过 TTL={ttl}s 仍未推进，"
+                    f"兜底重新触发（疑似 PFCA 未汇报导致断链）"
                 )
-                continue
             due.append(rec)
         return due
 
+    @staticmethod
+    def _wake_block(rec: Dict) -> str:
+        """单个到期任务的唤醒文案（2026-10-01 新格式：不再注入记录全文）。"""
+        title = (rec.get("title") or "未知任务").strip()
+        stage = (rec.get("stage") or "").strip() or "（未标注）"
+        deadline_dt = _parse_iso(rec.get("deadline") or "")
+        if deadline_dt is None:
+            tail = (
+                "（最终汇报时间未设置）请推进该任务到下一阶段，"
+                "并把成果汇报给 quest 登记，直到 quest 判定达标。"
+            )
+        else:
+            remaining = (deadline_dt - datetime.now()).total_seconds()
+            if remaining < 0:
+                tail = (
+                    f"已超过最终汇报时间{_format_duration(-remaining)}。"
+                    "请立刻整理已有材料与未达标说明，上报 quest 收尾，不再继续推进。"
+                )
+            else:
+                tail = (
+                    f"距最终汇报时间还有{_format_duration(remaining)}。"
+                    "请推进该任务到下一阶段，并把成果汇报给 quest 登记，"
+                    "直到 quest 判定达标。"
+                )
+        return f"任务「{title}」，当前阶段：{stage}。{tail}"
+
     async def get_truck_messages(self) -> Optional[Dict]:
-        """station 调度时调用：把所有到期任务格式化为指定展示格式返回，
+        """station 调度时调用：把所有到期任务格式化为唤醒文案返回，
         station 据此直接启动 PFCA（不经 proactive 决策层）。
 
         Returns:
@@ -147,37 +219,16 @@ class TaskTruck(BaseTruck):
             if not tasks:
                 return None
 
-        from brain.hc.database.task import TaskOperations
-
-        task_ops = TaskOperations()
-
-        def _head_line(t: Dict) -> str:
-            """头部行：预计触发事件<标题>，距离现在<时长>前。"""
-            title = (t.get("title") or "未知任务").strip()
-            overdue = ""
-            next_occurrence = t.get("next_occurrence") or ""
-            if next_occurrence:
-                try:
-                    next_time = datetime.fromisoformat(next_occurrence.replace('Z', '+00:00'))
-                    overdue_seconds = (datetime.now() - next_time).total_seconds()
-                    overdue = f"，距离现在{_format_duration(overdue_seconds)}前"
-                except ValueError:
-                    overdue = ""
-            return f"（预计触发事件{title}{overdue}）"
-
         if len(tasks) == 1:
-            head = f"一个任务已到达预计的再次处理时间。{_head_line(tasks[0])}"
-            content = await task_ops.format_task_by_id(tasks[0].get("task_id") or "")
-            formatted_message = f"{head}\n任务内容：\n{content}"
-        else:
-            heads = "\n".join(_head_line(t) for t in tasks)
-            blocks = []
-            for i, t in enumerate(tasks, 1):
-                content = await task_ops.format_task_by_id(t.get("task_id") or "")
-                blocks.append(f"{i}. {content}")
             formatted_message = (
-                f"{len(tasks)}个任务已到达预计的再次处理时间：\n{heads}\n"
-                f"任务内容：\n{'\n\n'.join(blocks)}"
+                "一个任务已到达处理时间。\n" + self._wake_block(tasks[0])
+            )
+        else:
+            blocks = "\n".join(
+                f"{i}. {self._wake_block(t)}" for i, t in enumerate(tasks, 1)
+            )
+            formatted_message = (
+                f"{len(tasks)}个任务已到达处理时间：\n{blocks}"
             )
 
         logger.info(

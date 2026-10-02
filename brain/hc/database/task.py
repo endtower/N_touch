@@ -3,14 +3,21 @@
 任务操作类（SQLite）
 
 任务是独立表，记录长期任务（active 进行中 / completed 已完结）。
-title 为定位键；summary 覆盖式更新；next_occurrence 为下次发生时间。
-阶段进展（quest_agent 的拆解与裁决）以概况文本承载，不落结构化列。
+title 为定位键；next_occurrence 为下次处理时间；deadline 为最终汇报时间
+（硬截止）。
 
-概况格式约定（2026-09-18 笔记化）：首行「当前阶段：<一句话>」（全系统读首行即知
-道进展到哪一步），之后为分级笔记——每行一条、以「- 」开头、缩进两个空格表示
-从属层级。append_task_log 永远在概况末尾追加一条一级笔记（「- 」开头，末尾即
-新进的未整理笔记）；格式约定不校验，漂移由 quest agent 重写概况时统一修正
-（quest 独占整理权：归级、合并归纳成段、删过时）。
+任务记录字段（2026-10-01 改造：summary 单列拆为四个独立语义列）：
+- brief（简要总结，前因与目的）：一句话说明这条任务从哪来、要达成什么；
+- conclusion（已获取的汇报结论）：当前已拿到、可直接用于汇报的结论；
+- stage（当前阶段）：还需要做什么，一句话刚性目标；
+- notes（任务笔记）：低权限记录通道，其他 agent 经 append_task_log 追加，
+  quest agent 推进时整列清理并填入一条简洁新笔记（quest 独占整理权）。
+
+两个时间：
+- next_occurrence（下次处理时间）：唤起频率，quest 每次被咨询时写死，
+  想催紧就排近；达标即不再设置（配合置完结自动停触发）。
+- deadline（最终汇报时间）：硬截止，到点仍未达标则由 quest 出「未达标说明 +
+  已有材料」上报收尾（卡车触发对 deadline 保底：取两者较早者）。
 """
 
 from datetime import datetime
@@ -27,8 +34,8 @@ TASK_STATUS_ACTIVE = "active"
 TASK_STATUS_COMPLETED = "completed"
 
 # 已到处理时间的短语前缀（_calculate_time_until 的过期分支产出，
-# 调用方据此判断是否叠加「下次发生时间为」前缀——见 format_task_by_id / format_tasks_brief）
-_OVERDUE_PREFIX = "已到处理时间"
+# 调用方据此判断是否叠加「下次处理时间为」前缀——见 format_task_by_id / format_tasks_brief）
+_OVERDUE_PREFIX = "已到"
 
 
 def _format_duration(seconds: float) -> str:
@@ -69,33 +76,43 @@ class TaskOperations:
         row = await cur.fetchone()
         return row["task_id"] if row else None
 
-    async def create_task(self, title, summary, next_occurrence=None,
+    async def create_task(self, title, brief, conclusion="", stage="", notes="",
+                          next_occurrence=None, deadline=None,
                           status=TASK_STATUS_ACTIVE) -> str:
-        """创建任务。"""
+        """创建任务。
+
+        brief 为简要总结（前因与目的）；stage 为当前阶段（还需要做什么）；
+        conclusion 为已获取的汇报结论；notes 为任务笔记。
+        deadline 为最终汇报时间（硬截止，ISO 8601；缺省空串＝未设置）。
+        """
         current_time = datetime.now().isoformat()
         task_id = generate_timestamp_id("Task")
 
-        # 任务不落向量（2026-09-19）：任务无语义检索消费方，summary_vector
-        # 恒写 NULL、is_vectorized 恒 0，避免无谓的嵌入 API 调用与成本。
+        # 任务不落向量（2026-09-19）：任务无语义检索消费方。
         conn = await self.db._ensure_connection()
         await conn.execute(
-            """INSERT INTO tasks (task_id, title, status, summary, next_occurrence,
-               summary_vector, is_vectorized, start_time, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (task_id, title, status, summary, next_occurrence or "",
-             None, 0, current_time, current_time),
+            """INSERT INTO tasks (task_id, title, status, brief, conclusion,
+               stage, notes, next_occurrence, deadline, start_time, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task_id, title, status, brief, conclusion, stage, notes,
+             next_occurrence or "", deadline or "", current_time, current_time),
         )
         await conn.commit()
         return task_id
 
     async def update_task(self, title, preserve_updated_at: bool = False, **kwargs) -> bool:
-        """更新任务（通过 title 定位）。status 置为 completed 时自动写 end_time。"""
+        """更新任务（通过 title 定位）。status 置为 completed 时自动写 end_time。
+
+        kwargs 可含 brief / conclusion / stage / notes / next_occurrence /
+        deadline / status 等。
+        """
         task_id = await self.get_task_id_by_title(title)
         if not task_id:
             return False
 
         current_time = datetime.now().isoformat()
-        allowed_fields = ['title', 'status', 'summary', 'next_occurrence',
+        allowed_fields = ['title', 'status', 'brief', 'conclusion', 'stage',
+                          'notes', 'next_occurrence', 'deadline',
                           'start_time', 'updated_at']
 
         set_clauses = []
@@ -135,13 +152,15 @@ class TaskOperations:
         logger.info(f"清空任务表: 删除 {cur.rowcount} 条")
         return cur.rowcount
 
-    def _calculate_time_until(self, future_time_str: str) -> str:
-        """计算与 next_occurrence 的相对时间描述（完整语义短语）。
+    def _calculate_time_until(self, future_time_str: str, on_time_label: str = "处理时间") -> str:
+        """计算与某时间点的相对时间描述（完整语义短语）。
 
-        - 未来：如「3天2小时后」（仅时长，调用方叠加「下次发生时间为」前缀）。
-        - 已到/已过：如「已到处理时间（超出计划3小时）」——明确告诉 LLM 任务
-          已到达下次处理时间（该处理了），并给出与预期计划的时间差距。
+        - 未来：如「3天2小时后」（仅时长，调用方叠加前缀）。
+        - 已到/已过：如「已到处理时间（超出计划3小时）」/「已到最终汇报时间（超出计划3小时）」，
+          明确告诉 LLM 该时间点已到达，并给出与预期计划的时间差距。
         - 无/无效：返回「未知」。
+
+        on_time_label 决定过期分支的措辞（下次处理时间 / 最终汇报时间）。
         """
         if not future_time_str:
             return "未知"
@@ -152,9 +171,9 @@ class TaskOperations:
         current_time = datetime.now()
         delta = future_time - current_time
         if delta.total_seconds() < 0:
-            # 已到达下次处理时间：超出的时长 = 预期时间点距现在的时长
+            # 已到达该时间点：超出的时长 = 预期时间点距现在的时长
             overdue = _format_duration(-delta.total_seconds())
-            return f"{_OVERDUE_PREFIX}（超出计划{overdue}）"
+            return f"{_OVERDUE_PREFIX}{on_time_label}（超出计划{overdue}）"
         days = delta.days
         seconds = delta.seconds
         hours = seconds // 3600
@@ -169,13 +188,12 @@ class TaskOperations:
         return "".join(parts) + "后"
 
     async def append_task_log(self, task_title: str, content: str) -> bool:
-        """向任务笔记末尾添加一条一级笔记（记录级写入，quest agent 裁决之外的低权限通道）。
+        """向任务笔记（notes 列）末尾添加一条记录（记录级写入，quest agent 裁决之外的低权限通道）。
 
         仅允许 active 任务（已完结任务不可再记录）；定位失败/已完结返回 False
         （业务级失败，由调用方反馈，非系统故障不上抛）。
-        概况格式约定不校验：永远追加一行 "- <content>" 到概况末尾——末尾即
-        新进的未整理笔记（首行「当前阶段：」约定见模块 docstring），本方法
-        零解析、纯字符串拼接；分级整理由 quest agent 重写概况时统一进行。
+        永远在 notes 末尾追加一行 "- <content>"——本方法零解析、纯字符串拼接；
+        整理（清空旧笔记并填入一条简洁新笔记）由 quest agent 推进时统一进行。
         """
         if not task_title or not content or not content.strip():
             return False
@@ -187,11 +205,11 @@ class TaskOperations:
         if task is None or task.get("status") != TASK_STATUS_ACTIVE:
             return False
 
-        summary = (task.get("summary") or "").rstrip()
+        notes = (task.get("notes") or "").rstrip()
         log_line = f"- {content.strip()}"
-        new_summary = f"{summary}\n{log_line}" if summary else log_line
+        new_notes = f"{notes}\n{log_line}" if notes else log_line
 
-        return await self.update_task(task_title, summary=new_summary)
+        return await self.update_task(task_title, notes=new_notes)
 
     async def get_task_by_id(self, task_id: str) -> Optional[Dict]:
         """获取单个任务的原始数据字典。"""
@@ -199,8 +217,9 @@ class TaskOperations:
             return None
         conn = await self.db._ensure_connection()
         cur = await conn.execute(
-            "SELECT task_id, title, summary, status, next_occurrence, start_time, end_time "
-            "FROM tasks WHERE task_id=?",
+            "SELECT task_id, title, brief, conclusion, stage, notes, status, "
+            "next_occurrence, deadline, start_time, end_time FROM tasks "
+            "WHERE task_id=?",
             (task_id,),
         )
         row = await cur.fetchone()
@@ -209,9 +228,13 @@ class TaskOperations:
         return {
             "task_id": row["task_id"],
             "title": row["title"],
-            "summary": row["summary"],
+            "brief": row["brief"],
+            "conclusion": row["conclusion"],
+            "stage": row["stage"],
+            "notes": row["notes"],
             "status": row["status"],
             "next_occurrence": row["next_occurrence"],
+            "deadline": row["deadline"],
             "start_time": row["start_time"],
             "end_time": row["end_time"],
         }
@@ -223,8 +246,9 @@ class TaskOperations:
 
         conn = await self.db._ensure_connection()
         cur = await conn.execute(
-            "SELECT task_id, title, summary, status, next_occurrence, start_time, end_time "
-            "FROM tasks WHERE task_id=?",
+            "SELECT task_id, title, brief, conclusion, stage, notes, status, "
+            "next_occurrence, deadline, start_time, end_time FROM tasks "
+            "WHERE task_id=?",
             (task_id,),
         )
         row = await cur.fetchone()
@@ -233,24 +257,38 @@ class TaskOperations:
 
         formatted_output = []
         formatted_output.append(f"名称：{row['title'] or '未知标题'}")
-        # 概况多行原样透出（首行「当前阶段：」、其后进度总览，约定见模块 docstring）
-        formatted_output.append("概况：")
-        formatted_output.append(row["summary"] if row["summary"] else "（无）")
+        formatted_output.append(f"简要：{row['brief'] or '（无）'}")
+        formatted_output.append(f"当前阶段：{row['stage'] or '（无）'}")
+        formatted_output.append(f"已获结论：{row['conclusion'] or '（无）'}")
+        formatted_output.append("任务笔记：")
+        formatted_output.append(row["notes"] if row["notes"] else "（无）")
 
         status = row["status"] or ""
         next_occurrence = row["next_occurrence"] or ""
+        deadline = row["deadline"] or ""
 
         if status == TASK_STATUS_ACTIVE:
             if next_occurrence:
                 time_until = self._calculate_time_until(next_occurrence)
                 # 已到处理时间时短语自含完整语义（含「超出计划X」），
-                # 不再叠加「下次发生时间为」前缀，避免「下次发生时间为已到…」拗口
+                # 不再叠加「下次处理时间为」前缀，避免「下次处理时间为已到…」拗口
                 if time_until.startswith(_OVERDUE_PREFIX):
                     formatted_output.append(f"状态：进行中，{time_until}")
                 else:
-                    formatted_output.append(f"状态：进行中，下次发生时间为{time_until}")
+                    formatted_output.append(f"状态：进行中，下次处理时间为{time_until}")
             else:
-                formatted_output.append("状态：进行中，未设置下次发生时间")
+                formatted_output.append("状态：进行中，未设置下次处理时间")
+            # 最终汇报时间（硬截止，2026-10-01 新增）
+            if deadline:
+                deadline_until = self._calculate_time_until(
+                    deadline, on_time_label="最终汇报时间"
+                )
+                if deadline_until.startswith(_OVERDUE_PREFIX):
+                    formatted_output.append(deadline_until)
+                else:
+                    formatted_output.append(f"距最终汇报时间：{deadline_until}")
+            else:
+                formatted_output.append("最终汇报时间：未设置")
         elif status == TASK_STATUS_COMPLETED:
             formatted_output.append("状态：已完结")
         else:
@@ -323,18 +361,6 @@ class TaskOperations:
         cur = await conn.execute(
             "SELECT task_id FROM tasks WHERE status='active' "
             "ORDER BY start_time DESC LIMIT ?",
-            (limit,),
-        )
-        rows = await cur.fetchall()
-        return [r["task_id"] for r in rows if r["task_id"]]
-
-    async def get_recent_completed_tasks(self, limit: int = 3) -> List[str]:
-        """获取最近完结的任务。"""
-        conn = await self.db._ensure_connection()
-        cur = await conn.execute(
-            "SELECT task_id FROM tasks WHERE status='completed' "
-            "ORDER BY CASE WHEN end_time != '' THEN end_time ELSE start_time END DESC, "
-            "start_time DESC LIMIT ?",
             (limit,),
         )
         rows = await cur.fetchall()

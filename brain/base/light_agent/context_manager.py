@@ -3,8 +3,7 @@
 通用上下文管理器（AgentContextManager）。
 
 为 light_agent 统一装配 LLM user 上下文（**当前无生产消费方**：persona_agent
-2026-09-22 起不再做 user 消息再构造，改为「传入消息 + 匹配到的经验」直接拼接；
-本模块现仅由 tests/smoke_sc_axis.py 消费，用于校验 AMY 决策侧情绪出口契约），
+2026-09-22 起不再做 user 消息再构造，改为「传入消息 + 匹配到的经验」直接拼接），
 采用「类 input manager」的槽位 + provider 模式（参照 pfca_input_manager 的
 _blocks dict + _compile 空段过滤）：
 - add_block：静态槽位，按添加顺序聚合。
@@ -101,10 +100,10 @@ def _collect_current_environment(manager: AgentContextManager) -> None:
 def register_amy_emotion_provider(manager: AgentContextManager) -> None:
     """注册 AMY 情绪 provider，供自定义装配时单独注入情绪段。
 
-    provider 产出文本：决策侧出口 get_decision_description() 的单行 SC
-    行动对应 + "原因："（仅最终评价类想法摘要），不再自行二次拼接
+    provider 产出文本：决策侧出口 get_decision_description() 的 "原因："
+    （仅最终评价类想法摘要），不再自行二次拼接
     build_thought_summary（成因已由出口内嵌，见 docs/api/amy.md）。
-    情绪体系隔离（2026-09-13）：light_agent 属决策侧，只见 SC 轴，
+    情绪体系隔离（2026-09-13；2026-09-27 SC 轴剔除）：light_agent 属决策侧，
     不见 NE/DA 表现侧激素行（conversation/social_chat 专属）。
     均空则返回 None，由 build() 跳过。
 

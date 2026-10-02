@@ -35,7 +35,7 @@ from utils.error_handling import handle_errors
 from brain.amy.constants import (
     Thought, MoodSnapshot, ACTEffects,
     BASE_VALUE, MIN_VALUE, MAX_VALUE,
-    clamp, THOUGHT_DURATION, SC_DEFAULT,
+    clamp, THOUGHT_DURATION,
     generate_timestamp_id,
 )
 
@@ -52,8 +52,6 @@ class ThoughtCache:
         self.timestamp: int = int(time.time())
         # 情绪事件日志引用（由 EmotionalInterface 注入）
         self._event_log = event_log
-        # SC 状态引用（由 EmotionalInterface 注入，可空；未绑定时快照 sc 用 SC_DEFAULT 兜底）
-        self._sc_state = None
         # 并发锁：保护 thoughts 列表与持久化的读写
         self._lock = asyncio.Lock()
         self.load_from_file()
@@ -61,16 +59,6 @@ class ThoughtCache:
     def bind_event_log(self, event_log):
         """由 EmotionalInterface 在初始化时调用，注入事件日志引用。"""
         self._event_log = event_log
-
-    def bind_sc_state(self, sc_state):
-        """由 EmotionalInterface 在初始化时调用，注入 SC 状态实例引用。"""
-        self._sc_state = sc_state
-
-    def _read_sc_value(self) -> float:
-        """读取当前 SC 值：绑定 ScState 时走 read_value()（含惰性时间衰减），未绑定回退 SC_DEFAULT。"""
-        if self._sc_state is None:
-            return float(SC_DEFAULT)
-        return self._sc_state.read_value()
 
     async def _emit(self, event_type: str, thought: Optional[Thought] = None, **kwargs) -> None:
         """写一条情绪事件日志（无 event_log 时静默跳过）。"""
@@ -345,7 +333,6 @@ class ThoughtCache:
                     norepinephrine=BASE_VALUE,
                     dopamine=BASE_VALUE,
                     top_thoughts=[],
-                    sc=self._read_sc_value()
                 )
 
             total_norepinephrine = 0.0
@@ -369,7 +356,6 @@ class ThoughtCache:
                 norepinephrine=norepinephrine,
                 dopamine=dopamine,
                 top_thoughts=selected_thoughts,
-                sc=self._read_sc_value()
             )
 
 

@@ -85,7 +85,9 @@ class ConversationInputManager:
     async def _build_first_input(self) -> str:
         """构建首条消息，预期拼接格式（各段按序 "\\n".join，条件段可能缺席）：
 
-            【已经发生的聊天记录】               <- 固定首行标题
+            【当前人格】{人格名}                    <- 固定首段；本段会话显式指定的人格
+            {基本人格 + 该人格 kernel_prompt 全文}   <- 基本人格在前（compose_persona_prompt）
+            【已经发生的聊天记录】               <- 固定标题
             {游标拉取的未读消息渲染}             <- fetch_unread(consumer_id="conversation")
             【当前会话环境】你正在与{name} id {session_id} 交流
             {私聊/群聊可见性 + 非主人警示}       <- build_session_environment 生成，自带标题
@@ -98,7 +100,7 @@ class ConversationInputManager:
             └ {条目}
             可以使用工具查询记事本某一章节的具体信息以查看细节。
             【响应的经验·契合当前心情】           <- 心情通道（amy 情绪描述）命中才追加
-            你回想起了经验：{title} - {summary}   每通道最多 3 条，共最多 6 条
+            你回想起了经验：{title} - {summary}   心情通道最多 4 条、任务通道最多 6 条，共最多 10 条
             【响应的经验·契合本次任务】           <- 任务通道（PFCA 任务书）命中才追加
             你回想起了经验：{title} - {summary}
             【系统提示】…（{sent}/{max}）        <- 达到条数上限才追加
@@ -138,9 +140,17 @@ class ConversationInputManager:
         ei = await get_emotional_interface()
         # 表现侧出口：仅 NE/DA 两行激素描述 + 原因（仅非最终评价类想法），
         # 不含 SC 行——pfca 决策侧情绪体系与本模块隔离（见 docs/api/amy.md）
+        # 展示块暂时隐藏原因（amy_effect_display，with_reason=False）；
+        # amy_effect（带原因）仍作为经验检索心情通道的 query，检索行为不变
         amy_effect = await ei.get_language_description()
+        amy_effect_display = await ei.get_language_description(with_reason=False)
 
-        # 按实际消息拼接顺序组装：聊天记录 -> 会话环境 -> 任务 -> 情绪
+        # 人格段：本段会话由 conversation_agent 显式指定的人格（缺省 normal）。
+        # 读取该人格提示词（基本人格 + kernel_prompt，基本人格在前）作为语言与行为基准；
+        # 人格不存在在 get_persona 直接抛 KeyError 崩溃阻断（user_rules）。
+        persona_header = self._build_persona_header()
+
+        # 按实际消息拼接顺序组装：人格 -> 聊天记录 -> 会话环境 -> 任务 -> 情绪
         _parts = [f"{message_str}"]
         # 当前会话环境段：从当前会话取 session_id 与 session_name，按角色/群聊/是否主人动态拼接。
         # build_session_environment 自带【当前会话环境】标题（与 social_chat 同一 helper），不再手动加前缀
@@ -154,9 +164,11 @@ class ConversationInputManager:
         _parts.append(
             f"【本次聊天任务】\n{conversation_purpose}"
         )
-        if amy_effect:
-            _parts.append(f"【你的情绪状态】{amy_effect}")
+        if amy_effect_display:
+            _parts.append(f"【你的情绪状态】{amy_effect_display}")
         user_input = "\n".join(["【已经发生的聊天记录】"] + _parts)
+        if persona_header:
+            user_input = f"{persona_header}\n{user_input}"
 
         # 记事本手册：长期经验底色（全部已落库条目，usage 不参与路由），
         # 章节式裸文本；拉取失败直接上抛崩溃阻断（按 user_rules），细节经 query_note 工具溯源
@@ -234,10 +246,25 @@ class ConversationInputManager:
         core = get_conversation_core()
         return getattr(core, "purpose", "") or ""
 
+    def _build_persona_header(self) -> str:
+        """构建首条 user 消息开头的【当前人格】段（本段会话显式指定的人格）。
+
+        人格由 conversation_agent 经 conversation_core.persona_name 传入（缺省正常人格），
+        本段注入该人格提示词（公共聊天准则 + kernel_prompt，公共段在前），
+        作为本次对话的语言与行为基准。
+        人格不存在属重大关键路径失败，get_persona 直接抛 KeyError 崩溃阻断（user_rules）。
+        """
+        from brain.chat.conversation.conversation_core import get_conversation_core
+        from brain.base.persona.persona_registry import compose_persona_prompt, get_persona
+
+        core = get_conversation_core()
+        persona = get_persona(core.persona_name)
+        return f"【当前人格】{persona.persona_name}\n{compose_persona_prompt(persona)}"
+
     async def _append_matched_bequests(self, mood_query: str, purpose_query: str, user_input: str) -> str:
         """双通道经验检索并追加到输入（心情 + 任务，检索核心走 common_ways，与 social_chat 同源）。
 
-        通道划分（每通道 top_k=3、最多激活 3 条，合计最多 6 条）：
+        通道划分（心情通道最多 4 条、任务通道最多 6 条，合计最多 10 条）：
         - 心情通道：amy 表现侧情绪描述（get_language_description 出口）作 query，
           召回表达方式类话术经验；
         - 任务通道：PFCA 下达的本次聊天任务作 query，召回任务相关话术经验。
@@ -263,17 +290,17 @@ class ConversationInputManager:
             return bequest_id in channel_seen or bequest_cache.is_activated(bequest_id)
 
         channels = [
-            ("【响应的经验·契合当前心情】", mood_query),
-            ("【响应的经验·契合本次任务】", purpose_query),
+            ("【响应的经验·契合当前心情】", mood_query, 4),
+            ("【响应的经验·契合本次任务】", purpose_query, 6),
         ]
 
         sections = []
-        for header, query in channels:
+        for header, query, limit in channels:
             query = (query or "").strip()
             if not query:
                 continue
             matched = await activate_bequests_for_input(
-                query, skip=_skip, top_k=3, max_activate=3,
+                query, skip=_skip, top_k=limit, max_activate=limit,
             )
             if not matched:
                 continue

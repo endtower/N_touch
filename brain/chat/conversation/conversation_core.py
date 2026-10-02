@@ -53,6 +53,8 @@ class ConversationCore(HeavyCore):
         self._session = None
         # 会话停止时由 stop_session 记录、后处理 _postprocess 消费的总结
         self._pending_summary: str = ""
+        # 本次会话使用的人格名（由 conversation_agent 走 tool 链路传入，缺省 normal）
+        self.persona_name: str = ""
         self._encounters_cache: List[str] = []
         self._emotion_type_cache: str = ""
         self._pfca_strategy_cache: str = ""
@@ -71,6 +73,7 @@ class ConversationCore(HeavyCore):
         session_id: str,
         purpose: str,
         max_messages: int = 0,
+        persona_name: str = "",
     ) -> str:
         """启动一次新会话（兼容入口）：委托给统一骨架 start()。
 
@@ -80,11 +83,17 @@ class ConversationCore(HeavyCore):
             session_id: 会话标识，格式为 "type_id"，如 "private_1234567890" / "group_198431299"
             purpose: 本次会话的目的（已包含任何必要的补充信息；上游自行拼装）
             max_messages: 软限制发送轮次数（一次发送工具调用计 1）
+            persona_name: 本次会话使用的人格名（由 conversation_agent 指定；为空用默认人格）
+
+        人格为逐会话显式指定：本对话使用 persona_name 指定的人格，由
+        conversation_input_manager 在本段会话首条消息注入该人格 kernel_prompt；
+        缺省用 persona_registry.DEFAULT_PERSONA_MODE。
         """
         return await self.start(
             session_id=session_id,
             purpose=purpose,
             max_messages=max_messages,
+            persona_name=persona_name,
         )
 
     @async_handle_errors()
@@ -105,6 +114,7 @@ class ConversationCore(HeavyCore):
         self,
         session_id: str,
         purpose: str,
+        persona_name: str = "",
         **kwargs,
     ) -> None:
         """会话启动前的前处理：重置状态、初始化上下文。
@@ -113,6 +123,7 @@ class ConversationCore(HeavyCore):
         不再单独传 extra_file。
         """
         from brain.chat.conversation.conversation_input_manager import get_conversation_input_manager
+        from brain.base.persona.persona_registry import DEFAULT_PERSONA_MODE
 
         # 上一轮会话已由骨架 start() 统一收尾（self._session 已清空），这里直接重置本轮状态
         self._pending_summary = ""
@@ -124,6 +135,10 @@ class ConversationCore(HeavyCore):
         self.conversation_id = session_id
         # 本次会话目的由 PFCA 走 tool 链路直接传入，conversation 自身持有
         self.purpose = purpose
+        # 人格为逐会话显式指定：本段会话使用 conversation_agent 传入的 persona_name
+        # （缺省 normal）；由 conversation_input_manager 在首条消息注入该人格 kernel_prompt，
+        # 未注册人格在那里由 get_persona 抛 KeyError 崩溃阻断。
+        self.persona_name = (persona_name or "").strip() or DEFAULT_PERSONA_MODE
 
         self._get_session_info_from_focus()
         self._init_session_state()

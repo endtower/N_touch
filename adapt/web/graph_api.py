@@ -45,8 +45,9 @@ def _safe_int(s: Optional[str], default: int) -> int:
 # ============================================================
 
 _TASK_FIELDS = (
-    "task_id", "title", "status", "summary",
-    "next_occurrence",
+    "task_id", "title", "status",
+    "brief", "conclusion", "stage", "notes",
+    "next_occurrence", "deadline",
     "start_time", "end_time", "updated_at",
 )
 
@@ -156,10 +157,12 @@ async def handle_set_task_status(request: web.Request) -> web.Response:
         return web.json_response({"error": f"更新失败: {e}"}, status=500)
 
 
-_TASK_EDITABLE = {"title", "status", "summary", "next_occurrence",
+_TASK_EDITABLE = {"title", "status",
+                  "brief", "conclusion", "stage", "notes",
+                  "next_occurrence", "deadline",
                   "start_time", "updated_at"}
 
-_TASK_TIME_FIELDS = {"start_time", "updated_at", "next_occurrence"}
+_TASK_TIME_FIELDS = {"start_time", "updated_at", "next_occurrence", "deadline"}
 
 
 def _validate_iso_datetime(value: Any, field_name: str) -> Tuple[bool, str]:
@@ -248,7 +251,7 @@ async def handle_update_task(request: web.Request) -> web.Response:
                 await conn.execute("UPDATE tasks SET title=?, updated_at=? WHERE task_id=?", (new_title, now, task_id))
             await conn.commit()
 
-        # 任务不落向量（2026-09-19）：summary 变化仅覆盖概况，无需重生成
+        # 任务不落向量（2026-09-19）：文本字段变化仅覆盖对应列，无需重生成
         # summary_vector（无语义检索消费方），updated_at 由 update_task 处理
 
         cur = await conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,))
@@ -286,11 +289,15 @@ async def handle_create_task(request: web.Request) -> web.Response:
                 status=400,
             )
 
-        summary = data.get("summary") or ""
+        brief = data.get("brief") or ""
+        conclusion = data.get("conclusion") or ""
+        stage = data.get("stage") or ""
+        notes = data.get("notes") or ""
         next_occurrence = data.get("next_occurrence")
+        deadline = data.get("deadline")
         start_time_user = data.get("start_time")
 
-        for f in ("next_occurrence", "start_time"):
+        for f in ("next_occurrence", "deadline", "start_time"):
             v = data.get(f)
             if v is None:
                 continue
@@ -301,8 +308,12 @@ async def handle_create_task(request: web.Request) -> web.Response:
         ops = TaskOperations()
         task_id = await ops.create_task(
             title=title,
-            summary=summary,
+            brief=brief,
+            conclusion=conclusion,
+            stage=stage,
+            notes=notes,
             next_occurrence=next_occurrence,
+            deadline=deadline,
             status=status,
         )
 

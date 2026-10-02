@@ -77,6 +77,11 @@ export default defineConfig({
         target: 'http://127.0.0.1:5002',
         changeOrigin: true,
       },
+      // Token 用量统计 HTTP API（/token-stats）
+      '/token-stats': {
+        target: 'http://127.0.0.1:5002',
+        changeOrigin: true,
+      },
     },
   },
 })

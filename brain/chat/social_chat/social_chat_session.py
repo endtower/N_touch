@@ -16,7 +16,9 @@ from typing import List, Dict, Optional
 
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
-from utils.llm_client_manager import call_llm, TokenBudget, TokenBudgetExceededError, token_budget_scope
+from utils.llm_client_manager import (
+    call_llm, TokenBudget, TokenBudgetExceededError, token_budget_scope, agent_scope,
+)
 
 from brain.base import HeavySession
 from brain.chat.chat_history_manager import get_history_manager
@@ -123,7 +125,7 @@ class SocialChatSession(HeavySession):
 
         budget = TokenBudget(self.TOKEN_BUDGET) if self.TOKEN_BUDGET else None
         self.token_budget = budget
-        with token_budget_scope(budget):
+        with token_budget_scope(budget), agent_scope(self.agent_name or type(self).__name__):
             while self.running and self.self_loop_count < self.max_self_loops:
                 if budget is not None and budget.exceeded:
                     self._exit_reason = f"token 预算耗尽 ({budget.used}/{budget.max_tokens})"

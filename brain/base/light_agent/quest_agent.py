@@ -6,8 +6,13 @@
   进展追踪（当前到哪一步）、推进裁决（系统当前是否有能力推进下一阶段）。
   唯独不负责具体策略执行（HOW 归反思系统，现场执行归 PFCA）。
 - 滚动式阶段规划：社交任务千变万化，无法在创建时一次性完整拆解全部阶段。
-  阶段拆解与进展裁决的结论以任务概况（summary 覆盖式更新）文本承载，
-  随任务推进在每轮审视中修订——不落结构化列、不进工具参数。
+  阶段拆解与进展裁决的结论以任务记录的独立字段承载（brief 简要总结 /
+  conclusion 汇报结论 / stage 当前阶段 / notes 任务笔记），
+  随任务推进在每轮审视中修订。推进即整理：quest 判定可推进时，调用
+  update_task_status 重写 stage 与 conclusion，并完全清空旧 notes、
+  填入一条简洁的新笔记（quest 独占整理权）。
+  计时拆为两个时间：next_occurrence（下次处理时间，唤起频率）与
+  deadline（最终汇报时间，硬截止；到点未达标则出未达标说明收尾）。
 - 推进裁决：裁决依据是信息 / 材料 / 时机是否就绪。核实手段是通用社交查询
   工具（query_history / query_address_book，只读、不推进任何游标），
   由本 agent 自主查证聊天记录与通讯录，而非只信 backlog 的转述。
@@ -46,9 +51,6 @@ logger = get_logger(__name__, "DEBUG")
 # 单次 run() 最多允许多少轮 LLM 决策（防止死循环把 token 烧光）
 MAX_TURNS = 8
 
-# 第一条 user 输入中额外展示的最近完结任务数量
-RECENT_COMPLETED_LIMIT = 3
-
 # 操作类型（与 ToolPersistent.quest_agent schema 的 enum 对齐）
 OP_CREATE_TASK = "create_task"
 OP_UPDATE_TASK = "update_task"
@@ -66,9 +68,9 @@ class QuestAgent(LightweightAgent):
 
     工具权限分区（2026-09-17）：
     - 裁决级（本类私有，不作为 common way）：create_task / update_task_status
-      —— 创建任务、概况重写/阶段推进、完结，全系统仅 quest 可调；
+      —— 创建任务、记录重写/阶段推进、完结，全系统仅 quest 可调；
     - 记录级（ToolTask 通用层）：append_task_log —— 其他 agent 可给任务
-      添加一条笔记（一级条目，追加概况末尾，待 quest 整理归位）；
+      添加一条笔记（追加 notes 末尾，待 quest 整理熔合）；
     - 查询级（ToolTask 通用层 + ToolSocial）：query_task_status / query_history /
       query_address_book —— 全员只读。
     """
@@ -82,7 +84,7 @@ class QuestAgent(LightweightAgent):
             "function": {
                 "name": "create_task",
                 "description": (
-                    "创建一个需要下次唤醒才能完成的任务。\n"
+                    "创建一个需要下次唤醒才能完成的长期任务。\n"
                 ),
                 "parameters": {
                     "type": "object",
@@ -91,25 +93,36 @@ class QuestAgent(LightweightAgent):
                             "type": "string",
                             "description": "任务标题，简短概括任务",
                         },
-                        "summary": {
+                        "brief": {
                             "type": "string",
                             "description": (
-                                "任务初始概况（一本分级笔记）：首行固定为「当前阶段：<一句话>」；"
-                                "之后每行一条笔记，以「- 」开头，缩进两个空格表示从属层级"
-                                "（任务目标、已知进展、还缺什么……写清楚即可）。"
+                                "简要总结（不超过 50 字）：说明这条任务的前因与目的"
+                                "——从哪来、要达成什么。必须笼统、禁流水账。"
+                            ),
+                        },
+                        "stage": {
+                            "type": "string",
+                            "description": (
+                                "当前阶段（一句话，简洁的刚性目标）：这条任务此刻还需"
+                                "要做什么。不写流水账、不写策略方案。"
                             ),
                         },
                         "next_occurrence": {
                             "type": "string",
                             "description": (
-                                "下次处理时间：ISO 8601 格式（如 2024-01-20T10:00:00），"
-                                "或「尽快」——表示现在就执行（等效设为当前时间，"
-                                "任务卡车下一轮检测即触发；若当前正有其他环节在处理，"
-                                "则在本环节结束后立即执行）。"
+                                "下次处理时间（唤起频率，想催紧就排近）："
+                                "ISO 8601（如 2024-01-20T10:00:00），或「尽快」表示现在执行。"
+                            ),
+                        },
+                        "deadline": {
+                            "type": "string",
+                            "description": (
+                                "最终汇报时间（ISO 8601 硬截止）：到点仍未达标，"
+                                "就必须出「未达标说明 + 已有材料」上报收尾。必填。"
                             ),
                         },
                     },
-                    "required": ["title", "summary", "next_occurrence"],
+                    "required": ["title", "brief", "stage", "next_occurrence", "deadline"],
                 },
             },
         }
@@ -122,10 +135,7 @@ class QuestAgent(LightweightAgent):
             "function": {
                 "name": "update_task_status",
                 "description": (
-                    "修改一个已有任务的状态。\n"
-                    "用于：(1) 用新的完整概况覆盖旧的概况（记录任务当前进展与阶段状态）；"
-                    "(2) 调整下次发生时间；"
-                    "(3) 完结任务——下次发生时间输入「完结」即标记该任务已经完成。\n"
+                    "推进 / 修订 / 完结一个已有任务（由你裁决）。\n"
                 ),
                 "parameters": {
                     "type": "object",
@@ -134,26 +144,54 @@ class QuestAgent(LightweightAgent):
                             "type": "string",
                             "description": "要修改的任务标题，用于定位任务",
                         },
-                        "summary": {
+                        "conclusion": {
                             "type": "string",
                             "description": (
-                                "新的完整概况（重写全文、覆盖旧的）：首行固定为「当前阶段：<一句话>」"
-                                "（体现推进后的最新阶段）+ 分级笔记（每行「- 」开头，缩进表从属层级）。"
-                                "你独占整理权：把其他agent新加的笔记归入合适层级，"
-                                "相关的合并归纳成一段话，删过时内容，防止概况无限膨胀。"
+                                "当前已获取、用于汇报的结论（不超过 100 字）："
+                                "只写结论性材料，不写过程与策略。没有则填空串。"
+                            ),
+                        },
+                        "stage": {
+                            "type": "string",
+                            "description": (
+                                "推进后的当前阶段（一句话，简洁的刚性目标）："
+                                "更新为最新的「还需要做什么」。"
+                            ),
+                        },
+                        "notes": {
+                            "type": "string",
+                            "description": (
+                                "一条简洁的新任务笔记："
+                                "你独占整理权——本次调用会完全清空旧笔记，"
+                                "你必须把现有信息熔成这一条简洁笔记填入，"
+                                "不保留零散旧条目、不堆砌过程细节。"
+                            ),
+                        },
+                        "brief": {
+                            "type": "string",
+                            "description": (
+                                "简要总结（不超过 50 字，前因与目的）。"
+                                "仅当需要修正时传入；留空或省略表示保持不变。"
                             ),
                         },
                         "next_occurrence": {
                             "type": "string",
                             "description": (
-                                "下次发生时间：ISO 8601格式（如 2024-01-20T10:00:00）、"
-                                "「尽快」（现在就执行，等效设为当前时间，任务卡车下一轮"
-                                "检测即触发；若当前正有其他环节在处理，则在本环节结束后"
-                                "立即执行）、或「完结」标记该任务已经完成"
+                                "下次处理时间（唤起频率，想催紧就排近）："
+                                "ISO 8601（如 2024-01-20T10:00:00）、「尽快」（现在执行）、"
+                                "或「完结」（标记任务已完成，不再设下次时间）。"
+                            ),
+                        },
+                        "deadline": {
+                            "type": "string",
+                            "description": (
+                                "最终汇报时间（ISO 8601）。仅当需要调整硬截止时传入；"
+                                "留空或省略表示保持不变。"
                             ),
                         },
                     },
-                    "required": ["task_title", "summary", "next_occurrence"],
+                    "required": ["task_title", "conclusion", "stage", "notes",
+                                 "next_occurrence"],
                 },
             },
         }
@@ -246,8 +284,8 @@ class QuestAgent(LightweightAgent):
 你不负责编纂具体策略，也不需要知道具体做什么，你只需要审批：
 以现在的信息看，系统有没有能力做好下一步——
 是否有足够的资源、收集了足够的信息、时机是否合适。
-判断依据：任务概况里的记录与其他agent交付给你的信息。你不自行查证、不推测不脑补。
-可以 → 批准推进，更新任务概况；不行 → 打回，明确说缺的是信息、材料还是时机。
+判断依据：任务记录里的内容与其他agent交付给你的信息。你不自行查证、不推测不脑补。
+可以 → 批准推进，调用 update_task_status 更新任务记录；不行 → 打回，明确说缺的是信息、材料还是时机。
 
 执行任务存在多种风险，你需要时刻记在心里：
 1 失败的代价不可承受——哪怕是最微小的一句话错误。
@@ -265,28 +303,42 @@ class QuestAgent(LightweightAgent):
 禁止输出建议、方案、策略、计划（如"下次和主人聊天时可以……"、"建议先……"）——
 那些是其他系统的职责，越权的输出比没有输出更糟。
 
-【概况格式：分级笔记】
-任务概况就是一本笔记：
-- 首行固定：「当前阶段：<一句话>」——其他agent读这一行就知道任务进行到哪一步，
-  系统也按这一行生成任务简表。
-- 之后每行一条笔记，以「- 」开头，缩进（两个空格）表示从属层级：
-  一级笔记是大条目（任务目标、重要结论、当前卡点……），
-  二级笔记挂在其下（细节、证据、补充）。
-- 其他agent通过 append_task_log 往末尾添加新笔记（一级条目），
-  这是他们的低权限记录通道，你不用管他们写得整不整齐；
-- 你独占整理权：推进审批重写概况时，把新笔记归入合适的层级，
-  把相关的几条合并归纳成一段话，删掉过时内容——
-  让笔记始终分级清晰、不重复、不膨胀。整理后的呈现比原始堆砌更重要。
+【任务记录字段】
+任务记录由四个独立字段承载，各司其职，不再靠文本约定拼接：
+- brief（简要总结，≤50 字）：这条任务的前因与目的——从哪来、要达成什么；
+- conclusion（已获取的汇报结论，≤100 字）：当前已拿到、可直接用于汇报的结论；
+- stage（当前阶段）：还需要做什么，一句话刚性目标；
+- notes（任务笔记）：其他agent通过 append_task_log 往这里追加新笔记，
+  这是他们的低权限记录通道，你不用管他们写得整不整齐；你独占整理权。
 
-【处理时间选择】
-创建/更新任务时，next_occurrence（下次处理时间）有三种填法：
-- ISO 8601 具体时间（如 2024-01-20T10:00:00）：到点后由任务卡车触发处理；
-- 「尽快」：现在就执行——等效设为当前时间，任务卡车下一轮检测即视为到期触发；
-  若触发时当前正有其他环节在处理（如 PFCA 正在执行别的任务），
-  触发请求会排队，在本环节结束后立即执行；
-- 「完结」（仅更新任务时）：标记任务已完成。
-判定该填哪种：能明确排期的用具体时间；需要立即跟进的用「尽快」；
-不用纠结到分钟，时间语义由系统统一解析。
+【推进即整理】
+一旦你判定该任务可以推进进度，就必须调用 update_task_status，且必须：
+1. 更新 stage 为推进后的最新阶段（还需要做什么）；
+2. 更新 conclusion 为本轮已获取、可用于汇报的结论；
+3. 填入一条简洁的新 notes：本次调用会完全清空旧笔记，你必须把现有信息
+   熔成这一条简洁笔记，不保留零散旧条目、不堆砌过程细节。
+整理后的笼统呈现比原始堆砌更重要。
+
+【两个时间】
+- next_occurrence（下次处理时间）：唤起频率，你每次被咨询时写死——想催紧就排近、
+  想缓就排远；它只决定任务卡车何时再唤醒 PFCA 来推进该任务。
+- deadline（最终汇报时间）：硬截止；创建任务时必填。到点后无论是否达标都要收尾。
+填法：next_occurrence 用 ISO 8601 具体时间，或「尽快」（现在就执行，等效设为当前时间，
+任务卡车下一轮检测即视为到期触发；若触发时当前正有其他环节在处理，触发请求会排队，
+在本环节结束后立即执行）。不用纠结到分钟，时间语义由系统统一解析。
+
+【达标与收尾】
+- 未达标：继续设 next_occurrence（可逐轮收紧逼近 deadline），让 PFCA 继续推进；
+- 已达标：更新记录后，next_occurrence 填「完结」——不再设下次时间，任务自动停止触发；
+- 到最终汇报时间仍未达标：不再设下次时间（next_occurrence 填「完结」），
+  把「未达标说明 + 已有材料」写入 conclusion 作为最终上报，收尾，不再无限触发。
+
+【给 PFCA 的两条信息】
+- 登记回执：你完成登记（create_task）后，在输出结论里附上如下回执（先结论后回执）：
+  「已登记，现处<当前阶段>，未到可汇报地步。你要在<最终汇报时间>前调查到足够信息，
+   交付我登记；我审查后才能推进到下一阶段。」
+- 定时唤醒：由任务卡车在到期时自动发给 PFCA（你不必生成）：任务/当前阶段/
+  距最终汇报时间还剩 X/要求推进并汇报，直到你判定达标。
 
 【记事本手册】
 每次审视时，任务全景后附带【记事本手册】——记事本中全部已落库活动笔记的
@@ -309,16 +361,21 @@ class QuestAgent(LightweightAgent):
     async def _call_llm(self, messages: list, *, level: str = "flash",
                         tool_choice: Optional[str] = None,
                         system_prompt: Optional[str] = None, **kwargs):
-        """统一 LLM 调用：走 call_llm。"""
-        from utils.llm_client_manager import call_llm, extract_reasoning
+        """统一 LLM 调用：走 call_llm。
+
+        Quest 自建循环（不走父类 ``_llm_loop``），故在此单点声明 agent 身份，
+        保证 token 统计归到 QuestAgent 而非外层会话。
+        """
+        from utils.llm_client_manager import call_llm, extract_reasoning, agent_scope
 
         sp = system_prompt if system_prompt is not None else self.get_system_prompt()
         full_messages = [{"role": "system", "content": sp}] + messages
-        return await call_llm(
-            level=level,
-            messages=full_messages,
-            tools=self.get_available_tools(),
-        )
+        with agent_scope(self.agent_name or type(self).__name__):
+            return await call_llm(
+                level=level,
+                messages=full_messages,
+                tools=self.get_available_tools(),
+            )
 
     # ===================== 工具实现 =====================
     # 裁决级（私有，2026-09-17 由 ToolTask 私有化回本类——通用层不应持有裁决级写权限）：
@@ -340,27 +397,38 @@ class QuestAgent(LightweightAgent):
     @staticmethod
     async def _create_task_impl(
         title: str,
-        summary: str,
+        brief: str,
+        stage: str,
         next_occurrence: Optional[str] = None,
+        deadline: Optional[str] = None,
     ) -> Dict[str, Any]:
         """创建一个新任务。
 
-        next_occurrence 支持「尽快」（解析为当前时间，立即到期触发）。
+        brief 为简要总结（前因与目的，≤50 字）；stage 为当前阶段（还需要做什么）。
+        next_occurrence 支持「尽快」（解析为当前时间，立即到期触发）；
+        deadline 为最终汇报时间（硬截止）。
 
         Returns:
-            {"task_id": str, "title": str, "summary": str, "next_occurrence": str}
+            {"task_id": str, "title": str, "brief": str, "stage": str,
+             "next_occurrence": str, "deadline": str}
         """
         from brain.hc.database.task import TaskOperations
 
         next_occurrence = QuestAgent._resolve_next_occurrence(next_occurrence)
+        deadline_val = deadline or ""
 
-        logger.info(f"创建任务: title={title}, next_occurrence={next_occurrence}")
+        logger.info(
+            f"创建任务: title={title}, next_occurrence={next_occurrence}, "
+            f"deadline={deadline_val}"
+        )
 
         task_ops = TaskOperations()
         task_id = await task_ops.create_task(
             title=title,
-            summary=summary,
+            brief=brief,
+            stage=stage,
             next_occurrence=next_occurrence,
+            deadline=deadline_val,
         )
 
         logger.info(f"任务创建成功: task_id={task_id}")
@@ -368,30 +436,44 @@ class QuestAgent(LightweightAgent):
         return {
             "task_id": task_id,
             "title": title,
-            "summary": summary,
+            "brief": brief,
+            "stage": stage,
             "next_occurrence": next_occurrence,
+            "deadline": deadline_val,
         }
 
     @staticmethod
     async def _update_task_status_impl(
         task_title: str,
-        summary: str,
+        conclusion: Optional[str] = None,
+        stage: Optional[str] = None,
+        notes: Optional[str] = None,
         next_occurrence: Optional[str] = None,
+        brief: Optional[str] = None,
+        deadline: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """修改任务状态：覆盖概况 + 更新下次发生时间。
+        """推进 / 修订 / 完结任务：更新结论与阶段、整列覆盖笔记、更新两个时间。
 
-        next_occurrence 含「完结」时标记任务已完成（写 end_time），
-        否则保持进行中并更新下次发生时间；支持「尽快」（解析为当前时间）。
+        quest 的 schema 要求 conclusion / stage / notes 三字段必填，故 quest 推进时
+        三者恒有值——notes 传入即整列覆盖旧笔记（完全清理旧零散条目，只留这一条新笔记）。
+        其他调用方（如 proactive 的推迟唤醒）可省略不传的字段，省略（None）表示保持不变。
+        next_occurrence 含「完结」时标记任务已完成（写 end_time），否则保持进行中
+        并更新下次处理时间；支持「尽快」（解析为当前时间）。
+        brief / deadline 省略（None）表示不变，传入空串表示清空。
 
         Returns:
-            {"task_title": str, "summary": str, "next_occurrence": str,
-             "status": str, "success": bool}
+            {"task_title": str, "conclusion": str, "stage": str, "notes": str,
+             "next_occurrence": str, "deadline": Optional[str], "status": str,
+             "success": bool}
         """
         from brain.hc.database.task import (
             TaskOperations, TASK_STATUS_ACTIVE, TASK_STATUS_COMPLETED,
         )
 
-        logger.info(f"更新任务: task_title={task_title}, next_occurrence={next_occurrence}")
+        logger.info(
+            f"更新任务: task_title={task_title}, next_occurrence={next_occurrence}, "
+            f"deadline={deadline}"
+        )
 
         if next_occurrence and "完结" in next_occurrence:
             status = TASK_STATUS_COMPLETED
@@ -400,13 +482,24 @@ class QuestAgent(LightweightAgent):
             status = TASK_STATUS_ACTIVE
             next_occurrence_val = QuestAgent._resolve_next_occurrence(next_occurrence)
 
+        kwargs: Dict[str, Any] = {
+            "status": status,
+            "next_occurrence": next_occurrence_val,
+        }
+        # 推进即整理：整列覆盖旧笔记（完全清理旧零散条目，只留这一条新笔记）
+        if conclusion is not None:
+            kwargs["conclusion"] = conclusion
+        if stage is not None:
+            kwargs["stage"] = stage
+        if notes is not None:
+            kwargs["notes"] = notes.strip()
+        if brief is not None:
+            kwargs["brief"] = brief
+        if deadline is not None:
+            kwargs["deadline"] = deadline
+
         task_ops = TaskOperations()
-        success = await task_ops.update_task(
-            task_title,
-            summary=summary,
-            status=status,
-            next_occurrence=next_occurrence_val,
-        )
+        success = await task_ops.update_task(task_title, **kwargs)
 
         if success:
             logger.info(f"任务更新成功: {task_title} (status={status})")
@@ -415,8 +508,11 @@ class QuestAgent(LightweightAgent):
 
         return {
             "task_title": task_title,
-            "summary": summary,
+            "conclusion": conclusion,
+            "stage": stage,
+            "notes": notes,
             "next_occurrence": next_occurrence_val,
+            "deadline": deadline,
             "status": status,
             "success": success,
         }
@@ -463,13 +559,11 @@ class QuestAgent(LightweightAgent):
 
         if not self._is_initialized:
             initial_active = await self._fetch_active_tasks_text()
-            initial_recent_completed = await self._fetch_recent_completed_tasks_text()
             initial_manual = await self._fetch_notebook_manual_text()
             initial_user = self._build_user_message(
                 backlog_text,
                 turn_index=0,
                 active_text=initial_active,
-                recent_completed_text=initial_recent_completed,
                 notebook_manual_text=initial_manual,
                 continuation_note=None,
             )
@@ -477,7 +571,7 @@ class QuestAgent(LightweightAgent):
             self._is_initialized = True
         else:
             # 续接 run()：完整全景已在首轮注入过，这里只给紧凑简报
-            # （防大段概况反复注入稀释注意力；细节可经 query_task_status 溯源）
+            # （防大段记录反复注入稀释注意力；细节可经 query_task_status 溯源）
             refreshed_active = await self._fetch_active_tasks_brief()
             refreshed_manual = await self._fetch_notebook_manual_text()
             continuation_note = (
@@ -490,7 +584,6 @@ class QuestAgent(LightweightAgent):
                     backlog_text,
                     turn_index=0,
                     active_text=refreshed_active,
-                    recent_completed_text=None,
                     notebook_manual_text=refreshed_manual,
                     continuation_note=continuation_note,
                     active_is_brief=True,
@@ -582,7 +675,6 @@ class QuestAgent(LightweightAgent):
         backlog_text: str,
         turn_index: int,
         active_text: str,
-        recent_completed_text: Optional[str] = None,
         notebook_manual_text: str = "",
         continuation_note: Optional[str] = None,
         active_is_brief: bool = False,
@@ -590,7 +682,7 @@ class QuestAgent(LightweightAgent):
         """每轮 user 消息：backlog + 当前任务全景 + 记事本手册 + 轮次提示。
 
         注入时机（2026-09-20 起全程仅首条 user 注入）：
-        - 首次 run()：完整全景 + 手册 + 最近完结（turn_index==0）；
+        - 首次 run()：完整全景 + 手册（turn_index==0）；
         - 续接 run()（PFCA 再次请求）：compact 简表 + 刷新后的手册
           （turn_index==0 且 active_is_brief=True）；
         - 多轮循环内不再注入任何 user 消息——后续轮次只靠 tool 结果
@@ -599,6 +691,8 @@ class QuestAgent(LightweightAgent):
         记事本手册（render_manual 章节式裸文本，自带【记事本手册】段头）仅在
         每轮 run() 的首条消息注入一次（turn_index == 0，初始与续接两条路径
         都会重新拉取）——长期底色先于思考，细节经 query_note 工具溯源。
+
+        2026-10-01 改造：移除「最近完结的任务列表」注入（RECENT_COMPLETED_LIMIT）。
 
         防上下文膨胀（2026-09-20）：
         - turn_index > 0 的多轮提示不再重复整段 backlog 原文
@@ -626,17 +720,11 @@ class QuestAgent(LightweightAgent):
         else:
             parts = [head, f"【当前任务全景（进行中）】\n{active_text}"]
 
-        # 记事本手册仅首条注入（长期底色先于最近完结参考与当前时间）
+        # 记事本手册仅首条注入（长期底色先于当前时间）
         # 续接 run()（active_is_brief=True 但 turn_index==0）也注入——
         # 手册体积受 render_manual 限幅（约 300 字），刷新后的手册值得重投
         if turn_index == 0 and notebook_manual_text:
             parts.append(notebook_manual_text)
-
-        if turn_index == 0 and not active_is_brief and recent_completed_text:
-            parts.append(
-                f"【参考：最近完结的任务（最多 {RECENT_COMPLETED_LIMIT} 条）】\n"
-                f"{recent_completed_text}"
-            )
 
         parts.append(f"【当前时间】{current_time}")
 
@@ -670,8 +758,8 @@ class QuestAgent(LightweightAgent):
     async def _fetch_active_tasks_brief(self) -> str:
         """异步拉取当前所有进行中的任务，格式化为每任务一行的紧凑简报。
 
-        供多轮循环后续轮次 / 续接 run() 使用：每行只含「任务标题 + 当前阶段首行 +
-        状态」，避免把每个任务的完整概况全文反复注入上下文稀释 LLM 注意力；
+        供多轮循环后续轮次 / 续接 run() 使用：每行只含「任务标题 + 当前阶段 +
+        状态」，避免把每个任务的完整记录全文反复注入上下文稀释 LLM 注意力；
         需要全文细节时由 query_task_status 按需查询。
 
         拉取失败直接上抛崩溃阻断（硬约定），不吞错。"""
@@ -692,14 +780,11 @@ class QuestAgent(LightweightAgent):
     def _brief_from_task_text(formatted: str) -> str:
         """把 format_task_by_id 的完整文本压缩为单行简报。
 
-        保留：标题、概况首行（当前阶段）、状态、时间；丢弃概况的后续笔记正文。
+        保留：标题、当前阶段、状态、时间；丢弃简要/结论/笔记正文。
         """
         lines = formatted.splitlines()
         title = next((ln.removeprefix("名称：") for ln in lines if ln.startswith("名称：")), "")
-        stage = next(
-            (ln for ln in lines if ln.startswith("当前阶段")),
-            "",
-        )
+        stage = next((ln for ln in lines if ln.startswith("当前阶段：")), "")
         status = next((ln for ln in lines if ln.startswith("状态：")), "")
         time_part = next((ln for ln in lines if ln.startswith("时间：")), "")
         parts = [title]
@@ -710,21 +795,6 @@ class QuestAgent(LightweightAgent):
         if time_part:
             parts.append(time_part)
         return "｜".join(parts)
-
-    async def _fetch_recent_completed_tasks_text(self) -> str:
-        """异步拉取最近完结的任务，格式化为字符串。
-
-        拉取失败直接上抛崩溃阻断（硬约定），不吞错。"""
-        task_ops = TaskOperations()
-        ids = await task_ops.get_recent_completed_tasks(limit=RECENT_COMPLETED_LIMIT)
-        if not ids:
-            return "（暂无已完结的任务）"
-        lines = []
-        for i, tid in enumerate(ids, 1):
-            formatted = await task_ops.format_task_by_id(tid)
-            if not formatted.startswith("未找到"):
-                lines.append(f"{i}. {formatted}")
-        return "\n".join(lines) if lines else "（暂无已完结的任务）"
 
     def _serialize_assistant_message(self, response_message) -> Dict[str, Any]:
         """把 LLM 返回的 assistant 消息序列化成可回灌 messages 的 dict。"""
