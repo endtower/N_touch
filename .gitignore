@@ -165,3 +165,12 @@ docs/
 # AI tooling (specs / plans)
 .trae/
 .zcode/
+
+# WPF 启动器构建产物与 WebView2 浏览数据（运行期可变，不入库）
+launcher/bin/
+launcher/obj/
+launcher/webview/
+
+# 本地构建工具链与运行凭据（第二轮复核：983MB SDK 与令牌误入库）
+.tools/
+manager/service_token.txt
