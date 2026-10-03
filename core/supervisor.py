@@ -24,7 +24,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from paths import app_root, log_root
+from paths import app_root, data_root, log_root
 
 PROJECT_ROOT = app_root()
 LOG_DIR = log_root() / "manager"
@@ -183,20 +183,28 @@ def write_desire(name: str, value: str) -> None:
 # 启停
 # ============================================================
 
-def spawn(spec: ProcSpec, detached: bool = False) -> subprocess.Popen:
+def spawn(spec: ProcSpec, detached: bool = False, clean_env: bool = False) -> subprocess.Popen:
     """拉起进程（输出追加到 spec.out_log），等待健康就绪由调用方决定。
 
-    detached=True: DETACHED_PROCESS——完全脱离当前控制台与生命周期
-    （Core 网页接口拉 SnowLuma / 重生辅助进程时用）。
+    detached=True: DETACHED_PROCESS——完全脱离当前控制台与生命周期。
+    clean_env=True: 从继承环境剔除配置覆盖键（WEB_WS_PORT 等），让子进程
+    从 .env.dev 重新读取最新值——避免常驻服务的旧环境覆盖用户新保存的
+    配置（复核 R4-4）。
     """
     spec.out_log.parent.mkdir(parents=True, exist_ok=True)
     out = open(spec.out_log, "ab")
     flags = CREATE_NEW_PROCESS_GROUP | (DETACHED_PROCESS if detached else 0)
+    env = None
+    if clean_env:
+        from config.env_tools import CONFIG_OVERRIDE_KEYS
+        env = os.environ.copy()
+        for key in CONFIG_OVERRIDE_KEYS:
+            env.pop(key, None)
     try:
         return subprocess.Popen(
             spec.cmd, cwd=spec.cwd,
             stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            creationflags=flags,
+            creationflags=flags, env=env,
         )
     finally:
         out.close()   # 子进程已继承句柄，父进程即可关闭

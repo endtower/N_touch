@@ -36,6 +36,20 @@ from paths import data_root, log_root
 _SERVICE_BASE = "http://127.0.0.1:49990"
 _CORE_LOG_DIR = log_root()
 
+# uvicorn.Server 句柄（main.py 生产模式注入）：内部直达关闭入口使用
+_uvicorn_server: dict = {"server": None}
+
+
+def set_uvicorn_server(server) -> None:
+    _uvicorn_server["server"] = server
+
+
+def _manager_token() -> str:
+    try:
+        return (data_root() / "manager" / "service_token.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
 
 # ============================================================
 # 鉴权与工具
@@ -62,23 +76,20 @@ def _service_token() -> str:
         return ""
 
 
-async def _service_call(method: str, path: str, timeout: float = 45) -> tuple[int | None, dict]:
-    """调用管理服务 /v1 接口。返回 (状态码, 响应体)；服务不可达返回 (None, 提示)。"""
-    req = urllib.request.Request(_SERVICE_BASE + path, method=method,
-                                 headers={"X-Manager-Token": _service_token()})
-    data = None
-    if method in ("POST", "PUT"):
-        data = b"{}"
-        req.add_header("Content-Type", "application/json")
+async def _service_call(method: str, path: str, body: dict | None = None,
+                        timeout: float = 45) -> tuple[int | None, dict]:
+    """异步调用管理服务 /v1 接口（不阻塞事件循环，复核 R1）。"""
     try:
-        with urllib.request.urlopen(req, data=data, timeout=timeout) as resp:
-            return resp.status, json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        try:
-            return e.code, json.loads(e.read().decode("utf-8"))
-        except Exception:
-            return e.code, {"error_code": "http_error", "message": f"HTTP {e.code}"}
-    except (urllib.error.URLError, OSError):
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            async with session.request(_SERVICE_BASE + path, method=method,
+                                       headers={"X-Manager-Token": _service_token()},
+                                       json=body) as resp:
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:
+                    data = {"message": await resp.text()}
+                return resp.status, data
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
         return None, {"error_code": "service_down",
                       "message": "管理服务未运行——进程管理请使用 AbyssLauncher 或 manager.py"}
 
@@ -223,6 +234,25 @@ def read_desire_fallback() -> str:
         return value if value in ("running", "stopped", "restart") else "stopped"
     except OSError:
         return "stopped"
+
+
+# ============================================================
+# 内部直达关闭入口（仅供常驻管理服务调用）
+# ============================================================
+
+async def handle_core_shutdown_internal(request: web.Request) -> web.Response:
+    """让本 uvicorn 退出（完整 lifespan 收尾）。只做自身退出，不回调管理服务。
+
+    鉴权：管理服务令牌（与 /v1 同源凭据）；仅监听 127.0.0.1。
+    """
+    if request.headers.get("X-Manager-Token", "") != _manager_token():
+        return web.json_response({"error_code": "unauthorized"}, status=401)
+    server = _uvicorn_server["server"]
+    if server is None:
+        return web.json_response({"error_code": "not_supported",
+                                  "message": "dev(--reload) 模式无此入口"}, status=400)
+    server.should_exit = True
+    return web.json_response({"shutting_down": True})
 
 
 # ============================================================

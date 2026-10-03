@@ -112,6 +112,8 @@ def main() -> int:
             # 进程停止由管理服务统一协调（core 优雅关闭经 /system/core/shutdown）
             config = uvicorn.Config(app, host=args.host, port=args.port)
             server = uvicorn.Server(config)
+            from adapt.web.system_api import set_uvicorn_server
+            set_uvicorn_server(server)   # 内部直达关闭入口需要 Server 句柄
             server.run()
             # uvicorn 0.30.x：lifespan 启动失败时 run() 正常返回且 started=False，
             # 必须显式转换非零退出码，监督者不能只看进程是否存活

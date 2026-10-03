@@ -55,11 +55,13 @@ def install_mocks(spawn_log: list):
     """注入模拟 spawn / 端口探测 / 健康。端口开关由 port_open 控制。"""
     state = {"port_open": False, "next_pid": 100}
 
-    def fake_spawn(spec, detached=False):
+    def fake_spawn(spec, detached=False, clean_env=False):
         spawn_log.append(time.time())
         state["port_open"] = True
         state["next_pid"] += 1
-        return FakeProc(state["next_pid"])
+        proc = FakeProc(state["next_pid"])
+        state.setdefault("procs", []).append(proc)
+        return proc
 
     def fake_port_alive(port, timeout=0.4):
         return state["port_open"]
@@ -67,6 +69,14 @@ def install_mocks(spawn_log: list):
     def fake_health(url):
         return False
 
+    def fake_stop_tree(spec, pid):
+        # 模拟强制终止：受管模拟进程死亡 + 端口关闭
+        state["port_open"] = False
+        for p in state.get("procs", []):
+            p.die(0)
+        return True, pid
+
+    manager_core.stop_tree = fake_stop_tree
     manager_core.spawn = fake_spawn
     manager_core._port_alive = fake_port_alive
     manager_core._health_ok = fake_health
@@ -87,8 +97,10 @@ def main() -> int:
     spawn_log: list = []
     state = install_mocks(spawn_log)
     mgr = SupervisorService()
+    mgr.desire_dir = tmp / "desire"    # 隔离期望标记（不写真实数据目录）
     ctl = mgr.controller("core")
     ctl.spec = make_spec(tmp)          # 换成测试规格（端口/日志隔离）
+    ctl._refresh_spec = lambda: None   # 冻结测试规格（禁用配置重读）
     ctl.backoff = 3.0                  # 缩短退避，测试用（窗口 3s 内可取消）
     failures = []
 
@@ -131,10 +143,11 @@ def main() -> int:
 
     # ---------- 4) 崩溃循环保护 ----------
     spawn_before = len(spawn_log)
-    state["port_open"] = False
     r = ctl.submit("start")                      # spawn 后立即死（<10s）
-    ctl.proc.die(3)
-    time.sleep(3)                                # 超过扫描间隔×3
+    if not r.get("ok"):
+        failures.append(f"V04 前置启动失败: {r}")
+    ctl.proc.die(3)                              # 启动即死 → 崩溃循环保护
+    time.sleep(6)                                # 覆盖扫描间隔与恢复到期
     if len(spawn_log) != spawn_before + 1:
         failures.append("V04 崩溃循环保护失效（spawn 次数异常）")
     if ctl.state != "failed":

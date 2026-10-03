@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import secrets
 import sys
 import time
@@ -111,7 +112,9 @@ async def handle_target_cmd(request: web.Request) -> web.Response:
     if ctrl is None:
         return web.json_response({"error_code": "bad_target", "message": err}, status=404)
     kind = request.match_info["action"]
-    result = ctrl.submit(kind)
+    # 控制器内部是线程同步等待（健康等待最长 30s+），转线程执行，
+    # 保证服务事件循环在启停期间仍可响应状态/日志/停止请求（复核 R1）
+    result = await asyncio.to_thread(ctrl.submit, kind)
     status = 200 if result.get("ok") else (409 if result.get("error_code") == "conflict" else 200)
     return web.json_response(result, status=status)
 
@@ -242,7 +245,7 @@ async def handle_config_put(request: web.Request) -> web.Response:
 async def handle_shutdown(request: web.Request) -> web.Response:
     if not _authorized(request):
         return _denied()
-    msgs = _service.stop_everything()
+    msgs = await _service.stop_everything_async()
     # 受管目标已按优雅流程停止；服务自身无持久状态，延迟自退（给响应留出送达时间）
     asyncio.get_event_loop().call_later(1.0, lambda: os._exit(0))
     return web.json_response({"ok": True, "shutting_down": True, "stopped": msgs})

@@ -16,17 +16,40 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from paths import app_root
+from paths import app_root, data_root
 
 _ENV_LOADED = False
 
 
+# 配置覆盖键：常驻服务 spawn 子进程时会从继承环境剔除这些键，
+# 让子进程的 load_dotenv 从 .env.dev 读到最新值（避免旧环境遮蔽新配置）
+CONFIG_OVERRIDE_KEYS = (
+    "WEB_ENABLED", "WEB_WS_HOST", "WEB_WS_PORT", "WEB_WS_PATH", "WEB_ACCESS_TOKEN",
+    "ONEBOT_ENABLED", "ONEBOT_WS_HOST", "ONEBOT_WS_PORT", "ONEBOT_WS_PATH",
+    "ONEBOT_ACCESS_TOKEN",
+    "MAIN_HOST", "MAIN_PORT",
+    "OPENCODE_API_KEY", "OPENCODE_BASE_URL", "FLASH_API_KEY", "FLASH_BASE_URL",
+    "CONVERSATION_API_KEY", "CONVERSATION_BASE_URL",
+    "PERSONA_API_KEY", "PERSONA_BASE_URL",
+    "LLM_FLASH", "LLM_CONVERSATION", "LLM_PERSONA", "LLM_PRO", "LLM_VISION",
+    "LLM_EMBEDDING",
+)
+
+
+def _env_candidates() -> list[Path]:
+    """配置文件查找顺序：数据根优先（服务写入位置），程序根兜底（旧布局）。"""
+    return [data_root() / ".env.dev", app_root() / ".env.dev"]
+
+
 def ensure_env_loaded() -> None:
-    """加载项目根 .env.dev（幂等；已存在的进程环境变量不会被文件覆盖）。"""
+    """加载 .env.dev（幂等；已存在的进程环境变量不会被文件覆盖）。"""
     global _ENV_LOADED
     if _ENV_LOADED:
         return
-    load_dotenv(app_root() / ".env.dev")
+    for candidate in _env_candidates():
+        if candidate.is_file():
+            load_dotenv(candidate)
+            break
     _ENV_LOADED = True
 
 
