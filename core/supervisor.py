@@ -33,6 +33,7 @@ SNOWLUMA_DIR = PROJECT_ROOT / "SnowLuma"
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 DETACHED_PROCESS = 0x00000008
+CREATE_NO_WINDOW = 0x08000000
 
 HEALTH_TIMEOUT_SEC = 30
 
@@ -194,7 +195,9 @@ def spawn(spec: ProcSpec, detached: bool = False, clean_env: bool = False) -> su
     """
     spec.out_log.parent.mkdir(parents=True, exist_ok=True)
     out = open(spec.out_log, "ab")
-    flags = CREATE_NEW_PROCESS_GROUP | (DETACHED_PROCESS if detached else 0)
+    # CREATE_NO_WINDOW：管理服务自身无控制台时，Windows 会给控制台子进程
+    # 新开可见终端——加此标志让 Core/SnowLuma 静默后台运行（日志已在文件里）
+    flags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | (DETACHED_PROCESS if detached else 0)
     env = None
     if clean_env:
         from config.env_tools import CONFIG_OVERRIDE_KEYS
