@@ -109,12 +109,9 @@ def main() -> int:
             )
         else:
             # 生产模式：直接传 app 对象，无文件监视、无子进程。
-            # 持有 Server 实例供 /system/core/shutdown|restart 优雅关闭
+            # 进程停止由管理服务统一协调（core 优雅关闭经 /system/core/shutdown）
             config = uvicorn.Config(app, host=args.host, port=args.port)
             server = uvicorn.Server(config)
-            app.state.uvicorn_server = server
-            from adapt.web.system_api import set_uvicorn_server
-            set_uvicorn_server(server)   # 注入给 aiohttp 侧的系统管理接口
             server.run()
             # uvicorn 0.30.x：lifespan 启动失败时 run() 正常返回且 started=False，
             # 必须显式转换非零退出码，监督者不能只看进程是否存活

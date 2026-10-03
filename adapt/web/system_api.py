@@ -1,58 +1,40 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-adapt.web.system_api —— 系统管理接口（管家增量②）
+"""adapt.web.system_api —— 系统管理接口（Core 侧代理）
 
-给前端「系统面板」用的进程管理与日志接口：
-    GET  /system/status            Core 自身状态 + SnowLuma 状态
-    POST /system/snowluma/start    拉起 SnowLuma（DETACHED，脱离 Core 生命周期）
-    POST /system/snowluma/stop     按树硬停 SnowLuma
-    POST /system/core/shutdown     Core 优雅关闭（uvicorn should_exit，走完整 lifespan 收尾）
-    POST /system/core/restart      起一个脱离的 respawn 工人等端口释放后拉起新 Core，然后优雅关闭自己
-    GET  /system/logs?name=&lines= 日志文件尾部（name ∈ core | core_out | snowluma）
-    GET  /system/ws/logs?name=     WebSocket 实时日志流（snapshot + append 帧）
+职责边界（任务书 §3/§4）：本模块不做进程控制，所有启停/重启/关闭命令
+转交给常驻管理服务（127.0.0.1:49990, manager.exe）。Core 未运行时管理
+能力由管理服务与 WPF 启动器承担；本接口只在 Core 在线时为网页面板服务。
 
-权限：WebConfig.ACCESS_TOKEN 非空时，所有 /system/* 要求
-?access_token= 或 Authorization: Bearer（与 /web/ws 一致）。默认 None 不鉴权。
+    GET  /system/status               Core 自身信息 + 服务端目标快照（代理）
+    POST /system/snowluma/start|stop  → 服务 /v1/targets/snowluma/...
+    POST /system/core/shutdown        → 服务 /v1/targets/core/stop（优雅优先）
+    POST /system/core/restart         → 服务 /v1/targets/core/restart
+    GET  /system/logs?name=&lines=    日志尾部（core/core_out/snowluma/service）
+    GET/PUT /system/config            Core 部署配置白名单字段（代理到服务）
 
-边界：Core 冷启动（进程都没了）无法由网页完成——用 manager.py 或托盘。
+鉴权：WebConfig.ACCESS_TOKEN 非空时要求 ?access_token= 或 Bearer（与 /web/ws 一致）。
+向管理服务的代理调用使用本地服务令牌（data_root/manager/service_token.txt）。
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
+import urllib.error
+import urllib.request
 from datetime import date
 from pathlib import Path
 
 from aiohttp import web
 
-from config.adapt_settings import get_web_config
-from paths import log_root
-from core.supervisor import (
-    LOG_DIR,
-    PROJECT_ROOT,
-    build_specs,
-    pid_listening_on,
-    read_desire,
-    spawn,
-    spec_alive,
-    stop_tree,
-    wait_ports_free,
-    write_desire,
-    snowluma_webui_port,
-)
+from config.adapt_settings import get_onebot_config, get_web_config
+from paths import data_root, log_root
 
-_specs = build_specs()
+_SERVICE_BASE = "http://127.0.0.1:49990"
 _CORE_LOG_DIR = log_root()
-
-# uvicorn.Server 句柄：main.py（生产模式）启动时注入，供优雅关闭/自重启。
-# dev(--reload) 模式不注入 → 相关接口返回 400。
-_uvicorn_server: dict = {"server": None}
-
-
-def set_uvicorn_server(server) -> None:
-    _uvicorn_server["server"] = server
 
 
 # ============================================================
@@ -73,13 +55,55 @@ def _denied() -> web.Response:
     return web.json_response({"error": "unauthorized"}, status=401)
 
 
+def _service_token() -> str:
+    try:
+        return (data_root() / "manager" / "service_token.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+async def _service_call(method: str, path: str, timeout: float = 45) -> tuple[int | None, dict]:
+    """调用管理服务 /v1 接口。返回 (状态码, 响应体)；服务不可达返回 (None, 提示)。"""
+    req = urllib.request.Request(_SERVICE_BASE + path, method=method,
+                                 headers={"X-Manager-Token": _service_token()})
+    data = None
+    if method in ("POST", "PUT"):
+        data = b"{}"
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, data=data, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode("utf-8"))
+        except Exception:
+            return e.code, {"error_code": "http_error", "message": f"HTTP {e.code}"}
+    except (urllib.error.URLError, OSError):
+        return None, {"error_code": "service_down",
+                      "message": "管理服务未运行——进程管理请使用 AbyssLauncher 或 manager.py"}
+
+
+async def _proxy(result: tuple[int | None, dict]) -> web.Response:
+    status, body = result
+    if status is None:
+        return web.json_response(body, status=503)
+    return web.json_response(body, status=status if status != 200 else 200)
+
+
+# ============================================================
+# 日志
+# ============================================================
+
 def _resolve_log_path(name: str) -> Path | None:
+    today = date.today().isoformat()
     if name == "core":
-        return _CORE_LOG_DIR / f"app_{date.today().isoformat()}.log"
+        return _CORE_LOG_DIR / f"app_{today}.log"
     if name == "core_out":
-        return LOG_DIR / "core.out.log"
+        return _CORE_LOG_DIR / "manager" / "core.out.log"
     if name == "snowluma":
-        return LOG_DIR / "snowluma.out.log"
+        return _CORE_LOG_DIR / "manager" / "snowluma.out.log"
+    if name == "service":
+        return _CORE_LOG_DIR / "manager" / "service.out.log"
     return None
 
 
@@ -91,119 +115,8 @@ def _tail_lines(path: Path, n: int, max_bytes: int = 256_000) -> list[str]:
         size = f.tell()
         f.seek(max(0, size - max_bytes))
         data = f.read()
-    lines = data.decode("utf-8", errors="replace").splitlines()
-    return lines[-n:]
+    return data.decode("utf-8", errors="replace").splitlines()[-n:]
 
-
-def _json_error(msg: str, status: int = 400) -> web.Response:
-    return web.json_response({"error": msg}, status=status)
-
-
-# ============================================================
-# 状态
-# ============================================================
-
-async def handle_system_status(request: web.Request) -> web.Response:
-    if not _authorized(request):
-        return _denied()
-    web_port, onebot_port = _specs["core"].ports
-    started_at = request.app.get("started_at")
-    server = _uvicorn_server["server"]
-    s_spec = _specs["snowluma"]
-    s_alive = spec_alive(s_spec)
-    return web.json_response({
-        "core": {
-            "running": True,
-            "pid": os.getpid(),
-            "uptime_sec": round(time.time() - started_at, 1) if started_at else None,
-            "web_port": web_port,
-            "onebot_port": onebot_port,
-            "mode": "prod" if server is not None else "dev",
-            "graceful_shutdown": server is not None,
-            "desired": read_desire("core"),
-        },
-        "snowluma": {
-            "running": s_alive,
-            "pid": pid_listening_on(s_spec.ports[0]) if s_alive else None,
-            "ports": s_spec.ports,
-            "webui_url": f"http://127.0.0.1:{snowluma_webui_port()}",
-        },
-        "hint": "Core 冷启动（进程已死）请用 manager.py 或托盘，网页拉不起已死的宿主",
-    })
-
-
-# ============================================================
-# SnowLuma 管理
-# ============================================================
-
-async def handle_snowluma_start(request: web.Request) -> web.Response:
-    if not _authorized(request):
-        return _denied()
-    spec = _specs["snowluma"]
-    if spec_alive(spec):
-        pid = pid_listening_on(spec.ports[0])
-        return web.json_response({"started": False, "reason": "已在运行", "pid": pid})
-    proc = spawn(spec, detached=True)
-    deadline = time.time() + 20
-    while time.time() < deadline and not spec_alive(spec):
-        await asyncio.sleep(0.4)
-    ok = spec_alive(spec)
-    return web.json_response({
-        "started": ok,
-        "pid": proc.pid,
-        "webui_url": f"http://127.0.0.1:{snowluma_webui_port()}",
-        "note": "" if ok else "进程已拉起但端口未就绪（可能正在登录 QQ），稍后刷新状态",
-    })
-
-
-async def handle_snowluma_stop(request: web.Request) -> web.Response:
-    if not _authorized(request):
-        return _denied()
-    spec = _specs["snowluma"]
-    if not spec_alive(spec):
-        return web.json_response({"stopped": False, "reason": "未在运行"})
-    freed, pid = stop_tree(spec, None)
-    return web.json_response({"stopped": freed, "pid": pid})
-
-
-# ============================================================
-# Core 优雅关闭 / 自重启
-# ============================================================
-
-async def handle_core_shutdown(request: web.Request) -> web.Response:
-    if not _authorized(request):
-        return _denied()
-    server = _uvicorn_server["server"]
-    if server is None:
-        return _json_error("dev(--reload) 模式不支持远程关闭，请在终端 Ctrl+C", 400)
-    # 期望状态标记：常驻管家读到 "stopped" 后不会把这次关闭当崩溃拉起。
-    # 没有管家在跑时该标记只是无害的落盘记录。
-    write_desire("core", "stopped")
-    server.should_exit = True
-    return web.json_response({"shutting_down": True,
-                              "note": "uvicorn 将走完整 lifespan 收尾（SystemCore 优雅退出）；"
-                                      "重新启动请用 manager.exe / 托盘"})
-
-
-async def handle_core_restart(request: web.Request) -> web.Response:
-    if not _authorized(request):
-        return _denied()
-    server = _uvicorn_server["server"]
-    if server is None:
-        return _json_error("dev(--reload) 模式不支持远程重启，请在终端 Ctrl+C 后重启", 400)
-    if not spec_alive(_specs["core"]):
-        return _json_error("Core 未在运行", 409)
-    # 期望状态标记（GPT 审查-2）：常驻管家的看门狗读到 "restart" 会在本进程
-    # 优雅退出后立即拉起新实例。Core 不再自己 spawn 第二个管理进程。
-    write_desire("core", "restart")
-    server.should_exit = True
-    return web.json_response({"restarting": True,
-                              "note": "Core 正在优雅关闭，管家将自动拉起新实例（约 5~15s）"})
-
-
-# ============================================================
-# 日志：REST 尾部 + WS 实时流
-# ============================================================
 
 async def handle_system_logs(request: web.Request) -> web.Response:
     if not _authorized(request):
@@ -212,12 +125,11 @@ async def handle_system_logs(request: web.Request) -> web.Response:
     try:
         n = max(1, min(int(request.query.get("lines", "200")), 2000))
     except ValueError:
-        return _json_error("lines 不是整数")
+        n = 200
     path = _resolve_log_path(name)
     if path is None:
-        return _json_error(f"未知日志名 {name}（可选 core | core_out | snowluma）")
-    return web.json_response({"name": name, "file": str(path),
-                              "lines": _tail_lines(path, n)})
+        return web.json_response({"error": f"未知日志名 {name}"}, status=404)
+    return web.json_response({"name": name, "file": str(path), "lines": _tail_lines(path, n)})
 
 
 async def handle_logs_ws(request: web.Request) -> web.WebSocketResponse:
@@ -243,7 +155,7 @@ async def handle_logs_ws(request: web.Request) -> web.WebSocketResponse:
     try:
         while True:
             await asyncio.sleep(0.5)
-            path = _resolve_log_path(name)   # core 日志按天换文件名
+            path = _resolve_log_path(name)   # core 主日志按天换文件名
             if path is None or not path.exists():
                 continue
             size = path.stat().st_size
@@ -254,8 +166,108 @@ async def handle_logs_ws(request: web.Request) -> web.WebSocketResponse:
                 pos = size
                 await ws.send_json({"type": "append",
                                     "text": chunk.decode("utf-8", errors="replace")})
-            elif size < pos:   # 轮转/清空
+            elif size < pos:
                 pos = 0
     except (ConnectionResetError, asyncio.CancelledError, RuntimeError):
         pass
     return ws
+
+
+# ============================================================
+# 状态（Core 本地 + 管理服务快照代理）
+# ============================================================
+
+async def handle_system_status(request: web.Request) -> web.Response:
+    if not _authorized(request):
+        return _denied()
+    started_at = request.app.get("started_at")
+    server = request.app.get("uvicorn_server")
+    svc_status, svc_body = await _service_call("GET", "/v1/targets", timeout=3)
+    snowluma = {"running": None, "pid": None,
+                "note": "管理服务未运行，状态未知"}
+    core_from_service = {}
+    if svc_status == 200:
+        for t in svc_body.get("targets", []):
+            if t["name"] == "snowluma":
+                snowluma = {"running": t["state"] in ("running", "starting"),
+                            "pid": t["pid"], "state": t["state"],
+                            "ports": t["ports"],
+                            "webui_url": "http://127.0.0.1:5099"}
+            if t["name"] == "core":
+                core_from_service = {"state": t["state"], "desired": t["desired"],
+                                     "managed": t["managed"], "restarts": t["restarts"],
+                                     "last_error": t["last_error"]}
+    return web.json_response({
+        "core": {
+            "running": True,
+            "pid": os.getpid(),
+            "uptime_sec": round(time.time() - started_at, 1) if started_at else None,
+            "web_port": get_web_config().WS_PORT,
+            "onebot_port": get_onebot_config().WS_PORT,
+            "mode": "prod" if server is not None else "dev",
+            "desired": core_from_service.get("desired", read_desire_fallback()),
+            "state": core_from_service.get("state", "running"),
+            "last_error": core_from_service.get("last_error", ""),
+        },
+        "snowluma": snowluma,
+        "service": {"reachable": svc_status == 200,
+                    "config_errors": svc_body.get("config_errors", []) if svc_status == 200 else []},
+        "hint": "Core 冷启动（进程已死）请用 AbyssLauncher / manager.py",
+    })
+
+
+def read_desire_fallback() -> str:
+    try:
+        marker = data_root() / "logs" / "manager" / "desire" / "core.txt"
+        value = marker.read_text(encoding="utf-8").strip()
+        return value if value in ("running", "stopped", "restart") else "stopped"
+    except OSError:
+        return "stopped"
+
+
+# ============================================================
+# 控制命令（全部转交管理服务）
+# ============================================================
+
+async def handle_snowluma_start(request: web.Request) -> web.Response:
+    if not _authorized(request):
+        return _denied()
+    return await _proxy(await _service_call("POST", "/v1/targets/snowluma/start"))
+
+
+async def handle_snowluma_stop(request: web.Request) -> web.Response:
+    if not _authorized(request):
+        return _denied()
+    return await _proxy(await _service_call("POST", "/v1/targets/snowluma/stop"))
+
+
+async def handle_core_shutdown(request: web.Request) -> web.Response:
+    if not _authorized(request):
+        return _denied()
+    return await _proxy(await _service_call("POST", "/v1/targets/core/stop"))
+
+
+async def handle_core_restart(request: web.Request) -> web.Response:
+    if not _authorized(request):
+        return _denied()
+    return await _proxy(await _service_call("POST", "/v1/targets/core/restart"))
+
+
+# ============================================================
+# 配置代理（白名单字段；校验在管理服务侧）
+# ============================================================
+
+async def handle_config_get(request: web.Request) -> web.Response:
+    if not _authorized(request):
+        return _denied()
+    return await _proxy(await _service_call("GET", "/v1/config/core"))
+
+
+async def handle_config_put(request: web.Request) -> web.Response:
+    if not _authorized(request):
+        return _denied()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+    return await _proxy(await _service_call("PUT", "/v1/config/core", body))

@@ -398,6 +398,8 @@ class WebChannel:
             handle_core_restart,
             handle_system_logs,
             handle_logs_ws,
+            handle_config_get,
+            handle_config_put,
         )
         self._app.router.add_get("/system/status", handle_system_status)
         self._app.router.add_post("/system/snowluma/start", handle_snowluma_start)
@@ -406,6 +408,8 @@ class WebChannel:
         self._app.router.add_post("/system/core/restart", handle_core_restart)
         self._app.router.add_get("/system/logs", handle_system_logs)
         self._app.router.add_get("/system/ws/logs", handle_logs_ws)
+        self._app.router.add_get("/system/config", handle_config_get)
+        self._app.router.add_put("/system/config", handle_config_put)
 
         # 记忆社交实体: 以 00000000 为中心的星形图 (只读)
         self._app.router.add_get("/memory/social", handle_get_social_memory)
