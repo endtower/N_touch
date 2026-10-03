@@ -36,9 +36,11 @@ sys.path.insert(0, str(app_root()))
 from aiohttp import web                                     # noqa: E402
 from manager_core import SupervisorService, log_root        # noqa: E402
 
-SERVICE_VERSION = "0.3.0-validation"
+SERVICE_VERSION = "0.3.1-validation"
 API_PORT = 49990
 _TOKEN_FILE = data_root() / "manager" / "service_token.txt"
+# 启动器 UI（首屏页面）：冻结 = 打包资源；源码 = 仓库根 manager_ui/
+_UI_DIR = (Path(sys._MEIPASS) if getattr(sys, "frozen", False) else app_root()) / "manager_ui"
 
 _service: SupervisorService | None = None
 _started_at = time.time()
@@ -65,7 +67,11 @@ TOKEN = _load_or_create_token()
 
 
 def _authorized(request: web.Request) -> bool:
-    return request.headers.get("X-Manager-Token", "") == TOKEN
+    # 网页客户端（首屏页面同源）走 HttpOnly+SameSite=Strict Cookie；
+    # WPF/CLI 等本地客户端走 X-Manager-Token 头。
+    if request.headers.get("X-Manager-Token", "") == TOKEN:
+        return True
+    return request.cookies.get("manager_token", "") == TOKEN
 
 
 def _denied() -> web.Response:
@@ -249,11 +255,40 @@ async def handle_shutdown(request: web.Request) -> web.Response:
 
 
 # ============================================================
+# 启动器 UI（首屏页面，同源 Cookie 鉴权；不做任意文件服务）
+# ============================================================
+
+def _serve_ui(name: str) -> web.Response:
+    if "/" in name or "\\" in name or ".." in name:
+        return web.Response(status=404, text="not found")
+    path = _UI_DIR / name
+    if not path.is_file():
+        return web.Response(status=404, text=f"missing {name}")
+    ctype = {"html": "text/html", "css": "text/css", "js": "application/javascript"}.get(
+        name.rsplit(".", 1)[-1], "application/octet-stream")
+    return web.Response(body=path.read_bytes(), content_type=ctype, charset="utf-8")
+
+
+async def handle_index(request: web.Request) -> web.Response:
+    resp = _serve_ui("index.html")
+    if resp.status == 200:
+        # HttpOnly + SameSite=Strict：仅本服务同源可携带，第三方本地页面无法借用
+        resp.set_cookie("manager_token", TOKEN, httponly=True, samesite="Strict")
+    return resp
+
+
+async def handle_ui_file(request: web.Request) -> web.Response:
+    return _serve_ui(request.match_info.get("name", ""))
+
+
+# ============================================================
 # 入口
 # ============================================================
 
 def build_app() -> web.Application:
     app = web.Application()
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/ui/{name}", handle_ui_file)
     app.router.add_get("/v1/info", handle_info)
     app.router.add_get("/v1/targets", handle_targets)
     app.router.add_post("/v1/targets/{target}/{action}", handle_target_cmd)

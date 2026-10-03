@@ -26,7 +26,9 @@
             <TextBlock Text="Abyss 管家" FontSize="18" FontWeight="Bold" Foreground="#A5B4FC"
                        Margin="16,18,0,10"/>
             <Button x:Name="NavOverview" Style="{StaticResource NavBtn}" Foreground="White"
-                    Content="总览与控制" Click="Nav_Click" Tag="overview"/>
+                    Content="启动器主页" Click="Nav_Click" Tag="overview"/>
+            <Button x:Name="NavCards" Style="{StaticResource NavBtn}" Foreground="#CBD5E1"
+                    Content="快速控制（原生）" Click="Nav_Click" Tag="cards"/>
             <Button x:Name="NavCoreWeb" Style="{StaticResource NavBtn}" Foreground="#CBD5E1"
                     Content="主程序配置 (网页)" Click="Nav_Click" Tag="coreweb"/>
             <Button x:Name="NavSnowluma" Style="{StaticResource NavBtn}" Foreground="#CBD5E1"

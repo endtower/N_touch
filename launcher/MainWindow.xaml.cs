@@ -12,7 +12,7 @@ public partial class MainWindow : Window
     private readonly ManagerClient _client = new();
     private DispatcherTimer? _poll;
     private bool _exiting;
-    private string _webSource = "";      // "" | "core" | "snowluma"
+    private string _webSource = "";      // "" | "launcher" | "core" | "snowluma"
     private bool _coreWebNavigated;
     private bool _snowlumaNavigated;
     private int _serviceEnsuring;
@@ -124,12 +124,13 @@ public partial class MainWindow : Window
     private void Nav_Click(object sender, RoutedEventArgs e)
     {
         var tag = ((Button)sender).Tag.ToString();
-        OverviewPanel.Visibility = tag == "overview" ? Visibility.Visible : Visibility.Collapsed;
-        WebPanel.Visibility = (tag == "coreweb" || tag == "snowluma") ? Visibility.Visible : Visibility.Collapsed;
+        OverviewPanel.Visibility = tag == "cards" ? Visibility.Visible : Visibility.Collapsed;
+        WebPanel.Visibility = (tag == "overview" || tag == "coreweb" || tag == "snowluma") ? Visibility.Visible : Visibility.Collapsed;
         LogsPanel.Visibility = tag == "logs" ? Visibility.Visible : Visibility.Collapsed;
         UpdatePanel.Visibility = tag == "update" ? Visibility.Visible : Visibility.Collapsed;
         foreach (var b in new[] { NavOverview, NavCoreWeb, NavSnowluma, NavLogs, NavUpdate })
             b.Foreground = b.Tag.ToString() == tag ? System.Windows.Media.Brushes.White : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(0xCB, 0xCB, 0xD5, 0xE1));
+        if (tag == "overview") ShowWeb("launcher");
         if (tag == "coreweb") ShowWeb("core");
         if (tag == "snowluma") ShowWeb("snowluma");
         if (tag == "logs") _ = RefreshLogs();
@@ -165,15 +166,19 @@ public partial class MainWindow : Window
     private void ShowWeb(string source)
     {
         _webSource = source;
-        int port = source == "core" ? 5002 : 5099;
-        var url = $"http://127.0.0.1:{port}/";
+        string url = source switch
+        {
+            "core" => "http://127.0.0.1:5002/",
+            "snowluma" => "http://127.0.0.1:5099/",
+            _ => "http://127.0.0.1:49990/",   // 启动器主页（管理服务伺服）
+        };
         if (Web.CoreWebView2 is null) return;
-        if (source == "core" && !_coreWebNavigated) { Web.CoreWebView2.Navigate(url); _coreWebNavigated = true; }
-        else if (source == "snowluma" && !_snowlumaNavigated) { Web.CoreWebView2.Navigate(url); _snowlumaNavigated = true; }
-        else Web.CoreWebView2.Navigate(url);
+        Web.CoreWebView2.Navigate(url);
         WebOverlayHint.Visibility = source == "core" && CoreStateText.Text.StartsWith("stopped")
             ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    private void Cards_Click(object sender, RoutedEventArgs e) => Nav_Click(NavCards, e);
 
     private void WebTabCore_Click(object sender, RoutedEventArgs e) => ShowWeb("core");
     private void WebTabSnowluma_Click(object sender, RoutedEventArgs e) => ShowWeb("snowluma");
