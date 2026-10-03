@@ -214,6 +214,35 @@ def spawn(spec: ProcSpec, detached: bool = False, clean_env: bool = False) -> su
         out.close()   # 子进程已继承句柄，父进程即可关闭
 
 
+def kill_by_cmdline(match_substr: str, exclude_pid: int | None = None) -> list[int]:
+    """按命令行包含 match_substr 精确清扫进程（处理挣脱进程树的分离子进程）。
+
+    只匹配目标安装目录子串（如 SnowLuma 目录），不会误伤同名其他程序
+    （node.exe 等可能是任何人的进程）。exclude_pid 用于排除已处理对象。
+    """
+    killed: list[int] = []
+    ps = (
+        "Get-CimInstance Win32_Process | ForEach-Object { "
+        "if ($_.CommandLine -and $_.CommandLine.Contains('%s') "
+        "-and $_.ProcessId -ne %d) { $_.ProcessId } }"
+    ) % (match_substr.replace("\\", "\\"), exclude_pid or 0)
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, timeout=15,
+        ).stdout.decode("utf-8", errors="replace")
+        for line in out.splitlines():
+            line = line.strip()
+            if line.isdigit() and int(line) != (exclude_pid or 0):
+                r = subprocess.run(["taskkill", "/PID", line, "/T", "/F"],
+                                   capture_output=True, timeout=15)
+                if r.returncode == 0:
+                    killed.append(int(line))
+    except Exception:
+        pass
+    return killed
+
+
 def stop_tree(spec: ProcSpec, pid: int | None) -> tuple[bool, int | None]:
     """taskkill /T /F 硬停止进程树，并等待端口释放。
 

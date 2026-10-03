@@ -35,6 +35,7 @@ from core.supervisor import (
     ProcSpec,
     build_specs,
     core_cmd,
+    kill_by_cmdline,
     spawn,
     stop_tree,
 )
@@ -336,6 +337,14 @@ class TargetController:
         self.managed = False
         self.ready = False
         self.state = "stopped"
+        # 延迟清扫挣脱进程树的分离子进程（如 SnowLuma 内部看门狗：
+        # taskkill /T 抓不到 breakaway 子进程，它会在数秒后重启组件并弹终端）
+        match = str(self.spec.cwd)
+        for delay in (2.0, 4.0):
+            time.sleep(delay)
+            killed = kill_by_cmdline(match, exclude_pid=os.getpid())
+            if killed:
+                print(f"[ctl:{self.spec.name}] 清扫分离子进程: {killed}", flush=True)
         note = "" if not any(_port_alive(p) for p in self.spec.ports) \
             else "目标已退出，但端口仍被外部程序占用"
         return {"ok": True, "state": "stopped", "exited": exited,
