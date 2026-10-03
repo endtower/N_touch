@@ -6,7 +6,6 @@ namespace AbyssLauncher;
 /// <summary>应用入口：单实例互斥 + WinForms 托盘（WPF 是唯一窗口/托盘所有者）。</summary>
 public partial class App : Application
 {
-    private static Mutex? _single;
     private static System.Windows.Forms.NotifyIcon? _tray;
     private static MainWindow? _main;
 

@@ -10,7 +10,7 @@
     <AssemblyName>AbyssLauncher</AssemblyName>
     <RootNamespace>AbyssLauncher</RootNamespace>
     <AssemblyTitle>Abyss 桌面启动管理器</AssemblyTitle>
-    <Version>0.3.0</Version>
+    <Version>0.3.3</Version>
     <!-- 验证版锁定构建配置 -->
     <InvariantGlobalization>false</InvariantGlobalization>
   </PropertyGroup>

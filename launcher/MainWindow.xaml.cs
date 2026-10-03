@@ -11,10 +11,13 @@ public partial class MainWindow : Window
 {
     private readonly ManagerClient _client = new();
     private DispatcherTimer? _poll;
-    private bool _exiting;
     private string _webSource = "";      // "" | "core" | "snowluma"
-    private bool _coreWebNavigated;
-    private bool _snowlumaNavigated;
+    private readonly Dictionary<string, ManagerClient.Target> _targets = new();
+    private bool _serviceConnected;
+    private int _targetRefresh;
+    private string _loadedWebUrl = "";
+    private string _navigationError = "";
+    private ulong _webNavigationId;
     private int _serviceEnsuring;
 
     public MainWindow()
@@ -23,8 +26,9 @@ public partial class MainWindow : Window
         Loaded += async (_, _) =>
         {
             await EnsureServiceAsync();
-            InitWebView();
+            await InitWebView();
             StartPoll();
+            StartLogPoll();
         };
     }
 
@@ -63,6 +67,11 @@ public partial class MainWindow : Window
             }
             ServiceStateText.Text = "管理服务拉起失败"; ServiceStateText.Foreground = Brush("#F87171");
         }
+        catch (Exception ex)
+        {
+            ServiceStateText.Text = "管理服务启动失败";
+            StatusBar.Text = ex.Message;
+        }
         finally
         {
             Interlocked.Exchange(ref _serviceEnsuring, 0);
@@ -81,6 +90,7 @@ public partial class MainWindow : Window
 
     private async Task RefreshTargets()
     {
+        if (Interlocked.Exchange(ref _targetRefresh, 1) == 1) return;
         try
         {
             var root = await _client.GetAsync("/v1/targets");
@@ -89,22 +99,30 @@ public partial class MainWindow : Window
             foreach (var t in root.GetProperty("targets").EnumerateArray())
             {
                 var parsed = ManagerClient.ParseTarget(t);
+                if (_targets.TryGetValue(parsed.Name, out var previous)
+                    && previous.Pid != parsed.Pid && _webSource == parsed.Name)
+                {
+                    _loadedWebUrl = "";
+                    _navigationError = "";
+                }
+                _targets[parsed.Name] = parsed;
                 if (parsed.Name == "core") core = parsed;
                 if (parsed.Name == "snowluma") snow = parsed;
             }
             if (core is not null)
             {
-                CoreStateText.Text = $"{core.State}（期望 {core.Desired}）";
+                CoreStateText.Text = core.State;
                 CoreStateText.Foreground = Brush(core.State == "running" ? "#34D399" : "#F87171");
                 CoreDetail.Text = $"pid {core.Pid?.ToString() ?? "—"} · 端口 {string.Join("/", core.Ports)} · "
-                    + $"运行 {core.UptimeSec?.ToString("0") ?? "—"}s · 重启 {core.Restarts} 次 · "
+                    + $"运行 {core.UptimeSec?.ToString("0") ?? "—"}s · "
                     + $"业务{(core.Ready ? "就绪" : "未就绪")}"
                     + (string.IsNullOrEmpty(core.LastError) ? "" : $"\n{core.LastError}");
-                UpdateWebOverlay(core.State);
             }
+            _serviceConnected = true;
+            UpdateWebPage();
             if (snow is not null)
             {
-                SnowlumaStateText.Text = $"{snow.State}（期望 {snow.Desired}）";
+                SnowlumaStateText.Text = snow.State;
                 SnowlumaStateText.Foreground = Brush(snow.State == "running" ? "#34D399" : "#F87171");
                 SnowlumaDetail.Text = $"pid {snow.Pid?.ToString() ?? "—"} · 端口 {string.Join("/", snow.Ports)}"
                     + (string.IsNullOrEmpty(snow.LastError) ? "" : $"\n{snow.LastError}");
@@ -112,8 +130,11 @@ public partial class MainWindow : Window
         }
         catch (Exception)
         {
+            _serviceConnected = false;
             ServiceStateText.Text = "与服务失去连接"; ServiceStateText.Foreground = Brush("#F87171");
+            UpdateWebPage();
         }
+        finally { Interlocked.Exchange(ref _targetRefresh, 0); }
     }
 
     private static System.Windows.Media.SolidColorBrush Brush(string hex) =>
@@ -124,11 +145,15 @@ public partial class MainWindow : Window
     private void Nav_Click(object sender, RoutedEventArgs e)
     {
         var tag = ((Button)sender).Tag.ToString();
+        ShowSection(tag ?? "overview");
+    }
+
+    private void ShowSection(string tag)
+    {
         OverviewPanel.Visibility = tag == "overview" ? Visibility.Visible : Visibility.Collapsed;
         WebPanel.Visibility = (tag == "coreweb" || tag == "snowluma") ? Visibility.Visible : Visibility.Collapsed;
         LogsPanel.Visibility = tag == "logs" ? Visibility.Visible : Visibility.Collapsed;
-        UpdatePanel.Visibility = tag == "update" ? Visibility.Visible : Visibility.Collapsed;
-        foreach (var b in new[] { NavOverview, NavCoreWeb, NavSnowluma, NavLogs, NavUpdate })
+        foreach (var b in new[] { NavOverview, NavCoreWeb, NavSnowluma, NavLogs })
             b.Foreground = b.Tag.ToString() == tag ? System.Windows.Media.Brushes.White : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(0xCB, 0xCB, 0xD5, 0xE1));
         if (tag == "coreweb") ShowWeb("core");
         if (tag == "snowluma") ShowWeb("snowluma");
@@ -137,7 +162,7 @@ public partial class MainWindow : Window
 
     // ---------------- WebView2 ----------------
 
-    private async void InitWebView()
+    private async Task InitWebView()
     {
         try
         {
@@ -148,6 +173,16 @@ public partial class MainWindow : Window
             await Web.EnsureCoreWebView2Async(env);
             Web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             Web.CoreWebView2.Settings.AreDevToolsEnabled = false;
+            Web.CoreWebView2.NavigationStarting += (_, e) => _webNavigationId = e.NavigationId;
+            Web.CoreWebView2.NavigationCompleted += (_, e) =>
+            {
+                if (e.NavigationId != _webNavigationId) return;
+                if (!e.IsSuccess)
+                {
+                    _navigationError = "页面暂时无法连接，请查看程序状态或点击刷新页面。";
+                    UpdateWebPage();
+                }
+            };
             // 不向网页注入管理令牌或宿主桥接（任务书 §7）
         }
         catch (WebView2RuntimeNotFoundException)
@@ -164,24 +199,80 @@ public partial class MainWindow : Window
 
     private void ShowWeb(string source)
     {
+        if (_webSource != source) _navigationError = "";
         _webSource = source;
-        int port = source == "core" ? 5002 : 5099;
-        var url = $"http://127.0.0.1:{port}/";
-        if (Web.CoreWebView2 is null) return;
-        if (source == "core" && !_coreWebNavigated) { Web.CoreWebView2.Navigate(url); _coreWebNavigated = true; }
-        else if (source == "snowluma" && !_snowlumaNavigated) { Web.CoreWebView2.Navigate(url); _snowlumaNavigated = true; }
-        else Web.CoreWebView2.Navigate(url);
-        WebOverlayHint.Visibility = source == "core" && CoreStateText.Text.StartsWith("stopped")
-            ? Visibility.Visible : Visibility.Collapsed;
+        UpdateWebPage();
     }
 
-    private void WebTabCore_Click(object sender, RoutedEventArgs e) => ShowWeb("core");
-    private void WebTabSnowluma_Click(object sender, RoutedEventArgs e) => ShowWeb("snowluma");
-
-    private void UpdateWebOverlay(string coreState)
+    private void UpdateWebPage(bool force = false)
     {
-        if (_webSource == "core")
-            WebOverlayHint.Visibility = coreState == "running" ? Visibility.Collapsed : Visibility.Visible;
+        if (string.IsNullOrEmpty(_webSource)) return;
+        var name = _webSource == "core" ? "Core" : "SnowLuma";
+        WebPageTitle.Text = name + " 页面";
+        _targets.TryGetValue(_webSource, out var target);
+        var ready = _serviceConnected && target?.State == "running" && target.Ready;
+        WebPageState.Text = !_serviceConnected ? "管理服务未连接" : target?.State switch
+        {
+            "running" => "运行中", "starting" => "正在启动", "stopping" => "正在停止",
+            "failed" => "运行失败", "conflict" => "端口被占用", _ => "尚未启动"
+        };
+        WebStartButton.Visibility = _serviceConnected && target is not null
+            && (target.State is "stopped" or "failed") ? Visibility.Visible : Visibility.Collapsed;
+        WebStartButton.Content = target?.Pid is not null ? "重新启动 " + name : "启动 " + name;
+        if (force) _navigationError = "";
+        if (!ready || !string.IsNullOrEmpty(_navigationError) || Web.CoreWebView2 is null)
+        {
+            Web.Visibility = Visibility.Collapsed;
+            WebUnavailable.Visibility = Visibility.Visible;
+            WebUnavailableTitle.Text = !string.IsNullOrEmpty(_navigationError) ? "页面暂时无法打开"
+                : !_serviceConnected ? "管理服务未连接" : target?.State is "starting" or "stopping"
+                ? "请稍候" : ready ? "正在加载页面" : target?.State == "failed" ? name + " 运行失败" : name + " 尚未启动";
+            WebUnavailableDetail.Text = !string.IsNullOrEmpty(_navigationError) ? _navigationError
+                : !_serviceConnected ? "可以在总览检查管理服务，或在日志页查看启动输出。"
+                : !string.IsNullOrEmpty(target?.LastError) ? target.LastError
+                : ready ? "正在初始化页面组件。" : "启动程序后，页面会自动显示。切换页面不会关闭后台程序。";
+            return;
+        }
+        WebUnavailable.Visibility = Visibility.Collapsed;
+        Web.Visibility = Visibility.Visible;
+        var port = target!.Ports.FirstOrDefault();
+        if (port <= 0) port = _webSource == "core" ? 5002 : 5099;
+        var url = $"http://127.0.0.1:{port}/";
+        WebPageTitle.ToolTip = url;
+        if (force || _loadedWebUrl != url)
+        {
+            _loadedWebUrl = url;
+            Web.CoreWebView2.Navigate(url);
+        }
+    }
+
+    private async void WebRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        var button = (Button)sender;
+        var source = _webSource;
+        button.IsEnabled = false;
+        try
+        {
+            await RefreshTargets();
+            if (source != _webSource) return;
+            if (Web.CoreWebView2 is not null && Web.Visibility == Visibility.Visible)
+            {
+                // Reload the current page while bypassing HTTP cache; keep cookies and login state.
+                await Web.CoreWebView2.CallDevToolsProtocolMethodAsync("Page.reload", "{\"ignoreCache\":true}");
+                StatusBar.Text = "已强制刷新页面";
+            }
+            else UpdateWebPage(force: true);
+        }
+        catch (Exception ex) { StatusBar.Text = "刷新失败：" + ex.Message; }
+        finally { button.IsEnabled = true; }
+    }
+
+    private async void WebStart_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrEmpty(_webSource)) return;
+        var source = _webSource;
+        var action = _targets.TryGetValue(source, out var target) && target.Pid is not null ? "restart" : "start";
+        await Send($"/v1/targets/{source}/{action}");
     }
 
     // ---------------- 控制动作 ----------------
@@ -209,7 +300,7 @@ public partial class MainWindow : Window
     private void CoreRestart_Click(object sender, RoutedEventArgs e) => _ = Send("/v1/targets/core/restart");
     private void SnowlumaStart_Click(object sender, RoutedEventArgs e) => _ = Send("/v1/targets/snowluma/start");
     private void SnowlumaStop_Click(object sender, RoutedEventArgs e) => _ = Send("/v1/targets/snowluma/stop");
-    private void SnowlumaWebui_Click(object sender, RoutedEventArgs e) => ShowWeb("snowluma");
+    private void SnowlumaWebui_Click(object sender, RoutedEventArgs e) => ShowSection("snowluma");
 
     private async void StartAll_Click(object sender, RoutedEventArgs e)
     {
@@ -223,30 +314,10 @@ public partial class MainWindow : Window
         await Send("/v1/targets/core/stop");
     }
 
-    // ---------------- 日志 ----------------
-
-    private async Task RefreshLogs()
-    {
-        if (LogSource.SelectedItem is ComboBoxItem item && item.Tag is string source)
-        {
-            try
-            {
-                var r = await _client.GetAsync($"/v1/logs/{source}?lines=200");
-                LogBox.Text = r.TryGetProperty("lines", out var arr)
-                    ? string.Join("\n", arr.EnumerateArray().Select(x => x.GetString())) : "（无日志）";
-            }
-            catch (Exception ex) { LogBox.Text = $"读取失败：{ex.Message}"; }
-        }
-    }
-
-    private void LogSource_Changed(object sender, SelectionChangedEventArgs e) => _ = RefreshLogs();
-    private void LogRefresh_Click(object sender, RoutedEventArgs e) => _ = RefreshLogs();
-
     // ---------------- 生命周期 ----------------
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
-        if (_exiting) return;
         // 关闭窗口默认隐藏到托盘，受管目标继续运行（任务书 §6）
         e.Cancel = true;
         HideToTray();

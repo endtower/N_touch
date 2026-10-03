@@ -22,6 +22,7 @@ public class ManagerClient
     public async Task<JsonElement> GetAsync(string path)
     {
         using var resp = await Http.SendAsync(Request("GET", path));
+        resp.EnsureSuccessStatusCode();
         var text = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
         return doc.RootElement.Clone();
@@ -53,12 +54,10 @@ public class ManagerClient
     {
         public string Name { get; set; } = "";
         public string State { get; set; } = "";
-        public string Desired { get; set; } = "";
         public int? Pid { get; set; }
         public int[] Ports { get; set; } = Array.Empty<int>();
         public bool Ready { get; set; }
         public bool Managed { get; set; }
-        public int Restarts { get; set; }
         public string LastError { get; set; } = "";
         public double? UptimeSec { get; set; }
     }
@@ -75,12 +74,10 @@ public class ManagerClient
         {
             Name = el.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
             State = el.TryGetProperty("state", out var s) ? s.GetString() ?? "" : "",
-            Desired = el.TryGetProperty("desired", out var d) ? d.GetString() ?? "" : "",
             Pid = pid,
             Ports = ports.ToArray(),
             Ready = el.TryGetProperty("ready", out var r) && r.GetBoolean(),
             Managed = el.TryGetProperty("managed", out var m) && m.GetBoolean(),
-            Restarts = el.TryGetProperty("restarts", out var rs) ? rs.GetInt32() : 0,
             LastError = el.TryGetProperty("last_error", out var le) ? le.GetString() ?? "" : "",
             UptimeSec = up,
         };

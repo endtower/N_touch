@@ -37,7 +37,7 @@ sys.path.insert(0, str(app_root()))
 from aiohttp import web                                     # noqa: E402
 from manager_core import SupervisorService, log_root        # noqa: E402
 
-SERVICE_VERSION = "0.3.0-validation"
+SERVICE_VERSION = "0.3.2-manual"
 API_PORT = 49990
 _TOKEN_FILE = data_root() / "manager" / "service_token.txt"
 
@@ -276,6 +276,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Abyss 管理服务（无界面常驻）")
     parser.add_argument("--port", type=int, default=API_PORT)
     args = parser.parse_args()
+
+    # 无控制台启动时自行持有日志文件，窗口关闭不影响服务输出。
+    if sys.stdout is None or not sys.stdout.isatty():
+        output = log_root() / "manager" / "service.out.log"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        stream = output.open("a", encoding="utf-8", errors="replace", buffering=1)
+        sys.stdout = stream
+        sys.stderr = stream
 
     global _service, _started_at
     from aiohttp import web as _web
