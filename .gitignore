@@ -170,3 +170,7 @@ docs/
 launcher/bin/
 launcher/obj/
 launcher/webview/
+
+# 本地构建工具链与运行凭据（第二轮复核：983MB SDK 与令牌误入库）
+.tools/
+manager/service_token.txt
