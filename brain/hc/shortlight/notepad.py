@@ -23,6 +23,7 @@
   状态异常 raise RuntimeError 上抛崩溃阻断，防止错误扩大蔓延。
 """
 
+from paths import data_root
 import asyncio
 import json
 import re
@@ -35,7 +36,7 @@ from brain.hc.database.common import generate_timestamp_id
 
 logger = get_logger('ShortlightNotepad', "INFO")
 
-NOTES_DIR = Path(__file__).resolve().parent / "notes"
+NOTES_DIR = data_root() / "brain" / "hc" / "shortlight" / "notes"
 
 # 归档根目录名（NOTES_DIR 下的子目录，归档笔记按落库时间分月存放）。
 # get_all 只 glob NOTES_DIR 顶层 *.json（非递归），归档子目录天然退出活动池。

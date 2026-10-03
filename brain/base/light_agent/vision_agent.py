@@ -22,8 +22,8 @@ from pathlib import Path
 
 # 当前文件位于: N_Touch/brain/base/light_agent/vision_agent.py
 # parents[0]=light_agent, [1]=base, [2]=brain, [3]=N_Touch
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-sys.path.append(str(_PROJECT_ROOT))
+from paths import data_root as _data_root
+_PROJECT_ROOT = _data_root()
 
 from brain.base.light_agent.lightweight_agent import LightweightAgent
 from utils.logger import get_logger

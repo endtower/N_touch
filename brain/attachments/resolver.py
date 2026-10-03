@@ -16,6 +16,7 @@ Raises:
     PermissionError: 路径在白名单外
 """
 
+from paths import data_root
 import os
 import re
 from pathlib import Path
@@ -57,7 +58,7 @@ def _get_media_root() -> Path:
 def _get_llm_save_root() -> Path:
     """LLM 自存媒体根目录：<项目根>/memory/llm_save"""
     # 直接基于项目根拼绝对路径，避免依赖 cwd
-    return Path(__file__).resolve().parents[2] / "memory" / "llm_save"
+    return data_root() / "memory" / "llm_save"
 
 
 def _search_in_root(

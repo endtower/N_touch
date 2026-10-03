@@ -35,6 +35,7 @@ Amy 情绪系统核心接口
 get_amy_description / build_thought 不再包含覆盖态分支与崩溃到期检查。
 """
 
+from paths import data_root
 import time
 from pathlib import Path
 from typing import Optional, Tuple, List
@@ -67,8 +68,8 @@ class EmotionalInterface:
 
     def __init__(self, persistence_dir: Optional[Path] = None):
         if persistence_dir is None:
-            persistence_dir = Path(__file__).resolve().parent / "persistence"
-        persistence_dir.mkdir(exist_ok=True)
+            persistence_dir = data_root() / "brain" / "amy" / "persistence"
+        persistence_dir.mkdir(parents=True, exist_ok=True)
         # 情绪事件日志（内存实现），注入给 thought_cache 写事件
         self.event_log = EventLog()
         self.thought_cache = ThoughtCache(persistence_dir, event_log=self.event_log)

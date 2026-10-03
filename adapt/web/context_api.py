@@ -32,6 +32,7 @@ kind 从文件名解析（{prefix}.json / {prefix}_{HHMMSS}.json 唤醒分段名
 """
 
 from __future__ import annotations
+from paths import data_root
 
 import json
 import re
@@ -92,8 +93,8 @@ def _parse_kind(name: str) -> Optional[str]:
 
 
 def _project_root() -> Path:
-    """项目根 = adapt/web/context_api.py 的三倍父目录."""
-    return Path(__file__).resolve().parents[2]
+    """可写数据根（memory/event_chains 等运行数据都在这）."""
+    return data_root()
 
 
 def _chains_root() -> Path:

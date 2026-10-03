@@ -9,6 +9,7 @@
 纯异步实现：所有数据加载、查询均为 async
 """
 
+from paths import data_root
 import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -30,8 +31,8 @@ class AddressBook:
 
     def __init__(self):
         if not hasattr(self, '_initialized'):
-            self._storage_path = Path(__file__).resolve().parent / "pfca" / "address_book"
-            self._storage_path.mkdir(exist_ok=True)
+            self._storage_path = data_root() / "memory" / "pfca" / "address_book"
+            self._storage_path.mkdir(parents=True, exist_ok=True)
             self._contacts = {
                 "private": [],
                 "group": []

@@ -17,6 +17,7 @@ LLM 自存表情包管理接口（memory/llm_save/stickers/）。
 """
 
 from __future__ import annotations
+from paths import data_root
 
 import json
 import re
@@ -32,8 +33,7 @@ logger = get_logger(__name__, "DEBUG")
 
 # 当前文件位于: N_Touch/adapt/web/sticker_api.py
 # parents[0]=web, [1]=adapt, [2]=N_Touch
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-LLM_SAVE_ROOT = _PROJECT_ROOT / "memory" / "llm_save"
+LLM_SAVE_ROOT = data_root() / "memory" / "llm_save"
 STICKER_DIR = LLM_SAVE_ROOT / "stickers"
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}

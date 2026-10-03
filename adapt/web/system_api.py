@@ -28,6 +28,7 @@ from pathlib import Path
 from aiohttp import web
 
 from config.adapt_settings import get_web_config
+from paths import log_root
 from core.supervisor import (
     LOG_DIR,
     PROJECT_ROOT,
@@ -43,7 +44,7 @@ from core.supervisor import (
 )
 
 _specs = build_specs()
-_CORE_LOG_DIR = PROJECT_ROOT / "logs"
+_CORE_LOG_DIR = log_root()
 
 # uvicorn.Server 句柄：main.py（生产模式）启动时注入，供优雅关闭/自重启。
 # dev(--reload) 模式不注入 → 相关接口返回 400。

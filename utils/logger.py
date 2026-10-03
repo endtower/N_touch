@@ -11,6 +11,7 @@
 4. 支持彩色日志输出
 """
 
+from paths import log_root, resource_root
 import os
 import logging
 import sys
@@ -80,7 +81,7 @@ class ColoredFormatter(logging.Formatter):
         return super().format(record)
 
 # 定义日志目录
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+LOG_DIR = log_root()
 
 # 确保日志目录存在
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -114,11 +115,7 @@ def setup_global_logger() -> logging.Logger:
     if _global_logger and _global_logger.handlers:
         return _global_logger
     
-    # 获取项目根目录
-    project_root = Path(__file__).resolve().parent.parent
-    
-    # 确保日志目录存在
-    log_dir = project_root / 'logs'
+    log_dir = log_root()
     log_dir.mkdir(parents=True, exist_ok=True)
     
     # 总日志文件名 - 不包含模块名
@@ -188,15 +185,12 @@ def setup_logging(name: str = 'app', log_level: Optional[int or str] = None) -> 
     Returns:
         logging.Logger: 配置好的日志记录器实例
     """
-    # 获取项目根目录
-    project_root = Path(__file__).resolve().parent.parent
-    
-    # 加载.env文件
-    env_path = project_root / 'config' / '.env'
+    # 旧版可选兼容 env（随包资源；正式配置走项目根 .env.dev）
+    env_path = resource_root() / 'config' / '.env'
     load_dotenv(env_path)
     
     # 确保日志目录存在
-    log_dir = project_root / 'logs'
+    log_dir = log_root()
     log_dir.mkdir(parents=True, exist_ok=True)
     
     # 日志级别映射

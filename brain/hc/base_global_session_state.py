@@ -12,6 +12,7 @@
 会话标识统一使用 session_id，格式为 "type_id"，例如 "private_1234567890" / "group_198431299"。
 """
 
+from paths import data_root
 import asyncio
 import json
 from pathlib import Path
@@ -84,7 +85,7 @@ class BaseGlobalSessionState:
                 },
             }
 
-            self._storage_path = Path(__file__).resolve().parent.parent.parent / "memory" / "event_history"
+            self._storage_path = data_root() / "memory" / "event_history"
             self._storage_path.mkdir(exist_ok=True)
 
             self._real_time_file = None

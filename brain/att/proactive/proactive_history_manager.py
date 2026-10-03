@@ -8,6 +8,7 @@ proactive 历史/消息管理器
 - 持久化：落 event_chains/ 结构（链内按链分文件夹 / 链外落 unlinked 时间戳文件）
 """
 
+from paths import data_root
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,8 +31,7 @@ class ProactiveHistoryManager(HistoryManager):
 
     def get_memory_dir(self) -> Path:
         """获取存储目录路径"""
-        project_root = Path(__file__).resolve().parent.parent.parent.parent
-        return project_root / "memory" / "proactive"
+        return data_root() / "memory" / "proactive"
 
     def get_file_prefix(self) -> str:
         """获取文件名前缀"""

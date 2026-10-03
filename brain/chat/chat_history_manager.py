@@ -4,6 +4,7 @@
 负责处理消息队列和历史记录管理
 """
 
+from paths import data_root
 from pathlib import Path
 from utils.logger import get_logger
 from utils.history_manager import HistoryManager
@@ -31,10 +32,9 @@ class Chat_HistoryManager(HistoryManager):
         - social_chat 前缀走独立的 memory/social_chat/ 目录，便于前端按 kind 隔离展示
         - 其余前缀（conversation / observe / temporary）共享 memory/chat/
         """
-        project_root = Path(__file__).resolve().parent.parent.parent
         if self.prefix == 'social_chat':
-            return project_root / 'memory' / 'social_chat'
-        return project_root / 'memory' / 'chat'
+            return data_root() / 'memory' / 'social_chat'
+        return data_root() / 'memory' / 'chat'
 
     def get_file_prefix(self) -> str:
         """获取文件名前缀"""

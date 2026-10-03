@@ -12,6 +12,7 @@
 - 向量以 BLOB 存 JSON 序列化，Python 侧算余弦相似度。
 """
 
+from paths import data_root
 import asyncio
 import json
 import os
@@ -32,8 +33,7 @@ class MemoryDatabase:
     def __init__(self, db_path: str = None):
         if db_path is None:
             # 默认存储在项目根目录的 memory 目录下，与 chat_history.db 同级
-            project_root = Path(__file__).resolve().parent.parent.parent.parent
-            self._db_path = project_root / "memory" / "memory.db"
+            self._db_path = data_root() / "memory" / "memory.db"
         else:
             self._db_path = Path(db_path)
         os.makedirs(self._db_path.parent, exist_ok=True)
@@ -299,8 +299,7 @@ class MemoryDatabase:
             self._closed = False
             if db_path is None:
                 # 恢复真实库：默认 memory/memory.db
-                project_root = Path(__file__).resolve().parent.parent.parent.parent
-                self._db_path = project_root / "memory" / "memory.db"
+                self._db_path = data_root() / "memory" / "memory.db"
             else:
                 self._db_path = Path(db_path)
 

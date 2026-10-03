@@ -24,6 +24,7 @@ Amy 想法系统
 thought 变动时写情绪事件日志（EventLog），供消费者游标精确拉取。
 """
 
+from paths import data_root
 import asyncio
 import json
 import time
@@ -45,8 +46,8 @@ logger = get_logger('amy_thought', 'INFO')
 class ThoughtCache:
     def __init__(self, persistence_dir: Optional[Path] = None, event_log=None):
         if persistence_dir is None:
-            persistence_dir = Path(__file__).resolve().parent / "persistence"
-        persistence_dir.mkdir(exist_ok=True)
+            persistence_dir = data_root() / "brain" / "amy" / "persistence"
+        persistence_dir.mkdir(parents=True, exist_ok=True)
         self.persistence_file = persistence_dir / "thought_cache.json"
         self.thoughts: List[Thought] = []
         self.timestamp: int = int(time.time())

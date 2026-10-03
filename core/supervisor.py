@@ -24,10 +24,10 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from paths import app_root
+from paths import app_root, log_root
 
 PROJECT_ROOT = app_root()
-LOG_DIR = PROJECT_ROOT / "logs" / "manager"
+LOG_DIR = log_root() / "manager"
 SNOWLUMA_DIR = PROJECT_ROOT / "SnowLuma"
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200

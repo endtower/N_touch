@@ -15,6 +15,7 @@ Amy 存在感常驻标量状态（原"反馈感"，2026-09-29 改名；内部标
 （模块级工厂，普通类 + 全局 _instance；禁止类内 __new__ 单例模板），见 docs/api/amy.md。
 """
 
+from paths import data_root
 import json
 from pathlib import Path
 from typing import Optional
@@ -38,8 +39,8 @@ class FeedbackState:
 
     def __init__(self, persistence_dir: Optional[Path] = None):
         if persistence_dir is None:
-            persistence_dir = Path(__file__).resolve().parent / "persistence"
-        persistence_dir.mkdir(exist_ok=True)
+            persistence_dir = data_root() / "brain" / "amy" / "persistence"
+        persistence_dir.mkdir(parents=True, exist_ok=True)
         self.persistence_file = persistence_dir / "feedback_state.json"
         self._value = float(FEEDBACK_DEFAULT)
         self.load_from_file()

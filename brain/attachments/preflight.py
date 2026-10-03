@@ -9,6 +9,7 @@
 5. EXIF 剥除（隐私保护）
 """
 
+from paths import data_root
 import os
 import time
 from pathlib import Path
@@ -35,8 +36,7 @@ def _is_llm_saved_media(path: str) -> bool:
         <项目根>/memory/llm_save
     """
     try:
-        project_root = Path(__file__).resolve().parents[2]
-        llm_root = (project_root / "memory" / "llm_save").resolve()
+        llm_root = (data_root() / "memory" / "llm_save").resolve()
         target = Path(path).resolve()
         target.relative_to(llm_root)
         return True

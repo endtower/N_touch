@@ -36,6 +36,7 @@ WebChannel：用浏览器 WebSocket 替代 NapCat/QQ 作为消息通道。
 """
 
 from __future__ import annotations
+from paths import data_root
 
 import asyncio
 import base64
@@ -71,7 +72,8 @@ from .identity_manager import IdentityManager, IdentityError
 logger = setup_logging("adapt.web")
 
 # 运行时状态文件位置: adapt/web/data/web_runtime.json
-_RUNTIME_DIR = Path(__file__).resolve().parent / "data"
+_RUNTIME_DIR = data_root() / "adapt" / "web" / "data"
+_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================

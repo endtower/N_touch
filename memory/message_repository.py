@@ -28,6 +28,7 @@ MessageRepository类：
 """
 
 
+from paths import data_root
 import json
 import logging
 import os
@@ -67,10 +68,7 @@ class MessageRepository:
         """
         # 设置默认存储路径
         if storage_path is None:
-            # 获取项目根目录
-            project_root = Path(__file__).resolve().parent.parent
-            # 默认存储在 memory/chat_history 目录下
-            self.storage_path = project_root / "memory" / "chat_history"
+            self.storage_path = data_root() / "memory" / "chat_history"
         else:
             self.storage_path = Path(storage_path)
 
@@ -203,8 +201,7 @@ class MessageRepository:
             self._ready = False
             self._closed = False
             if storage_path is None:
-                project_root = Path(__file__).resolve().parent.parent
-                self.storage_path = project_root / "memory" / "chat_history"
+                self.storage_path = data_root() / "memory" / "chat_history"
             else:
                 self.storage_path = Path(storage_path)
             os.makedirs(self.storage_path, exist_ok=True)

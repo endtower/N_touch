@@ -20,6 +20,7 @@ Amy 欠账台账（系统级共享常驻状态）
   与 feedback_state.py 保持一致。
 """
 
+from paths import data_root
 import json
 import time
 from dataclasses import dataclass
@@ -72,8 +73,8 @@ class DebtLedger:
 
     def __init__(self, persistence_dir: Optional[Path] = None):
         if persistence_dir is None:
-            persistence_dir = Path(__file__).resolve().parent / "persistence"
-        persistence_dir.mkdir(exist_ok=True)
+            persistence_dir = data_root() / "brain" / "amy" / "persistence"
+        persistence_dir.mkdir(parents=True, exist_ok=True)
         self.persistence_file = persistence_dir / "debt_ledger.json"
         self._entries: List[DebtEntry] = []
         self.load_from_file()
