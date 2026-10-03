@@ -1,16 +1,8 @@
 # -*- coding: utf-8 -*-
-"""core.supervisor —— 进程监督共享模块
+"""手动管理服务的进程原语：规格、探测、拉起和按已知 PID 停止。
 
-manager.py（CLI 管家）与 adapt/web/system_api.py（网页系统面板）共用的
-进程控制原语：进程规格、端口/健康探测、拉起、按树硬停止。
-
-设计约定：
-- 子进程 stdout/stderr 重定向到 logs/manager/<name>.out.log（追加），不用管道——
-  监督者退出不会让子进程因缓冲区满而卡死，任何一方都可以随时"脱离"；
-- 从 Core 网页接口拉起 SnowLuma 时用 DETACHED_PROCESS：脱离 Core 的控制台，
-  Core 重启不影响它（QQ 登录态比 Core 的命贵）；
-- stop 一律 taskkill /T /F 硬停止（SQLite WAL 保证数据安全）；优雅关闭走
-  Core 自己的 /system/core/shutdown。
+子进程输出写入 logs/manager。这里只操作管理服务明确持有的进程，
+不按端口接管外部程序，不扫描安装目录清扫，不保存恢复状态。
 """
 
 from __future__ import annotations
@@ -25,7 +17,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from paths import app_root, data_root, log_root
+from paths import app_root, log_root
 
 PROJECT_ROOT = app_root()
 LOG_DIR = log_root() / "manager"
@@ -36,13 +28,6 @@ DETACHED_PROCESS = 0x00000008
 CREATE_NO_WINDOW = 0x08000000
 
 HEALTH_TIMEOUT_SEC = 30
-
-
-def manager_cmd(*args: str) -> list:
-    """管家入口命令：冻结运行用 manager.exe，源码运行用 python manager.py。"""
-    if getattr(sys, "frozen", False):
-        return [str(app_root() / "manager.exe"), *args]
-    return [sys.executable, str(PROJECT_ROOT / "manager.py"), *args]
 
 
 def core_cmd() -> list:
@@ -75,7 +60,6 @@ class ProcSpec:
     ports: list                    # 任一端口在监听即视为「活着」
     health_url: str = ""           # 可选 HTTP 健康检查（start 时等待它就绪）
     order: int = 0                 # start all 的顺序
-    auto_restart: bool = True
     desc: str = ""
 
 
@@ -100,7 +84,6 @@ def build_specs() -> dict[str, ProcSpec]:
             out_log=LOG_DIR / "snowluma.out.log",
             ports=[snowluma_webui_port(), 3001],
             order=1,
-            auto_restart=False,   # QQ 登录态宝贵，崩溃自动重启可能丢登录
             desc=f"SnowLuma（QQ 登录，WebUI :{snowluma_webui_port()}）",
         ),
     }
@@ -122,19 +105,6 @@ def spec_alive(spec: ProcSpec) -> bool:
     return any(port_alive(p) for p in spec.ports)
 
 
-def pid_listening_on(port: int) -> int | None:
-    """netstat 反查占用端口的 PID。netstat 输出是本地编码（GBK），按字节宽松解码。"""
-    try:
-        out = subprocess.run(["netstat", "-ano"], capture_output=True, timeout=10).stdout
-        for line in out.decode("utf-8", errors="replace").splitlines():
-            parts = line.split()
-            if len(parts) >= 5 and parts[3] == "LISTENING" and f":{port}" in parts[1]:
-                return int(parts[4])
-    except Exception:
-        pass
-    return None
-
-
 def health_ok(spec: ProcSpec) -> bool:
     if not spec.health_url:
         return spec_alive(spec)
@@ -152,33 +122,6 @@ def wait_ports_free(spec: ProcSpec, timeout: float = 15) -> bool:
             return True
         time.sleep(0.4)
     return not spec_alive(spec)
-
-
-# ============================================================
-# 期望状态标记（GPT 审查-2：三端统一协调点）
-# ============================================================
-# logs/manager/desire/<name>.txt = "running" | "stopped" | "restart"
-# - 网页 /system/core/shutdown → 写 "stopped" 再优雅退出：看门狗读到后不再拉起
-# - 网页 /system/core/restart  → 写 "restart" 再优雅退出：看门狗负责拉回
-# - 托盘/CLI 的 start/stop 经 Manager 同步写标记，三端语义一致
-# - 意外崩溃时标记仍为 "running" → 看门狗按退避策略自动恢复
-
-def desire_path(name: str) -> Path:
-    return LOG_DIR / "desire" / f"{name}.txt"
-
-
-def read_desire(name: str, default: str = "stopped") -> str:
-    try:
-        value = desire_path(name).read_text(encoding="utf-8").strip()
-        return value if value in ("running", "stopped", "restart") else default
-    except OSError:
-        return default
-
-
-def write_desire(name: str, value: str) -> None:
-    path = desire_path(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(value, encoding="utf-8")
 
 
 # ============================================================
@@ -214,47 +157,16 @@ def spawn(spec: ProcSpec, detached: bool = False, clean_env: bool = False) -> su
         out.close()   # 子进程已继承句柄，父进程即可关闭
 
 
-def kill_by_cmdline(match_substr: str, exclude_pid: int | None = None) -> list[int]:
-    """按命令行包含 match_substr 精确清扫进程（处理挣脱进程树的分离子进程）。
-
-    只匹配目标安装目录子串（如 SnowLuma 目录），不会误伤同名其他程序
-    （node.exe 等可能是任何人的进程）。exclude_pid 用于排除已处理对象。
-    """
-    killed: list[int] = []
-    ps = (
-        "Get-CimInstance Win32_Process | ForEach-Object { "
-        "if ($_.CommandLine -and $_.CommandLine.Contains('%s') "
-        "-and $_.ProcessId -ne %d) { $_.ProcessId } }"
-    ) % (match_substr.replace("\\", "\\"), exclude_pid or 0)
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True, timeout=15,
-        ).stdout.decode("utf-8", errors="replace")
-        for line in out.splitlines():
-            line = line.strip()
-            if line.isdigit() and int(line) != (exclude_pid or 0):
-                r = subprocess.run(["taskkill", "/PID", line, "/T", "/F"],
-                                   capture_output=True, timeout=15)
-                if r.returncode == 0:
-                    killed.append(int(line))
-    except Exception:
-        pass
-    return killed
-
-
 def stop_tree(spec: ProcSpec, pid: int | None) -> tuple[bool, int | None]:
     """taskkill /T /F 硬停止进程树，并等待端口释放。
 
-    pid 传 None 时自动按端口反查（接管外部实例）。返回 (是否已停, 实际杀的 pid)。
+    没有受管 PID 时拒绝终止；不按端口推断归属。返回 (端口是否释放, PID)。
     """
     if pid is None:
-        pid = pid_listening_on(spec.ports[0])
-    if pid is None:
-        return True, None
+        return False, None
     try:
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                       capture_output=True, timeout=15)
+                       capture_output=True, timeout=15, creationflags=CREATE_NO_WINDOW)
     except Exception:
         pass
     freed = wait_ports_free(spec, timeout=10)

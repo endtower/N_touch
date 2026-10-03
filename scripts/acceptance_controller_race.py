@@ -1,169 +1,275 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""验收（任务书 V05/V06/V07 + 第二轮复核 P1）：控制器并发与停止竞态。
+"""Isolated acceptance for manual management; no real processes or user data.
 
-用模拟进程与可注入探测，确定性验证：
-  1. 并发 start ×10 —— 只 spawn 一个实例；
-  2. 崩溃恢复退避期间 stop —— 待执行恢复作废，不复活；
-  3. restart 与 stop 并发 —— 最后一个意图生效；
-  4. 崩溃循环保护 —— 10s 内退出不自动恢复。
-
-运行：python scripts/acceptance_controller_race.py
+Run: python scripts/acceptance_controller_race.py
 """
+from __future__ import annotations
 
-import asyncio
+import concurrent.futures
 import sys
+import tempfile
+import threading
 import time
+import types
+import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import manager_core  # noqa: E402
-from manager_core import SupervisorService  # noqa: E402
-from core.supervisor import ProcSpec  # noqa: E402
+import manager_core
+from core import supervisor
 
 
 class FakeProc:
-    def __init__(self, pid: int):
+    def __init__(self, pid):
         self.pid = pid
         self.returncode = None
-        self._died = False
 
     def poll(self):
-        return self.returncode if self._died else None
-
-    def die(self, code: int = 1):
-        self._died = True
-        self.returncode = code
+        return self.returncode
 
 
-def make_spec(tmp: Path, name: str = "core") -> ProcSpec:
-    return ProcSpec(
-        name=name,
-        cmd=["fake"],
-        cwd=tmp,
-        out_log=tmp / f"{name}.out.log",
-        ports=[5061],        # 测试专用端口，不与真实服务冲突
-        health_url="",       # 用端口探测
-        order=0,
-        auto_restart=True,
-        desc="测试目标",
-    )
+def wait_until(predicate, timeout=3):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError('Timed out waiting for test condition')
 
 
-def install_mocks(spawn_log: list):
-    """注入模拟 spawn / 端口探测 / 健康。端口开关由 port_open 控制。"""
-    state = {"port_open": False, "next_pid": 100}
+class ManualManagementTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='abyss_manual_acceptance_')
+        self.root = Path(self.temporary.name)
+        self.specs = {
+            name: supervisor.ProcSpec(
+                name=name, cmd=['simulated'], cwd=self.root / name,
+                out_log=self.root / f'{name}.log', ports=[62001 + index],
+                health_url=f'http://test.invalid/{name}/health', order=index,
+            ) for index, name in enumerate(('core', 'snowluma'))
+        }
+        self.created = []
+        self.stopped = []
+        self.healthy = threading.Event()
+        self.healthy.set()
+        self.spawned = threading.Event()
+        self.stop_succeeds = True
+        self.port_open = False
+        self.patchers = [
+            patch.object(manager_core, 'build_specs_safe', return_value=(self.specs, [])),
+            patch.object(manager_core, 'spawn', side_effect=self.spawn),
+            patch.object(manager_core, 'stop_tree', side_effect=self.stop),
+            patch.object(manager_core, '_port_alive', side_effect=lambda port: self.port_open),
+            patch.object(manager_core, '_health_ok', side_effect=lambda url: self.healthy.is_set()),
+            patch.object(manager_core, 'HEALTH_WAIT_SEC', 2),
+            patch.object(manager_core, 'GRACEFUL_STOP_TIMEOUT', 0),
+            patch.object(manager_core, 'data_root', return_value=self.root),
+            patch.object(manager_core, 'log_root', return_value=self.root / 'logs'),
+        ]
+        for patcher in self.patchers:
+            patcher.start()
+        # Choose when workers start, without constructing production data paths.
+        with patch.object(threading.Thread, 'start'):
+            self.service = manager_core.SupervisorService()
+        self.controller = self.service.controller('core')
 
-    def fake_spawn(spec, detached=False, clean_env=False):
-        spawn_log.append(time.time())
-        state["port_open"] = True
-        state["next_pid"] += 1
-        proc = FakeProc(state["next_pid"])
-        state.setdefault("procs", []).append(proc)
+    def tearDown(self):
+        for controller in self.service.controllers.values():
+            controller._stop_event.set()
+        for controller in self.service.controllers.values():
+            if controller._worker.ident is not None:
+                controller._worker.join(3)
+                self.assertFalse(controller._worker.is_alive())
+        for patcher in reversed(self.patchers):
+            patcher.stop()
+        self.temporary.cleanup()
+
+    def spawn(self, spec, **kwargs):
+        proc = FakeProc(900000 + len(self.created))
+        self.created.append((spec.name, proc))
+        self.spawned.set()
         return proc
 
-    def fake_port_alive(port, timeout=0.4):
-        return state["port_open"]
+    def stop(self, spec, pid):
+        self.stopped.append(pid)
+        if self.stop_succeeds:
+            for name, proc in self.created:
+                if proc.pid == pid:
+                    proc.returncode = 0
+        return self.stop_succeeds, pid
 
-    def fake_health(url):
-        return False
+    def start_worker(self, name='core'):
+        self.service.controller(name)._worker.start()
 
-    def fake_stop_tree(spec, pid):
-        # 模拟强制终止：受管模拟进程死亡 + 端口关闭
-        state["port_open"] = False
-        for p in state.get("procs", []):
-            p.die(0)
-        return True, pid
+    def test_ten_starts_queued_before_worker_create_one_process(self):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(self.controller.submit, 'start') for _ in range(10)]
+            wait_until(lambda: self.controller.queue.qsize() == 10)
+            self.start_worker()
+            self.assertTrue(all(future.result(3)['ok'] for future in futures))
+        self.assertEqual(len(self.created), 1)
+        self.assertEqual(self.stopped, [])
 
-    manager_core.stop_tree = fake_stop_tree
-    manager_core.spawn = fake_spawn
-    manager_core._port_alive = fake_port_alive
-    manager_core._health_ok = fake_health
-    return state
+    def test_duplicate_starts_during_health_wait_do_not_cancel(self):
+        self.healthy.clear()
+        self.start_worker()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            first = executor.submit(self.controller.submit, 'start')
+            self.assertTrue(self.spawned.wait(1))
+            others = [executor.submit(self.controller.submit, 'start') for _ in range(9)]
+            wait_until(lambda: self.controller.queue.qsize() == 9)
+            self.healthy.set()
+            self.assertTrue(all(future.result(3)['ok'] for future in [first, *others]))
+        self.assertEqual(len(self.created), 1)
+        self.assertEqual(self.stopped, [])
+
+    def test_crash_reports_failure_until_manual_start(self):
+        self.start_worker()
+        self.assertTrue(self.controller.submit('start')['ok'])
+        self.controller.proc.returncode = 7
+        wait_until(lambda: self.controller.state == 'failed')
+        time.sleep(1.1)
+        self.assertEqual(len(self.created), 1)
+        self.assertIsNone(self.controller.proc)
+        self.assertTrue(self.controller._worker.is_alive())
+        self.assertTrue(self.controller.submit('start')['ok'])
+        self.assertEqual(len(self.created), 2)
+
+    def test_stop_core_does_not_stop_snowluma_or_respawn(self):
+        self.start_worker()
+        self.start_worker('snowluma')
+        self.assertTrue(self.controller.submit('start')['ok'])
+        snow = self.service.controller('snowluma')
+        self.assertTrue(snow.submit('start')['ok'])
+        core_pid, snow_proc = self.controller.proc.pid, snow.proc
+        self.assertTrue(self.controller.submit('stop')['ok'])
+        time.sleep(1.1)
+        self.assertEqual(self.stopped, [core_pid])
+        self.assertIsNone(snow_proc.poll())
+        self.assertEqual(len(self.created), 2)
+        self.assertEqual(self.controller.state, 'stopped')
+
+    def test_cancelled_start_preserves_handle_if_stop_fails(self):
+        self.healthy.clear()
+        self.stop_succeeds = False
+        self.start_worker()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(self.controller.submit, 'start')
+            self.assertTrue(self.spawned.wait(1))
+            wait_until(lambda: self.controller.proc is not None)
+            original = self.controller.proc
+            stopping = executor.submit(self.controller.submit, 'stop')
+            self.assertFalse(first.result(3)['ok'])
+            self.assertFalse(stopping.result(3)['ok'])
+        self.assertIs(self.controller.proc, original)
+        self.assertIsNone(original.poll())
+        self.assertTrue(self.controller.managed)
+        self.assertEqual(self.controller.state, 'failed')
+
+    def test_restart_followed_by_stop_does_not_spawn(self):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            restart = executor.submit(self.controller.submit, 'restart')
+            wait_until(lambda: self.controller.queue.qsize() == 1)
+            stopping = executor.submit(self.controller.submit, 'stop')
+            wait_until(lambda: self.controller.queue.qsize() == 2)
+            self.start_worker()
+            self.assertEqual(restart.result(3)['error_code'], 'superseded')
+            self.assertTrue(stopping.result(3)['ok'])
+        self.assertEqual(self.created, [])
+
+    def test_manual_restart_creates_a_new_process(self):
+        self.start_worker()
+        self.assertTrue(self.controller.submit('start')['ok'])
+        original_pid = self.controller.proc.pid
+        self.assertTrue(self.controller.submit('restart')['ok'])
+        self.assertEqual(self.stopped, [original_pid])
+        self.assertNotEqual(self.controller.proc.pid, original_pid)
+        self.assertEqual(len(self.created), 2)
+
+    def test_external_port_is_never_taken_over_or_killed(self):
+        self.port_open = True
+        self.start_worker()
+        self.assertEqual(self.controller.submit('start')['error_code'], 'conflict')
+        self.assertEqual(self.controller.submit('stop')['error_code'], 'external_port')
+        self.assertEqual(self.created, [])
+        self.assertEqual(self.stopped, [])
+
+    def test_old_disk_intent_is_ignored_and_no_marker_is_written(self):
+        marker = self.root / 'logs' / 'desire' / 'core.txt'
+        marker.parent.mkdir(parents=True)
+        marker.write_text('running', encoding='utf-8')
+        with patch.object(threading.Thread, 'start'):
+            fresh_service = manager_core.SupervisorService()
+        self.assertEqual(fresh_service.controller('core').desired, 'stopped')
+        self.start_worker()
+        self.assertTrue(self.controller.submit('start')['ok'])
+        self.assertTrue(self.controller.submit('stop')['ok'])
+        self.assertEqual(marker.read_text(), 'running')
+        self.assertEqual(list(marker.parent.iterdir()), [marker])
+
+    def test_running_process_keeps_its_original_spec(self):
+        self.start_worker()
+        self.assertTrue(self.controller.submit('start')['ok'])
+        original_spec = self.controller.spec
+        different = supervisor.ProcSpec(name='core', cmd=['new'], cwd=self.root,
+            out_log=self.root / 'new.log', ports=[62099])
+        self.specs['core'] = different
+        self.assertTrue(self.controller.submit('start')['ok'])
+        self.assertIs(self.controller.spec, original_spec)
+
+    def test_graceful_stop_sends_local_service_token(self):
+        self.start_worker()
+        self.assertTrue(self.controller.submit('start')['ok'])
+        token_file = self.root / 'manager' / 'service_token.txt'
+        token_file.parent.mkdir()
+        token_file.write_text('isolated-test-token', encoding='utf-8')
+        proc = self.controller.proc
+        class Response:
+            def __enter__(self):
+                proc.returncode = 0
+                return self
+            def __exit__(self, *args):
+                return False
+        with patch.object(manager_core.urllib.request, 'urlopen', return_value=Response()) as open_url:
+            self.assertTrue(self.controller.submit('stop')['ok'])
+            request = open_url.call_args.args[0]
+            self.assertEqual(request.get_header('X-manager-token'), 'isolated-test-token')
+            self.assertTrue(request.full_url.endswith('/system/core/shutdown-internal'))
+        self.assertEqual(self.stopped, [])
 
 
-def wait_until(predicate, timeout=10, step=0.1):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if predicate():
-            return True
-        time.sleep(step)
-    return False
+class ProcessPrimitiveTests(unittest.TestCase):
+    def test_unknown_pid_never_triggers_a_process_command(self):
+        with patch.object(supervisor.subprocess, 'run') as run:
+            self.assertEqual(supervisor.stop_tree(None, None), (False, None))
+            run.assert_not_called()
+
+    def test_spawn_preserves_hidden_window_and_log_redirection(self):
+        with tempfile.TemporaryDirectory(prefix='abyss_spawn_acceptance_') as temporary:
+            root = Path(temporary)
+            spec = supervisor.ProcSpec(name='core', cmd=['simulated'], cwd=root,
+                out_log=root / 'output.log', ports=[62000])
+            config_package = types.ModuleType('config')
+            env_tools = types.ModuleType('config.env_tools')
+            env_tools.CONFIG_OVERRIDE_KEYS = ('WEB_WS_PORT',)
+            with patch.dict(sys.modules, {'config': config_package, 'config.env_tools': env_tools}), \
+                    patch.object(supervisor.subprocess, 'Popen') as popen:
+                supervisor.spawn(spec, clean_env=True)
+                kwargs = popen.call_args.kwargs
+                self.assertTrue(kwargs['creationflags'] & supervisor.CREATE_NO_WINDOW)
+                self.assertNotIn('WEB_WS_PORT', kwargs['env'])
+                self.assertEqual(kwargs['stderr'], supervisor.subprocess.STDOUT)
+                self.assertTrue(kwargs['stdout'].closed)
+
+    def test_stop_uses_only_explicit_pid_and_hides_helper(self):
+        with patch.object(supervisor.subprocess, 'run') as run, \
+                patch.object(supervisor, 'wait_ports_free', return_value=True):
+            self.assertEqual(supervisor.stop_tree(None, 900001), (True, 900001))
+            self.assertEqual(run.call_args.args[0], ['taskkill', '/PID', '900001', '/T', '/F'])
+            self.assertTrue(run.call_args.kwargs['creationflags'] & supervisor.CREATE_NO_WINDOW)
 
 
-def main() -> int:
-    tmp = Path(tempfile.mkdtemp(prefix="abyss_ctl_"))
-    spawn_log: list = []
-    state = install_mocks(spawn_log)
-    mgr = SupervisorService()
-    mgr.desire_dir = tmp / "desire"    # 隔离期望标记（不写真实数据目录）
-    ctl = mgr.controller("core")
-    ctl.spec = make_spec(tmp)          # 换成测试规格（端口/日志隔离）
-    ctl._refresh_spec = lambda: None   # 冻结测试规格（禁用配置重读）
-    ctl.backoff = 3.0                  # 缩短退避，测试用（窗口 3s 内可取消）
-    failures = []
-
-    # ---------- 1) 并发 start ×10 ----------
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-        results = list(ex.map(lambda _: ctl.submit("start"), range(10)))
-    spawned = len(spawn_log)
-    oks = sum(1 for r in results if r.get("ok"))
-    if spawned != 1:
-        failures.append(f"V05 并发 start×10 spawn 了 {spawned} 次（应为 1）")
-    if oks != 10:
-        failures.append(f"V05 并发 start×10 仅 {oks} 个成功")
-    if not wait_until(lambda: ctl.state == "running", 5):
-        failures.append("V05 start 后未进入 running")
-    print(f"1) 并发 start×10: spawn={spawned} ok={oks}/10 state={ctl.state}")
-
-    # ---------- 2) 崩溃 → 退避期 stop → 不复活 ----------
-    ctl.started_at = time.time() - 20            # 绕开崩溃循环窗口
-    state["port_open"] = False                   # 端口关闭 + 进程死亡 = 崩溃
-    ctl.proc.die(1)
-    if not wait_until(lambda: ctl.pending_recovery is not None, 5):
-        failures.append("V06 崩溃后未登记待执行恢复")
-    spawn_before = len(spawn_log)
-    r = ctl.submit("stop")                       # 退避窗口内用户停止
-    time.sleep(max(ctl.backoff + 1.5, 2.5))      # 等过原定恢复时间点
-    if len(spawn_log) != spawn_before:
-        failures.append("V06 退避期 stop 后仍复活（spawn 增加）")
-    if ctl.desired != "stopped" or ctl.state != "stopped":
-        failures.append(f"V06 stop 后期望/状态错误: {ctl.desired}/{ctl.state}")
-    print(f"2) 崩溃→退避期 stop: 恢复作废, 最终={ctl.state}, desire={ctl.desired}")
-
-    # ---------- 3) restart 与 stop 并发 ----------
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        futs = [ex.submit(ctl.submit, "restart"), ex.submit(ctl.submit, "stop")]
-        list(ex.map(lambda f: f.result(timeout=60), futs))
-    if ctl.state != "stopped" or ctl.desired != "stopped":
-        failures.append(f"V07 restart/stop 并发后未停止: {ctl.state}/{ctl.desired}")
-    print(f"3) restart+stop 并发: 最终={ctl.state}, desire={ctl.desired}")
-
-    # ---------- 4) 崩溃循环保护 ----------
-    spawn_before = len(spawn_log)
-    r = ctl.submit("start")                      # spawn 后立即死（<10s）
-    if not r.get("ok"):
-        failures.append(f"V04 前置启动失败: {r}")
-    ctl.proc.die(3)                              # 启动即死 → 崩溃循环保护
-    time.sleep(6)                                # 覆盖扫描间隔与恢复到期
-    if len(spawn_log) != spawn_before + 1:
-        failures.append("V04 崩溃循环保护失效（spawn 次数异常）")
-    if ctl.state != "failed":
-        failures.append(f"V04 崩溃循环后状态应为 failed: {ctl.state}")
-    print(f"4) 崩溃循环保护: spawn={len(spawn_log) - spawn_before} state={ctl.state}")
-
-    if failures:
-        print("\n验收失败:")
-        for f in failures:
-            print("  ✗", f)
-        return 1
-    print("\n验收通过：串行化控制器竞态修复成立")
-    return 0
-
-
-import tempfile  # noqa: E402
-
-if __name__ == "__main__":
-    sys.exit(main())
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

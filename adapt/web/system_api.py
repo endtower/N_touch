@@ -28,6 +28,7 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web
 
 from config.adapt_settings import get_onebot_config, get_web_config
@@ -206,7 +207,7 @@ async def handle_system_status(request: web.Request) -> web.Response:
                             "webui_url": "http://127.0.0.1:5099"}
             if t["name"] == "core":
                 core_from_service = {"state": t["state"], "desired": t["desired"],
-                                     "managed": t["managed"], "restarts": t["restarts"],
+                                     "managed": t["managed"],
                                      "last_error": t["last_error"]}
     return web.json_response({
         "core": {
@@ -216,7 +217,7 @@ async def handle_system_status(request: web.Request) -> web.Response:
             "web_port": get_web_config().WS_PORT,
             "onebot_port": get_onebot_config().WS_PORT,
             "mode": "prod" if server is not None else "dev",
-            "desired": core_from_service.get("desired", read_desire_fallback()),
+            "desired": core_from_service.get("desired", "running"),
             "state": core_from_service.get("state", "running"),
             "last_error": core_from_service.get("last_error", ""),
         },
@@ -225,15 +226,6 @@ async def handle_system_status(request: web.Request) -> web.Response:
                     "config_errors": svc_body.get("config_errors", []) if svc_status == 200 else []},
         "hint": "Core 冷启动（进程已死）请用 AbyssLauncher / manager.py",
     })
-
-
-def read_desire_fallback() -> str:
-    try:
-        marker = data_root() / "logs" / "manager" / "desire" / "core.txt"
-        value = marker.read_text(encoding="utf-8").strip()
-        return value if value in ("running", "stopped", "restart") else "stopped"
-    except OSError:
-        return "stopped"
 
 
 # ============================================================

@@ -1,41 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""manager_core —— 目标进程串行化控制器（独立管理服务的核心）
+"""手动进程管理：串行启停、启动检查和退出确认，不自动恢复进程。
 
-第二轮复核 R1-R3 修复要点：
-1. 优雅关闭单向：控制器对 core 的停止调用 Core 的内部直达入口
-   /system/core/shutdown-internal（仅让 uvicorn 自己退出，绝不回调管理服务）；
-   网页面板的 /system/core/* 已全部代理到本服务，不再产生循环。
-2. 停止以"退出事实"确认：taskkill/超时后仍未退出 → 保留句柄与托管归属，
-   返回失败与真实状态；进程已退但端口仍开放 → 区分"目标已停/外部占用"。
-3. 命令版本与入队原子化：epoch 分配和 queue.put 在同一临界区内完成，
-   队列顺序 == epoch 顺序；执行时 epoch 不等于当前值即按过时命令跳过。
-   工作循环每轮先处理用户命令，再做崩溃检测与恢复，消除登记竞态。
-4. 健康等待可取消：等待循环每轮检查命令是否过时，过时即终止刚拉起的
-   进程并返回取消，不会把 stop 请求困在 30s 等待里。
-5. 环境净化：spawn 时从继承环境剔除配置覆盖键，子进程从 .env.dev 重新
-   读取最新值（避免服务进程的旧环境覆盖用户刚保存的配置）。
+操作意图仅保存在内存。重复 start 共用同一版本，stop/restart 可取消
+启动等待。退出检测只更新状态；只有用户命令可以创建新进程。
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import queue
 import subprocess
-import sys
 import threading
 import time
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
 
 from paths import app_root, data_root, log_root
 from core.supervisor import (
     ProcSpec,
     build_specs,
     core_cmd,
-    kill_by_cmdline,
     spawn,
     stop_tree,
 )
@@ -44,9 +29,6 @@ STATES = ("stopped", "starting", "running", "stopping", "failed", "conflict")
 
 HEALTH_WAIT_SEC = 30
 GRACEFUL_STOP_TIMEOUT = 10
-CRASH_LOOP_WINDOW = 10
-BACKOFF_INITIAL = 5
-BACKOFF_MAX = 60
 
 
 # ============================================================
@@ -78,7 +60,7 @@ def build_specs_safe() -> tuple[dict[str, ProcSpec], list[str]]:
         "snowluma": ProcSpec(
             name="snowluma", cmd=["cmd", "/c", "launcher.bat"], cwd=SNOWLUMA_DIR,
             out_log=LOG_DIR / "snowluma.out.log",
-            ports=[5099, 3001], order=1, auto_restart=False,
+            ports=[5099, 3001], order=1,
             desc="SnowLuma（降级端口）",
         ),
     }
@@ -104,15 +86,6 @@ def _health_ok(url: str) -> bool:
         return False
 
 
-def _clean_env() -> dict:
-    """继承环境但剔除配置覆盖键：子进程从 .env.dev 读取最新值（复核 R4-4）。"""
-    from config.env_tools import CONFIG_OVERRIDE_KEYS
-    env = os.environ.copy()
-    for key in CONFIG_OVERRIDE_KEYS:
-        env.pop(key, None)
-    return env
-
-
 # ============================================================
 # 目标控制器
 # ============================================================
@@ -126,31 +99,29 @@ class TargetSnapshot:
     ports: list
     ready: bool
     managed: bool
-    restarts: int
     last_error: str
     uptime_sec: float | None
 
 
 class TargetController:
-    """单个目标的唯一控制者：专属工作线程串行处理全部命令与崩溃恢复。"""
+    """单个目标的唯一控制者，只执行手动命令并检查已持有进程的退出。"""
 
     def __init__(self, spec: ProcSpec, service: "SupervisorService"):
         self.spec = spec
         self.service = service
         self.queue: queue.Queue = queue.Queue()
         self.state = "stopped"
-        self.desired = service.read_desire(spec.name)
+        self.desired = "stopped"
         self.ready = False
         self.managed = False
         self.proc: subprocess.Popen | None = None
         self.started_at = 0.0
-        self.restarts = 0
         self.last_error = ""
         self.epoch = 0
-        self.pending_recovery: tuple[int, float] | None = None
-        self.backoff = BACKOFF_INITIAL
+        self._last_command: str | None = None
         self._stop_event = threading.Event()
-        threading.Thread(target=self._run, daemon=True, name=f"ctl-{spec.name}").start()
+        self._worker = threading.Thread(target=self._run, daemon=True, name=f"ctl-{spec.name}")
+        self._worker.start()
 
     # ---------- 对外命令：epoch 分配与入队原子化（复核 R3）----------
 
@@ -160,12 +131,14 @@ class TargetController:
         done = threading.Event()
         result: dict = {}
         with self.service.epoch_lock:
-            self.epoch += 1
+            # 相同 start/stop 不撤销进行中的相同操作。
+            if kind != self._last_command or kind == "restart":
+                self.epoch += 1
+                self._last_command = kind
             epoch = self.epoch
             desired = {"start": "running", "stop": "stopped", "restart": "running"}[kind]
             self.desired = desired
-            self.service.write_desire(self.spec.name, desired)
-            self.queue.put((kind, epoch, desired, done, result))
+            self.queue.put((kind, epoch, done, result))
         done.wait(timeout=HEALTH_WAIT_SEC + GRACEFUL_STOP_TIMEOUT + 20)
         if not result:
             return {"ok": False, "error_code": "timeout",
@@ -178,11 +151,11 @@ class TargetController:
         return TargetSnapshot(
             name=self.spec.name, state=self.state, desired=self.desired,
             pid=self.proc.pid if alive else None, ports=list(self.spec.ports),
-            ready=self.ready, managed=self.managed, restarts=self.restarts,
+            ready=self.ready, managed=self.managed,
             last_error=self.last_error, uptime_sec=round(uptime, 1) if uptime else None,
         )
 
-    # ---------- 工作线程：用户命令优先，再做崩溃/恢复 ----------
+    # ---------- 工作线程：手动命令与被动退出检测 ----------
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -192,12 +165,9 @@ class TargetController:
             except queue.Empty:
                 pass
             if item is not None:
-                kind, epoch, desired_snapshot, done, result = item
+                kind, epoch, done, result = item
                 try:
-                    # 过时判定（复核 R3）：意图快照与当前期望不一致才算过时
-                    # （较新的 stop 已生效时，迟到的 start 不应再执行）；
-                    # 相同意图的重复命令（连点 start）返回"已在运行"即为正确结果
-                    if desired_snapshot != self.desired:
+                    if epoch != self.epoch:
                         result.update({"ok": False, "error_code": "superseded",
                                        "state": self.state,
                                        "message": "命令已过时（有更新的操作生效）"})
@@ -216,9 +186,7 @@ class TargetController:
                 finally:
                     done.set()
                 continue
-            # 无用户命令时才做崩溃检测与到期恢复
-            self._check_crash()
-            self._check_recovery()
+            self._check_exit()
 
     # ---------- 命令实现 ----------
 
@@ -232,11 +200,14 @@ class TargetController:
             pass
 
     def _cmd_start(self, epoch: int) -> dict:
-        self._refresh_spec()
+        if epoch != self.epoch or self.desired != "running":
+            return {"ok": False, "error_code": "superseded",
+                    "state": self.state, "message": "启动已取消（有更新的操作生效）"}
         if self.proc is not None and self.proc.poll() is None:
             self.state = "running" if self.ready else "starting"
             return {"ok": True, "state": self.state, "pid": self.proc.pid,
                     "message": "目标进程已在（本服务管理），不重复创建"}
+        self._refresh_spec()
         if any(_port_alive(p) for p in self.spec.ports):
             self.state = "conflict"
             self.last_error = "端口被外部程序占用（不是本服务启动的实例），不自动接管"
@@ -265,17 +236,15 @@ class TargetController:
                         "message": self.last_error}
             if epoch != self.epoch or self.desired != "running":
                 # 有更新意图：终止刚拉起的进程（它属于本控制器），返回取消
-                stop_tree(self.spec, proc.pid)
-                self.proc = None
-                self.managed = False
-                self.state = "stopped" if self.desired == "stopped" else self.state
+                stopped = self._cmd_stop(epoch)
+                if not stopped.get("ok"):
+                    return stopped
                 return {"ok": False, "error_code": "superseded", "state": self.state,
                         "message": "启动已取消（有更新的操作生效）"}
             if _health_ok(self.spec.health_url) if self.spec.health_url \
                     else any(_port_alive(p) for p in self.spec.ports):
                 self.state = "running"
                 self.ready = True
-                self.backoff = BACKOFF_INITIAL
                 return {"ok": True, "state": "running", "pid": proc.pid,
                         "message": "已启动并就绪"}
             time.sleep(0.4)
@@ -306,9 +275,12 @@ class TargetController:
         if self.spec.name == "core" and _health_ok(self.spec.health_url):
             try:
                 base = self.spec.health_url.rsplit("/", 1)[0]
+                token = (data_root() / "manager" / "service_token.txt").read_text(
+                    encoding="utf-8").strip()
                 req = urllib.request.Request(base + "/system/core/shutdown-internal",
-                                             method="POST")
-                urllib.request.urlopen(req, timeout=3)
+                                             method="POST", headers={"X-Manager-Token": token})
+                with urllib.request.urlopen(req, timeout=3):
+                    pass
             except Exception:
                 pass
         # 以退出事实确认（复核 R2）
@@ -337,70 +309,29 @@ class TargetController:
         self.managed = False
         self.ready = False
         self.state = "stopped"
-        # 延迟清扫挣脱进程树的分离子进程（如 SnowLuma 内部看门狗：
-        # taskkill /T 抓不到 breakaway 子进程，它会在数秒后重启组件并弹终端）
-        match = str(self.spec.cwd)
-        for delay in (2.0, 4.0):
-            time.sleep(delay)
-            killed = kill_by_cmdline(match, exclude_pid=os.getpid())
-            if killed:
-                print(f"[ctl:{self.spec.name}] 清扫分离子进程: {killed}", flush=True)
         note = "" if not any(_port_alive(p) for p in self.spec.ports) \
             else "目标已退出，但端口仍被外部程序占用"
         return {"ok": True, "state": "stopped", "exited": exited,
                 "message": ("已停止" + (f"（{note}）" if note else ""))}
 
-    # ---------- 崩溃检测与恢复 ----------
+    # ---------- 被动退出检测：报告失败，不创建进程 ----------
 
-    def _check_crash(self) -> None:
+    def _check_exit(self) -> None:
         if self.proc is None or self.state == "stopping":
             return
         code = self.proc.poll()
         if code is None:
-            if self.state == "running" and not self.ready \
+            if self.state == "failed" and not self.ready \
                     and _health_ok(self.spec.health_url):
                 self.ready = True
-            if self.ready:
-                self.backoff = BACKOFF_INITIAL
+                self.state = "running"
+                self.last_error = ""
             return
         self.ready = False
         self.managed = False
         self.proc = None
-        if time.time() - self.started_at < CRASH_LOOP_WINDOW:
-            self.state = "failed"
-            self.last_error = f"启动后 {CRASH_LOOP_WINDOW}s 内退出 (exitcode={code})，暂停自动恢复"
-            self.pending_recovery = None
-            return
-        if self.desired != "running":
-            self.state = "stopped"
-            return
-        if not self.spec.auto_restart:
-            self.state = "failed"
-            self.last_error = f"意外退出 (exitcode={code})；该目标未启用自动恢复"
-            return
         self.state = "failed"
-        self.last_error = f"意外退出 (exitcode={code})，{self.backoff:.0f}s 后自动恢复"
-        self.pending_recovery = (self.epoch, time.time() + self.backoff)
-        self.backoff = min(self.backoff * 2, BACKOFF_MAX)
-
-    def _check_recovery(self) -> None:
-        if not self.pending_recovery:
-            return
-        epoch, run_at = self.pending_recovery
-        if time.time() < run_at:
-            return
-        self.pending_recovery = None
-        # 执行前重核：期间任何用户命令（epoch 变化）或意图变化都使恢复作废
-        if self.desired != "running" or epoch != self.epoch:
-            self.state = "stopped" if self.desired == "stopped" else self.state
-            print(f"[ctl:{self.spec.name}] 待执行恢复已作废（意图已变更）", flush=True)
-            return
-        if any(_port_alive(p) for p in self.spec.ports):
-            self.state = "conflict"
-            return
-        print(f"[ctl:{self.spec.name}] 自动恢复：重新启动", flush=True)
-        result = self._cmd_start(epoch, "running")
-        print(f"[ctl:{self.spec.name}] {result.get('message', '')}", flush=True)
+        self.last_error = f"进程已退出 (exitcode={code})；请手动启动"
 
 
 # ============================================================
@@ -410,21 +341,8 @@ class TargetController:
 class SupervisorService:
     def __init__(self) -> None:
         self.epoch_lock = threading.Lock()
-        self.desire_dir = log_root() / "desire"
-        self.desire_dir.mkdir(parents=True, exist_ok=True)
         self.specs, self.config_errors = build_specs_safe()
         self.controllers = {n: TargetController(s, self) for n, s in self.specs.items()}
-
-    def read_desire(self, name: str) -> str:
-        try:
-            value = (self.desire_dir / f"{name}.txt").read_text(encoding="utf-8").strip()
-            return value if value in ("running", "stopped", "restart") else "stopped"
-        except OSError:
-            return "stopped"
-
-    def write_desire(self, name: str, value: str) -> None:
-        self.desire_dir.mkdir(parents=True, exist_ok=True)
-        (self.desire_dir / f"{name}.txt").write_text(value, encoding="utf-8")
 
     def snapshots(self) -> list[TargetSnapshot]:
         return [c.snapshot() for c in self.controllers.values()]
