@@ -9,6 +9,7 @@ QuestAgent 非本基类子类的常规会话 agent（跨 run() 持久 messages�
 - 文件首条为 system prompt（提示词文档随链落盘，供前端按链查看全部提示词）。
 """
 
+from paths import data_root
 from pathlib import Path
 from utils.history_manager import HistoryManager
 
@@ -18,8 +19,7 @@ class Quest_HistoryManager(HistoryManager):
 
     def get_memory_dir(self) -> Path:
         """获取存储目录路径"""
-        project_root = Path(__file__).resolve().parent.parent.parent.parent
-        return project_root / 'memory' / 'quest'
+        return data_root() / 'memory' / 'quest'
 
     def get_file_prefix(self) -> str:
         """获取文件名前缀"""

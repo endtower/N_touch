@@ -22,6 +22,7 @@
 终结全部已登记实例的写入资格（归档后实例即弃，后续召唤重新创建）。
 """
 
+from paths import data_root
 from pathlib import Path
 from typing import Dict, List
 
@@ -37,8 +38,7 @@ class LightAgent_HistoryManager(HistoryManager):
 
     def get_memory_dir(self) -> Path:
         """获取存储目录路径（light agent 统一收敛到 memory/light_agent）。"""
-        project_root = Path(__file__).resolve().parent.parent.parent.parent
-        return project_root / 'memory' / 'light_agent'
+        return data_root() / 'memory' / 'light_agent'
 
     def get_file_prefix(self) -> str:
         """获取文件名前缀（由子类 history_prefix 决定，区分 agent 类型）。"""

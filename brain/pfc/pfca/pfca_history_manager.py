@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """PFCA模块上下文管理器：负责处理pfca模块的上下文存储和管理"""
 
+from paths import data_root
 from pathlib import Path
 from utils.logger import get_logger
 from utils.history_manager import HistoryManager
@@ -13,8 +14,7 @@ class PFCA_HistoryManager(HistoryManager):
     
     def get_memory_dir(self) -> Path:
         """获取存储目录路径"""
-        project_root = Path(__file__).resolve().parent.parent.parent.parent
-        return project_root / 'memory' / 'pfca'
+        return data_root() / 'memory' / 'pfca'
     
     def get_file_prefix(self) -> str:
         """获取文件名前缀"""
