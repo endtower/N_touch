@@ -5,6 +5,7 @@ import { Moon, Sunny, Connection, Document, Files, MagicStick, ChatDotRound, Aim
 import ChatWindow from './components/ChatWindow.vue'
 import InputArea from './components/InputArea.vue'
 import SessionList from './components/SessionList.vue'
+import ResizableSplit from './components/ResizableSplit.vue'
 import CreateSessionDialog from './components/CreateSessionDialog.vue'
 import TruckControlDialog from './components/TruckControlDialog.vue'
 import MemoryDialog from './components/MemoryDialog.vue'
@@ -236,7 +237,8 @@ const headerSubtitle = computed(() => {
 <template>
   <div class="app-shell">
     <ModeRail />
-    <SessionList @new-session="dialogVisible = true" />
+    <ResizableSplit storage-key="abyss:chat-sidebar" label="会话列表">
+      <template #sidebar><SessionList @new-session="dialogVisible = true" /></template>
 
     <div class="app-main">
       <header class="app-header">
@@ -356,6 +358,8 @@ const headerSubtitle = computed(() => {
         </div>
       </main>
     </div>
+
+    </ResizableSplit>
 
     <CreateSessionDialog
       v-model:visible="dialogVisible"

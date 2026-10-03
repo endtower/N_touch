@@ -753,11 +753,12 @@ async function loadSessionDebugList(): Promise<void> {
 function clearSessionDebugList() {
   state.sessionDebugList = []
   state.sessionDebugError = null
-  state.sessionDebugMessages = []
-  state.sessionDebugMessagesError = null
+  clearSessionDebugMessages()
 }
 
+let sessionDebugRequest = 0
 async function loadSessionDebugMessages(scope: string, id: string, limit = 50): Promise<void> {
+  const request = ++sessionDebugRequest
   state.sessionDebugMessagesLoading = true
   state.sessionDebugMessagesError = null
   try {
@@ -768,19 +769,21 @@ async function loadSessionDebugMessages(scope: string, id: string, limit = 50): 
       throw new Error(`HTTP ${res.status}: ${errBody || res.statusText}`)
     }
     const data = (await res.json()) as SessionMessagesResponse
+    if (request !== sessionDebugRequest) return
     state.sessionDebugMessages = data.messages ?? []
     state.sessionDebugTotal = data.total ?? (state.sessionDebugMessages.length)
     state.sessionDebugMessagesError = null
   } catch (e: any) {
+    if (request !== sessionDebugRequest) return
     state.sessionDebugMessagesError = e?.message || String(e)
-    state.sessionDebugMessages = []
-    state.sessionDebugTotal = 0
   } finally {
-    state.sessionDebugMessagesLoading = false
+    if (request === sessionDebugRequest) state.sessionDebugMessagesLoading = false
   }
 }
 
 function clearSessionDebugMessages() {
+  ++sessionDebugRequest
+  state.sessionDebugMessagesLoading = false
   state.sessionDebugMessages = []
   state.sessionDebugMessagesError = null
   state.sessionDebugTotal = 0
