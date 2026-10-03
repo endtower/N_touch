@@ -10,18 +10,33 @@ public partial class App : Application
     private static System.Windows.Forms.NotifyIcon? _tray;
     private static MainWindow? _main;
 
+    private static EventWaitHandle? _wake;
+
     protected override void OnStartup(StartupEventArgs e)
     {
-        _single = new Mutex(true, "AbyssLauncher_SingleInstance", out var createdNew);
+        // 单实例 + 唤醒（V01）：命名 EventWaitHandle 兼任互斥与唤醒信号。
+        // 重复双击：已有实例收到信号后把窗口带回前台。
+        _wake = new EventWaitHandle(false, EventResetMode.AutoReset,
+                                    "AbyssLauncher_Wake", out var createdNew);
         if (!createdNew)
         {
-            MessageBox.Show("Abyss 桌面启动管理器已在运行（托盘图标在右下角）。",
-                "Abyss 管家", MessageBoxButton.OK, MessageBoxImage.Information);
+            EventWaitHandle.OpenExisting("AbyssLauncher_Wake").Set();
             Shutdown(0);
             return;
         }
         base.OnStartup(e);
         InitTray();
+        // 唤醒监听线程：收到信号 → 主线程把窗口带回前台
+        var wakeThread = new Thread(() =>
+        {
+            while (_wake is not null)
+            {
+                _wake.WaitOne();
+                Dispatcher.Invoke(ShowMainWindow);
+            }
+        });
+        wakeThread.IsBackground = true;
+        wakeThread.Start();
         _main = new MainWindow();
         _main.Show();
     }
