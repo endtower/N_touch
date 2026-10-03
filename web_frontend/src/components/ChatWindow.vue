@@ -84,7 +84,8 @@ function onScroll() {
 }
 
 function jumpToBottom() {
-  virtualizer.value.scrollToEnd({ behavior: 'smooth' })
+  // Variable-height messages are measured while scrolling. Smooth scrolling can stop at an obsolete estimate.
+  virtualizer.value.scrollToEnd()
   showJumpToBottom.value = false
 }
 

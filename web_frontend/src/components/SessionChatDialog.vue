@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, nextTick } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   ChatDotRound,
   Refresh,
@@ -8,6 +8,8 @@ import {
 } from '@element-plus/icons-vue'
 import type { WebSession, FileMessage } from '../types'
 import { chat } from '../stores/chat'
+import ResizableSplit from './ResizableSplit.vue'
+import { useReadingScroll } from '../composables/useReadingScroll'
 
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [v: boolean] }>()
@@ -23,6 +25,10 @@ const selectedSession = ref<WebSession | null>(null)
 // 展开原始 JSON 的消息 id 集合 (Set 无法直接作为响应式 key, 用 Record)
 const rawOpen = ref<Record<string, boolean>>({})
 const listRef = ref<HTMLElement | null>(null)
+const splitRef = ref<InstanceType<typeof ResizableSplit> | null>(null)
+const reading = useReadingScroll(listRef)
+const { following } = reading
+let resetPosition = false
 
 // =====================================================================
 // 会话列表
@@ -50,9 +56,15 @@ const privateCount = computed(() => sessions.value.filter(s => s.scope === 'priv
 const groupCount = computed(() => sessions.value.filter(s => s.scope === 'group').length)
 
 function selectSession(s: WebSession) {
+  const changed = selectedSession.value?.scope !== s.scope || selectedSession.value?.session_id !== s.session_id
+  if (changed) {
+    chat.clearSessionDebugMessages()
+    resetPosition = true
+    rawOpen.value = {}
+  }
   selectedSession.value = s
-  rawOpen.value = {}
   chat.loadSessionDebugMessages(s.scope, s.session_id, VIEW_LIMIT)
+  splitRef.value?.closeOnNarrow()
 }
 
 // =====================================================================
@@ -83,7 +95,9 @@ function isRawOpen(id?: string): boolean {
 
 function toggleRaw(id?: string) {
   if (!id) return
+  const position = reading.capture()
   rawOpen.value[id] = !rawOpen.value[id]
+  void reading.restore(position)
 }
 
 // 图片加载失败时隐藏, 防止出现破图占位
@@ -98,14 +112,16 @@ function loadAllMessages() {
 }
 
 async function scrollToBottom() {
-  await nextTick()
-  if (listRef.value) {
-    listRef.value.scrollTop = listRef.value.scrollHeight
-  }
+  await reading.latest()
 }
 
 // 消息加载完成后滚动到底部, 直接看到最新几条
-watch(messageCount, () => scrollToBottom())
+watch(messages, () => {
+  const position = reading.capture()
+  const mode = resetPosition && messages.value.length > 0 ? 'bottom' : 'preserve'
+  if (messages.value.length > 0) resetPosition = false
+  void reading.restore(position, mode)
+}, { flush: 'pre' })
 
 function scopeBadge(scope?: string): string {
   return scope === 'group' ? '群聊' : '私聊'
@@ -136,7 +152,7 @@ watch(() => props.visible, (v) => {
     align-center
     :show-close="false"
     @update:model-value="(v: boolean) => emit('update:visible', v)"
-    class="session-chat-dialog"
+    class="session-chat-dialog reading-dialog"
   >
     <template #header>
       <div class="schat-header">
@@ -161,7 +177,8 @@ watch(() => props.visible, (v) => {
       </div>
     </template>
 
-    <div class="schat-body">
+    <ResizableSplit ref="splitRef" class="schat-body" storage-key="abyss:records-sidebar" label="会话列表" :initial-width="300">
+      <template #sidebar>
       <!-- 左：会话列表 -->
       <aside class="schat-list">
         <div class="schat-scope-tabs">
@@ -222,6 +239,7 @@ watch(() => props.visible, (v) => {
           </button>
         </div>
       </aside>
+      </template>
 
       <!-- 右：消息记录 -->
       <section class="schat-messages">
@@ -238,19 +256,22 @@ watch(() => props.visible, (v) => {
             <span class="schat-msg-name">{{ selectedSession.session_name || selectedSession.user_name }}</span>
             <span class="schat-msg-count">共 {{ messageTotal }} 条 · 显示最新 {{ messageCount }} 条</span>
             <span v-if="selectedMessagesError" class="schat-msg-error">{{ selectedMessagesError }}</span>
+            <span class="schat-msg-count">{{ following ? '跟随最新' : '保留阅读位置' }}</span>
+            <el-button size="small" @click="scrollToBottom">最新</el-button>
+            <el-button v-if="!isAllLoaded" :icon="Refresh" size="small" :loading="chat.state.sessionDebugMessagesLoading" @click="loadAllMessages">加载全部</el-button>
           </div>
 
-          <div ref="listRef" class="schat-msg-list">
+          <div ref="listRef" class="schat-msg-list reading-scroll" @scroll.passive="reading.onScroll">
             <div v-if="chat.state.sessionDebugMessagesLoading && !messages.length" class="schat-msg-hint">加载中…</div>
             <div v-else-if="messages.length === 0" class="schat-msg-hint">该会话没有消息</div>
             <div v-else-if="!isAllLoaded" class="schat-topbar">
               <span>已省略更早的 {{ messageTotal - messageCount }} 条消息</span>
-              <el-button :icon="Refresh" size="small" @click="loadAllMessages">加载全部</el-button>
             </div>
             <article
               v-for="m in messages"
               :key="m.message_id || m.timestamp + '-' + (m.content_text || '').slice(0, 8)"
               class="chat-record"
+              :data-scroll-key="m.message_id || m.timestamp + '-' + (m.content_text || '').slice(0, 8)"
             >
               <div class="chat-record-head">
                 <span class="chat-record-sender">{{ m.user_name || m.user_id || 'system' }}</span>
@@ -274,6 +295,7 @@ watch(() => props.visible, (v) => {
                   alt="image"
                   loading="lazy"
                   @error="hideBrokenImg"
+                  @load="following && scrollToBottom()"
                 />
               </div>
 
@@ -282,13 +304,12 @@ watch(() => props.visible, (v) => {
           </div>
         </template>
       </section>
-    </div>
+    </ResizableSplit>
   </el-dialog>
 </template>
 
 <style scoped>
-.session-chat-dialog :deep(.el-dialog__header) { padding: 14px 20px !important; }
-.session-chat-dialog :deep(.el-dialog__body) { padding: 0 !important; }
+:global(.session-chat-dialog .el-dialog__header) { padding: 14px 20px !important; }
 
 .schat-header {
   display: flex;
@@ -297,6 +318,7 @@ watch(() => props.visible, (v) => {
   width: 100%;
   gap: 16px;
   padding-right: 8px;
+  flex-wrap: wrap;
 }
 .schat-header-left {
   display: flex;
@@ -322,19 +344,18 @@ watch(() => props.visible, (v) => {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
 .schat-body {
-  display: flex;
-  height: 80vh;
-  min-height: 600px;
+  height: min(76vh, calc(100dvh - 160px));
   border-top: 1px solid var(--border-1);
   border-bottom: 1px solid var(--border-1);
 }
 
 /* ---- 左列表 ---- */
 .schat-list {
-  flex: 0 0 340px;
+  flex: 1;
   display: flex;
   flex-direction: column;
   background: var(--bg-surface);
@@ -469,6 +490,7 @@ watch(() => props.visible, (v) => {
   flex-direction: column;
   background: var(--bg-app);
   min-width: 0;
+  min-height: 0;
 }
 .schat-msg-empty {
   flex: 1 1 auto;
@@ -517,6 +539,7 @@ watch(() => props.visible, (v) => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-height: 0;
 }
 .schat-msg-hint {
   display: flex;
@@ -606,7 +629,7 @@ watch(() => props.visible, (v) => {
   padding: 0 12px 8px;
 }
 .chat-record-images img {
-  max-width: 180px;
+  max-width: min(180px, 100%);
   max-height: 180px;
   border-radius: 6px;
   border: 1px solid var(--border-2);
