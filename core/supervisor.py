@@ -16,6 +16,7 @@ manager.py（CLI 管家）与 adapt/web/system_api.py（网页系统面板）共
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
