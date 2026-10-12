@@ -435,8 +435,8 @@ function onCreateSubmit(payload: { user_id: string; user_name: string; switch_to
   padding: 8px 10px;
   margin: 6px 0 2px;
   border-radius: var(--radius-sm);
-  background: rgba(230, 162, 60, 0.08);
-  border: 1px solid rgba(230, 162, 60, 0.18);
+  background: color-mix(in srgb, var(--tag-warning) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tag-warning) 18%, transparent);
   font-size: 11.5px;
   line-height: 1.45;
 }

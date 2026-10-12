@@ -26,18 +26,12 @@ async function onDelete(sid: string, name: string, ev: Event) {
   <aside class="session-list">
     <div class="session-list-header">
       <div class="brand">
-        <span class="brand-dot"></span>
-        <span>会话</span>
+        <span class="brand-title">会话</span>
+        <span v-if="chat.state.sessions.length" class="brand-count">{{ chat.state.sessions.length }}</span>
       </div>
-      <el-button
-        :icon="Plus"
-        size="small"
-        type="primary"
-        round
-        @click="emit('new-session')"
-      >
-        新建
-      </el-button>
+      <button class="header-icon-btn" title="新建会话（需要 Core 运行）" :disabled="!chat.state.connected" @click="emit('new-session')">
+        <el-icon :size="15"><Plus /></el-icon>
+      </button>
     </div>
 
     <div v-if="chat.state.sessions.length === 0" class="empty">
@@ -69,6 +63,7 @@ async function onDelete(sid: string, name: string, ev: Event) {
         </div>
         <button
           class="session-delete"
+          :disabled="!chat.state.connected"
           title="删除会话"
           @click="onDelete(s.session_id, s.session_name || s.user_name, $event)"
         >

@@ -449,14 +449,14 @@ function shortTime(iso?: string | null): string {
 .tk-bar-fill {
   height: 100%;
   border-radius: var(--radius-sm);
-  background: linear-gradient(90deg, var(--accent), #818cf8);
+  background: linear-gradient(90deg, var(--accent), var(--accent-hover));
   transition: width 0.3s ease;
 }
 .tk-bar-fill.fill-agent {
-  background: linear-gradient(90deg, var(--accent-2), #34d399);
+  background: linear-gradient(90deg, var(--tag-success), color-mix(in srgb, var(--tag-success) 72%, white));
 }
 .tk-bar-fill.fill-model {
-  background: linear-gradient(90deg, var(--warn), #fbbf24);
+  background: linear-gradient(90deg, var(--tag-warning), color-mix(in srgb, var(--tag-warning) 72%, white));
 }
 .tk-bar-pct {
   text-align: right;
@@ -519,7 +519,7 @@ function shortTime(iso?: string | null): string {
 .tk-chart-col-bar {
   width: 70%;
   border-radius: 4px 4px 0 0;
-  background: linear-gradient(180deg, #818cf8, var(--accent));
+  background: linear-gradient(180deg, var(--accent-hover), var(--accent));
   transition: height 0.3s ease;
 }
 .tk-chart-col-label {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Moon, Sunny, Connection, Document, Files, MagicStick, ChatDotRound, Aim, DataAnalysis, Monitor } from '@element-plus/icons-vue'
+import { Moon, Sunny, Connection, Document, Files, MagicStick, ChatDotRound, Aim, DataAnalysis, Monitor, Van } from '@element-plus/icons-vue'
 import ChatWindow from './components/ChatWindow.vue'
 import InputArea from './components/InputArea.vue'
 import SessionList from './components/SessionList.vue'
@@ -16,9 +16,9 @@ import SessionChatDialog from './components/SessionChatDialog.vue'
 import TokenStatsDialog from './components/TokenStatsDialog.vue'
 import SystemPanelDialog from './components/SystemPanelDialog.vue'
 import IdentityBar from './components/IdentityBar.vue'
-import ModeRail from './components/ModeRail.vue'
 import TestPresetDialog from './components/TestPresetDialog.vue'
 import { channel } from './api/channel'
+import { hostTheme } from './api/hostTheme'
 import { chat } from './stores/chat'
 import type { ServerMessage } from './types'
 
@@ -32,6 +32,60 @@ const sessionChatDialogVisible = ref(false)
 const testPresetDialogVisible = ref(false)
 const tokenStatsOpen = ref(false)
 const systemPanelOpen = ref(false)
+const coreReady = ref(false)
+const managerAvailable = ref(false)
+const coreError = ref('')
+const coreActionPending = ref(false)
+let consolePoll: number | null = null
+let consolePolling = false
+let disposed = false
+
+async function pollConsole() {
+  if (consolePolling || disposed) return
+  consolePolling = true
+  try {
+    const res = await fetch('/console/status')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    if (disposed) return
+    managerAvailable.value = data.manager_available === true
+    coreReady.value = data.core_ready === true
+    coreError.value = data.core?.last_error || ''
+    if (coreReady.value) {
+      channel.connect()
+    } else {
+      channel.disconnect()
+      chat.clearActivity()
+      chat.setGlobalState({ session_id: null, chat_purpose: null, event_chain_active: null })
+      for (const sid of Object.keys(chat.state.thinkingBySession)) chat.state.thinkingBySession[sid] = false
+      if (chat.state.sessions.length === 0) {
+        await chat.loadSessionDebugList()
+        if (!disposed && !chat.state.sessionDebugError) chat.setSessions(chat.state.sessionDebugList)
+      }
+    }
+  } catch {
+    if (disposed) return
+    coreReady.value = false
+    managerAvailable.value = false
+    channel.disconnect()
+  } finally {
+    consolePolling = false
+  }
+}
+
+async function controlCore(action: 'start' | 'stop') {
+  coreActionPending.value = true
+  try {
+    const res = await fetch(`/console/core/${action}`, { method: 'POST' })
+    const data = await res.json()
+    if (!res.ok || !data.ok) throw new Error(data.message || data.error || '操作失败')
+    await pollConsole()
+  } catch (e: any) {
+    ElMessage.error(e?.message || String(e))
+  } finally {
+    coreActionPending.value = false
+  }
+}
 const theme = ref<'light' | 'dark'>(
   (localStorage.getItem('abyss-theme') as 'light' | 'dark') || 'dark',
 )
@@ -41,11 +95,6 @@ const enabledTruckCount = computed(() => chat.state.trucks.filter((t: { enabled:
 function openTruckDialog() {
   truckDialogVisible.value = true
   // 拉取最新 truck 状态 (可能 WS 还没好, 不影响弹窗打开)
-  try {
-    chat.refreshTrucks()
-  } catch (e) {
-    // ignore: 弹窗打开就行, 后端会在 WS ready 后再处理
-  }
 }
 
 function applyTheme() {
@@ -59,10 +108,20 @@ function toggleTheme() {
   theme.value = theme.value === 'light' ? 'dark' : 'light'
   applyTheme()
   localStorage.setItem('abyss-theme', theme.value)
+  // 内嵌在启动器里时把选择同步过去；独立浏览器中是空操作
+  hostTheme.push(theme.value)
 }
 
 onMounted(() => {
   applyTheme()
+  // 跟随启动器的主题。这里只应用、不回推，避免两边来回回声。
+  // 独立浏览器里 hostTheme.listen 是空操作。
+  hostTheme.listen((t) => {
+    if (t === theme.value) return
+    theme.value = t
+    applyTheme()
+    localStorage.setItem('abyss-theme', t)
+  })
 })
 
 let unsubMsg: (() => void) | null = null
@@ -87,10 +146,15 @@ onMounted(() => {
       chat.loadHistory(chat.state.activeSessionId)
     }
   })
-  channel.connect()
+  void pollConsole()
+  void chat.refreshTrucks().catch(() => {})
+  consolePoll = window.setInterval(pollConsole, 3000)
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  if (consolePoll !== null) window.clearInterval(consolePoll)
+  channel.disconnect()
   unsubMsg?.()
   unsubStatus?.()
 })
@@ -236,7 +300,6 @@ const headerSubtitle = computed(() => {
 
 <template>
   <div class="app-shell">
-    <ModeRail />
     <ResizableSplit storage-key="abyss:chat-sidebar" label="会话列表">
       <template #sidebar><SessionList @new-session="dialogVisible = true" /></template>
 
@@ -244,6 +307,10 @@ const headerSubtitle = computed(() => {
       <header class="app-header">
         <div style="display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;">
           <h1 style="flex-shrink: 0;">Abyss</h1>
+          <span class="header-sub" style="white-space: nowrap; flex-shrink: 0;"
+            :title="coreError || 'Core 停止时仍可查看上下文、记录和配置 Truck'">{{ coreReady ? 'Core 运行中' : managerAvailable ? 'Core 未运行' : '管理服务未连接' }}</span>
+          <el-button v-if="managerAvailable" size="small" :loading="coreActionPending"
+            @click="controlCore(coreReady ? 'stop' : 'start')">{{ coreReady ? '停止 Core' : '启动 Core' }}</el-button>
           <span class="header-divider"></span>
           <span class="header-sub" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ headerSubtitle }}</span>
         </div>
@@ -251,7 +318,7 @@ const headerSubtitle = computed(() => {
           <button
             class="truck-toggle-btn"
             title="Truck 控制"
-            @click="truckDialogVisible = true; chat.refreshTrucks()"
+            @click="openTruckDialog"
           >
             <el-icon :size="14"><Van /></el-icon>
             <span class="truck-toggle-label">Truck</span>
@@ -346,14 +413,15 @@ const headerSubtitle = computed(() => {
           />
           <!-- 一个大区域: 底色 + 上面身份信息 + 下面输入框 (输入框自带边框, 即"框") -->
           <div class="input-region">
-            <IdentityBar :session="chat.activeSession.value" />
+            <IdentityBar v-if="chat.state.connected" :session="chat.activeSession.value" />
+            <div v-else class="header-sub" style="padding: 8px 12px;">Core 未运行，当前显示已保存的记录。</div>
             <InputArea @send="onSend" :disabled="!chat.canSend.value" />
           </div>
         </template>
         <div v-else class="no-session">
           <div class="no-session-icon">💬</div>
           <div class="no-session-text">
-            从左侧选一个会话，或点「新建」开始
+            {{ coreReady ? '从左侧选一个会话，或点「新建」开始' : 'Core 未运行。可以查看上下文、会话记录、调整布局和配置 Truck。' }}
           </div>
         </div>
       </main>

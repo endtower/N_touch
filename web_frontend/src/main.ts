@@ -4,6 +4,8 @@ import 'element-plus/dist/index.css'
 import * as ElIcons from '@element-plus/icons-vue'
 
 import App from './App.vue'
+// 设计令牌必须先于组件样式加载：style.css 的兼容映射引用它定义的变量
+import './tokens.css'
 import './style.css'
 
 const app = createApp(App)

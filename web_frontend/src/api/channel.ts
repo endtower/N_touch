@@ -56,6 +56,20 @@ class WebChannelClient {
     this.ws.send(JSON.stringify(msg))
   }
 
+  /** Core 停止时保留页面，取消消息通道的自动重连。 */
+  disconnect() {
+    if (this.reconnectTimer != null) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    if (this.ws) {
+      this.ws.onclose = null
+      this.ws.close()
+      this.ws = null
+    }
+    this.notifyStatus(false)
+  }
+
   /** 主动断开并重连（切换存储库后重新拉取会话/历史用）。 */
   reconnect() {
     if (this.reconnectTimer != null) {

@@ -1,0 +1,67 @@
+<!-- 此文件由 design/build_tokens.py 从 design/tokens.json 生成，请勿手改。 -->
+<!-- light 主题颜色令牌 -->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=System.Runtime">
+
+  <!-- 颜色（Color 供渐变/动画用，Brush 供直接引用）-->
+  <Color x:Key="ColorBgApp">#FFFFFFFF</Color>
+  <SolidColorBrush x:Key="BrushBgApp" Color="#FFFFFFFF"/>
+  <Color x:Key="ColorBgSunken">#FFF7F7F8</Color>
+  <SolidColorBrush x:Key="BrushBgSunken" Color="#FFF7F7F8"/>
+  <Color x:Key="ColorBgSurface">#FFFBFBFC</Color>
+  <SolidColorBrush x:Key="BrushBgSurface" Color="#FFFBFBFC"/>
+  <Color x:Key="ColorBgElevated">#FFF3F3F5</Color>
+  <SolidColorBrush x:Key="BrushBgElevated" Color="#FFF3F3F5"/>
+  <Color x:Key="ColorBgRaised">#FFFFFFFF</Color>
+  <SolidColorBrush x:Key="BrushBgRaised" Color="#FFFFFFFF"/>
+  <Color x:Key="ColorBgHover">#FFEEEFF0</Color>
+  <SolidColorBrush x:Key="BrushBgHover" Color="#FFEEEFF0"/>
+  <Color x:Key="ColorBgActive">#FFE9EAEA</Color>
+  <SolidColorBrush x:Key="BrushBgActive" Color="#FFE9EAEA"/>
+  <Color x:Key="ColorBgPeak">#FFE4E4E7</Color>
+  <SolidColorBrush x:Key="BrushBgPeak" Color="#FFE4E4E7"/>
+  <Color x:Key="ColorBgOverlay">#52000000</Color>
+  <SolidColorBrush x:Key="BrushBgOverlay" Color="#52000000"/>
+  <Color x:Key="ColorBorderSubtle">#FFECECEE</Color>
+  <SolidColorBrush x:Key="BrushBorderSubtle" Color="#FFECECEE"/>
+  <Color x:Key="ColorBorderDefault">#FFE4E4E7</Color>
+  <SolidColorBrush x:Key="BrushBorderDefault" Color="#FFE4E4E7"/>
+  <Color x:Key="ColorBorderStrong">#FFD4D4D8</Color>
+  <SolidColorBrush x:Key="BrushBorderStrong" Color="#FFD4D4D8"/>
+  <Color x:Key="ColorTextPrimary">#FF1A1A1A</Color>
+  <SolidColorBrush x:Key="BrushTextPrimary" Color="#FF1A1A1A"/>
+  <Color x:Key="ColorTextSecondary">#FF626365</Color>
+  <SolidColorBrush x:Key="BrushTextSecondary" Color="#FF626365"/>
+  <Color x:Key="ColorTextTertiary">#FF89898D</Color>
+  <SolidColorBrush x:Key="BrushTextTertiary" Color="#FF89898D"/>
+  <Color x:Key="ColorTextDisabled">#FFB4B4B8</Color>
+  <SolidColorBrush x:Key="BrushTextDisabled" Color="#FFB4B4B8"/>
+  <Color x:Key="ColorTextOnAccent">#FFFFFFFF</Color>
+  <SolidColorBrush x:Key="BrushTextOnAccent" Color="#FFFFFFFF"/>
+  <Color x:Key="ColorAccent">#FFFA063E</Color>
+  <SolidColorBrush x:Key="BrushAccent" Color="#FFFA063E"/>
+  <Color x:Key="ColorAccentHover">#FFE00538</Color>
+  <SolidColorBrush x:Key="BrushAccentHover" Color="#FFE00538"/>
+  <Color x:Key="ColorAccentActive">#FFC00430</Color>
+  <SolidColorBrush x:Key="BrushAccentActive" Color="#FFC00430"/>
+  <Color x:Key="ColorAccentSoft">#1AFA063E</Color>
+  <SolidColorBrush x:Key="BrushAccentSoft" Color="#1AFA063E"/>
+  <Color x:Key="ColorAccentRing">#47FA063E</Color>
+  <SolidColorBrush x:Key="BrushAccentRing" Color="#47FA063E"/>
+  <Color x:Key="ColorTagInfo">#FF0B7FD4</Color>
+  <SolidColorBrush x:Key="BrushTagInfo" Color="#FF0B7FD4"/>
+  <Color x:Key="ColorTagSuccess">#FF4C9A16</Color>
+  <SolidColorBrush x:Key="BrushTagSuccess" Color="#FF4C9A16"/>
+  <Color x:Key="ColorTagWarning">#FFC46A00</Color>
+  <SolidColorBrush x:Key="BrushTagWarning" Color="#FFC46A00"/>
+  <Color x:Key="ColorTagDanger">#FFE00A18</Color>
+  <SolidColorBrush x:Key="BrushTagDanger" Color="#FFE00A18"/>
+  <Color x:Key="ColorTagSpecial">#FFD6337A</Color>
+  <SolidColorBrush x:Key="BrushTagSpecial" Color="#FFD6337A"/>
+  <Color x:Key="ColorTooltipBg">#FF1A1A1A</Color>
+  <SolidColorBrush x:Key="BrushTooltipBg" Color="#FF1A1A1A"/>
+  <Color x:Key="ColorTooltipFg">#FFFFFFFF</Color>
+  <SolidColorBrush x:Key="BrushTooltipFg" Color="#FFFFFFFF"/>
+
+</ResourceDictionary>

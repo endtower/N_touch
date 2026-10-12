@@ -3,5 +3,16 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              ShutdownMode="OnExplicitShutdown">
     <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- 顺序有意义：
+                     Shared   = 形态/字体（端无关）
+                     Controls = 控件样式与模板
+                     颜色本   = Dark.xaml，运行时由 ThemeManager 换成 Light.xaml -->
+                <ResourceDictionary Source="Theme/Shared.xaml"/>
+                <ResourceDictionary Source="Theme/Controls.xaml"/>
+                <ResourceDictionary Source="Theme/Dark.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
     </Application.Resources>
 </Application>

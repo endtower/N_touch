@@ -294,7 +294,7 @@ async function onDelete(s: Sticker) {
   align-items: center;
   justify-content: center;
   gap: 2px;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--bg-overlay);
   opacity: 0;
   transition: opacity 0.15s ease;
 }

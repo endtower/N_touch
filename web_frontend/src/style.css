@@ -1,72 +1,62 @@
 /* ============================================================
-   Abyss Web · 现代化主题 (Linear 风格)
-   - CSS 变量驱动, 可一键切深色
-   - Inter + 系统字体栈
-   - 8px 栅格
+   Abyss Web · 布局与组件样式（CMF 版）
+   - 颜色 / 圆角 / 字体：全部来自 tokens.css（源：design/tokens.json）
+   - 本文件只负责布局、排版、组件外观
+   - 主题：:root = 暗色（默认）；[data-theme="light"] = 亮色
+   - 形态语言：锐边 + 斜切 + 圆角（见 .chamfer-* 工具类）
    ============================================================ */
 
+/* ------------------------------------------------------------
+   旧变量名 → 新令牌 的兼容映射
+   style.css 与各组件的 scoped 样式里历史上大量使用 --text-1 这类
+   名字（数百处）。这里一次性把它们指向新令牌，避免同一轮改上千处。
+   新写的代码请直接用 tokens.css 里的语义令牌（--text-primary 等）。
+   ------------------------------------------------------------ */
 :root {
-  /* —— 色板 (light) —— */
-  --bg-app:      #fafafa;
-  --bg-surface:  #ffffff;
-  --bg-subtle:   #f5f5f5;
-  --bg-hover:    #f0f0f0;
+  --radius: var(--radius-md);
 
-  --text-1:      #0a0a0a;
-  --text-2:      #525252;
-  --text-3:      #a3a3a3;
-  --text-inv:    #ffffff;
+  --bg-subtle: var(--bg-elevated);
 
-  --border-1:    #e5e5e5;
-  --border-2:    #d4d4d4;
+  --text-1: var(--text-primary);
+  --text-2: var(--text-secondary);
+  --text-3: var(--text-tertiary);
+  --text-inv: var(--text-on-accent);
 
-  --accent:      #5b5bd6;          /* 主色调: indigo */
-  --accent-soft: #eef2ff;
-  --accent-2:    #10b981;          /* 副色: emerald (LLM) */
-  --accent-2-soft: #ecfdf5;
-  --warn:        #f59e0b;
-  --danger:      #ef4444;
+  --border-1: var(--border-subtle);
+  --border-2: var(--border-strong);
 
-  /* —— 尺寸 —— */
-  --radius-sm: 6px;
-  --radius:    10px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 18px;
+  /* 副色（LLM / 成功）映射到标签绿 */
+  --accent-2: var(--tag-success);
+  --accent-2-soft: color-mix(in srgb, var(--tag-success) 16%, transparent);
 
-  /* —— 阴影 —— */
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-3: 0 8px 24px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
-
-  /* —— 字体 —— */
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
-               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, "Cascadia Code", monospace;
+  --warn: var(--tag-warning);
+  --danger: var(--tag-danger);
 }
 
-/* —— 深色模式 —— */
-[data-theme="dark"] {
-  --bg-app:      #0a0a0a;
-  --bg-surface:  #171717;
-  --bg-subtle:   #1f1f1f;
-  --bg-hover:    #262626;
+/* 注：暗色不再是"覆盖项"，而是 tokens.css 里的 :root 默认值。
+   亮色在 [data-theme="light"] 覆盖。原来这里的 [data-theme="dark"]
+   色板已全部移除，避免两处真值。 */
 
-  --text-1:      #fafafa;
-  --text-2:      #a3a3a3;
-  --text-3:      #525252;
-
-  --border-1:    #262626;
-  --border-2:    #404040;
-
-  --accent:      #818cf8;
-  --accent-soft: #1e1b4b;
-  --accent-2:    #34d399;
-  --accent-2-soft: #064e3b;
-
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-3: 0 8px 24px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+/* ------------------------------------------------------------
+   斜切角：CMF 形态语言（锐边 / 斜切 / 圆角）
+   注意 clip-path 会连描边一起裁掉，所以斜切元素不要直接用 border，
+   用「底色 + inset 内阴影」或外面再包一层来表现描边。
+   ------------------------------------------------------------ */
+.chamfer-tl {
+  clip-path: polygon(var(--chamfer-md) 0, 100% 0, 100% 100%, 0 100%, 0 var(--chamfer-md));
+}
+.chamfer-tr {
+  clip-path: polygon(0 0, calc(100% - var(--chamfer-md)) 0, 100% var(--chamfer-md), 100% 100%, 0 100%);
+}
+.chamfer-bl {
+  clip-path: polygon(0 0, 100% 0, 100% 100%, var(--chamfer-md) 100%, 0 calc(100% - var(--chamfer-md)));
+}
+.chamfer-br {
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - var(--chamfer-md)), calc(100% - var(--chamfer-md)) 100%, 0 100%);
+}
+/* 对角切：左上 + 右下，最贴近 CMF 卡片的形态 */
+.chamfer-diag {
+  clip-path: polygon(var(--chamfer-md) 0, 100% 0, 100% calc(100% - var(--chamfer-md)), calc(100% - var(--chamfer-md)) 100%, 0 100%, 0 var(--chamfer-md));
 }
 
 /* ============================================================
@@ -130,7 +120,7 @@ button {
   display: flex;
   flex-direction: column;
   background: var(--bg-surface);
-  border-right: 1px solid var(--border-1);
+  /* 与主区的分隔靠 bg-surface / bg-app 色阶, 不画硬边线 (参考 Codex) */
   min-height: 0;
 }
 
@@ -138,12 +128,50 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
-  font-size: 13px;
+  padding: 16px 14px 12px 16px;
+  flex: 0 0 auto;
+}
+
+.brand-title {
+  font-size: 15px;
   font-weight: 600;
   color: var(--text-1);
-  letter-spacing: -0.01em;
-  flex: 0 0 auto;
+  letter-spacing: -0.015em;
+}
+
+.brand-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  background: var(--bg-elevated);
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  font-weight: 600;
+  border-radius: var(--radius-pill);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 侧栏右上角的图标按钮（Codex 式：无边框，悬停抬底） */
+.header-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.header-icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .session-list .empty {
@@ -518,19 +546,19 @@ button {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
   color: var(--text-1);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-3);
   transition: background 0.15s ease, transform 0.15s ease;
   z-index: 5;
 }
 .jump-to-bottom-btn:hover {
-  background: var(--bg-surface-hover, rgba(127, 127, 127, 0.15));
+  background: var(--bg-hover);
   transform: translateY(-1px);
 }
 .jump-fade-enter-active,
@@ -616,15 +644,21 @@ button {
 }
 
 .msg-avatar.user {
-  background: var(--accent);
+  background: var(--bg-elevated);
+  color: var(--text-2);
+  border: 1px solid var(--border-1);
 }
 
 .msg-avatar.assistant {
-  background: var(--accent-2);
+  background: var(--bg-elevated);
+  color: var(--text-2);
+  border: 1px solid var(--border-1);
 }
 
 .msg-avatar.other {
-  background: var(--text-2);
+  background: var(--bg-elevated);
+  color: var(--text-2);
+  border: 1px solid var(--border-1);
 }
 
 .msg-body {
@@ -676,11 +710,13 @@ button {
   letter-spacing: -0.005em;
 }
 
+/* 气泡按同色系强度分层身份: 我 25% 红 > LLM 12.5% 红 > 其他人为表面底色。
+   暗色下呈暗红, 亮色下呈浅粉; 文字用主题前景色保证对比 */
 .msg-row.user .msg-bubble,
 .msg-row.mine .msg-bubble {
-  background: var(--accent);
-  color: var(--text-inv);
-  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  color: var(--text-1);
+  border-color: transparent;
 }
 
 /* mine 时与 user 一致: body 靠右对齐, 不显示 head */
@@ -693,7 +729,7 @@ button {
 }
 
 .msg-row.assistant .msg-bubble {
-  background: var(--accent-2-soft);
+  background: color-mix(in srgb, var(--accent) 12.5%, transparent);
   border-color: transparent;
 }
 
@@ -721,13 +757,6 @@ button {
   border: 1px solid var(--border-1);
   cursor: default;
   vertical-align: baseline;
-}
-
-.msg-row.user .inline-tag,
-.msg-row.mine .inline-tag {
-  background: rgba(255, 255, 255, 0.2);
-  color: rgba(255, 255, 255, 0.9);
-  border-color: rgba(255, 255, 255, 0.3);
 }
 
 .inline-tag.tag-image { color: var(--accent); }
@@ -848,7 +877,7 @@ button {
 
 .input-area:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(91, 91, 214, 0.1), var(--shadow-1);
+  box-shadow: 0 0 0 3px var(--accent-ring), var(--shadow-1);
 }
 
 /* ============================================================
@@ -929,8 +958,8 @@ button {
   position: absolute;
   top: 2px;
   right: 2px;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
+  background: var(--bg-overlay);
+  color: var(--text-on-accent);
   border: none;
   border-radius: 50%;
   width: 18px;
@@ -1042,11 +1071,7 @@ html.dark .msg-bubble .inline-tag {
 }
 
 .el-overlay {
-  background-color: rgba(0, 0, 0, 0.55) !important;
-}
-
-html[data-theme="dark"] .el-overlay {
-  background-color: rgba(0, 0, 0, 0.7) !important;
+  background-color: var(--bg-overlay) !important;
 }
 
 /* ============================================================
@@ -1104,8 +1129,8 @@ html[data-theme="dark"] .el-overlay {
   color: var(--text-inv) !important;
 }
 .el-button.el-button--danger.is-plain {
-  background: rgba(239, 68, 68, 0.1) !important;
-  border-color: rgba(239, 68, 68, 0.5) !important;
+  background: color-mix(in srgb, var(--tag-danger) 10%, transparent) !important;
+  border-color: color-mix(in srgb, var(--tag-danger) 50%, transparent) !important;
   color: var(--danger) !important;
 }
 .el-button.el-button--danger.is-plain:hover {
@@ -1165,12 +1190,12 @@ html[data-theme="dark"] .el-overlay {
   border-color: transparent !important;
 }
 .el-tag.el-tag--warning {
-  background: rgba(245, 158, 11, 0.12) !important;
+  background: color-mix(in srgb, var(--tag-warning) 12%, transparent) !important;
   color: var(--warn) !important;
   border-color: transparent !important;
 }
 .el-tag.el-tag--danger {
-  background: rgba(239, 68, 68, 0.12) !important;
+  background: color-mix(in srgb, var(--tag-danger) 12%, transparent) !important;
   color: var(--danger) !important;
   border-color: transparent !important;
 }
@@ -1180,27 +1205,10 @@ html[data-theme="dark"] .el-overlay {
   border-color: transparent !important;
 }
 
-/* 黑夜下: 让背景更"深面板"质感, 文字更亮一档避免糊在一起 */
-html[data-theme="dark"] .el-tag.el-tag--primary {
-  background: rgba(129, 140, 248, 0.15) !important;
-  color: #a5b4fc !important;
-}
-html[data-theme="dark"] .el-tag.el-tag--success {
-  background: rgba(52, 211, 153, 0.15) !important;
-  color: #6ee7b7 !important;
-}
-html[data-theme="dark"] .el-tag.el-tag--warning {
-  background: rgba(245, 158, 11, 0.18) !important;
-  color: #fcd34d !important;
-}
-html[data-theme="dark"] .el-tag.el-tag--danger {
-  background: rgba(239, 68, 68, 0.18) !important;
-  color: #fca5a5 !important;
-}
-html[data-theme="dark"] .el-tag.el-tag--info {
-  background: var(--bg-subtle) !important;
-  color: var(--text-2) !important;
-}
+/* 注：这里原来有一整段 html[data-theme="dark"] .el-tag--* 覆盖，写死了旧色板的
+   indigo/emerald/amber 十六进制值。现在标签颜色全部走令牌，令牌本身随主题翻转，
+   那段覆盖既冗余又与新色板冲突，已删除。
+   （亮色下的标签色在 design/tokens.json 里单独压暗，保证白底上的对比度） */
 
 /* ============================================================
    Element Plus Select (新结构 .el-select__wrapper)
@@ -1321,9 +1329,10 @@ html[data-theme="dark"] .el-tag.el-tag--info {
    滚动条 (现代极简)
    ============================================================ */
 
+/* 悬浮胶囊滚动条 (参考 Codex): 透明 border 内缩, 视觉为悬浮圆角细条 */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
@@ -1331,12 +1340,15 @@ html[data-theme="dark"] .el-tag.el-tag--info {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border-1);
+  background: var(--border-2);
+  background-clip: padding-box;
+  border: 3px solid transparent;
   border-radius: 999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--border-2);
+  background: var(--text-3);
+  background-clip: padding-box;
 }
 
 /* ============================================================

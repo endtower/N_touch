@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Document, Refresh, ArrowDown, Connection, Fold, Expand, Share } from '@element-plus/icons-vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { Document, Refresh, ArrowDown, CaretRight, Connection, Fold, Expand, Share } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { ChainFileItem, ChainInfo, ChainsResponse, ContextEntry, ContextFileContent } from '../types'
 import { channel } from '../api/channel'
@@ -134,6 +134,7 @@ onBeforeUnmount(() => {
   ++lifecycle
   ++loadToken
   stopPolling()
+  if (spyRaf) cancelAnimationFrame(spyRaf)
   unsubscribeContextUpdated()
   if (wsDebounceTimer !== null) clearTimeout(wsDebounceTimer)
 })
@@ -269,6 +270,69 @@ function formatChainTitle(cid: string): string {
   return m[3] ? `${date} ${time} · ${m[3]}` : `${date} ${time}`
 }
 
+// ===== 事件链按日分组折叠: 默认只展开当天, 其余日期折叠 =====
+function localDateKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// 链 ID -> 日期 (event_chain_20261005_220515_ab12 -> 2026-10-05); 不匹配返回 ''
+function chainDayKey(chainId: string): string {
+  const s = chainId.startsWith('event_chain_') ? chainId.slice('event_chain_'.length) : chainId
+  const m = s.match(/^(\d{8})_/)
+  if (!m) return ''
+  const d = m[1]
+  return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`
+}
+
+const expandedDays = ref<Set<string>>(new Set())
+let expandedDaysReady = false
+
+const dayGroups = computed(() => {
+  const groups: { day: string; chains: ChainInfo[]; files: number }[] = []
+  const byDay = new Map<string, { day: string; chains: ChainInfo[]; files: number }>()
+  for (const c of chains.value) {
+    const day = chainDayKey(c.chain_id) || '未标注'
+    let g = byDay.get(day)
+    if (!g) { g = { day, chains: [], files: 0 }; byDay.set(day, g); groups.push(g) }
+    g.chains.push(c)
+    g.files += c.files.length
+  }
+  return groups
+})
+
+function dayLabel(day: string): string {
+  if (day === '未标注') return '未标注'
+  const todayKey = localDateKey(new Date())
+  if (day === todayKey) return '今天'
+  const yest = new Date()
+  yest.setDate(yest.getDate() - 1)
+  if (day === localDateKey(yest)) return '昨天'
+  return day
+}
+
+function isDayExpanded(day: string): boolean {
+  return expandedDays.value.has(day)
+}
+
+function toggleDay(day: string) {
+  const next = new Set(expandedDays.value)
+  if (next.has(day)) next.delete(day)
+  else next.add(day)
+  expandedDays.value = next
+}
+
+// 首批链数据到位: 只展开当天; 当天没链则展开最新有文件的一天 (与自动选中一致)
+watch(chainsData, (d) => {
+  if (!d || expandedDaysReady) return
+  expandedDaysReady = true
+  const todayKey = localDateKey(new Date())
+  const hasToday = d.chains.some(c => chainDayKey(c.chain_id) === todayKey)
+  if (hasToday) { expandedDays.value = new Set([todayKey]); return }
+  const firstWithFiles = d.chains.find(c => c.files.length > 0)
+  const fallback = firstWithFiles ? chainDayKey(firstWithFiles.chain_id) : ''
+  expandedDays.value = new Set([fallback || todayKey])
+})
+
 function selectChainFile(chain: string, item: ChainFileItem) {
   if (currentSource.value?.chain === chain && currentSource.value?.name === item.name) return
   void loadFile(chain, item.name)
@@ -357,6 +421,7 @@ function toggleReasoning(idx: string) {
   const position = reading.capture()
   reasoningOverride.value[idx] = !isReasoningCollapsed(idx)
   void reading.restore(position)
+  measureSteps()
 }
 
 function toggleAllReasoning() {
@@ -364,6 +429,7 @@ function toggleAllReasoning() {
   reasoningCollapsed.value = !reasoningCollapsed.value
   reasoningOverride.value = {}
   void reading.restore(position)
+  measureSteps()
 }
 
 function assistantReasoning(e: ContextEntry): string {
@@ -392,8 +458,8 @@ function toolArgsPreview(argsJson: string): string {
 function roleMeta(role: string) {
   const r = (role || '').toLowerCase()
   if (r === 'system') return { label: 'SYSTEM', bg: 'var(--accent-soft)', color: 'var(--accent)' }
-  if (r === 'assistant') return { label: 'ASSISTANT', bg: 'rgba(52, 211, 153, 0.18)', color: 'var(--accent-2)' }
-  if (r === 'user') return { label: 'USER (PROMPT)', bg: 'rgba(245, 158, 11, 0.18)', color: 'var(--warn)' }
+  if (r === 'assistant') return { label: 'ASSISTANT', bg: 'color-mix(in srgb, var(--tag-success) 18%, transparent)', color: 'var(--accent-2)' }
+  if (r === 'user') return { label: 'USER (PROMPT)', bg: 'color-mix(in srgb, var(--tag-warning) 18%, transparent)', color: 'var(--warn)' }
   return { label: (role || 'UNKNOWN').toUpperCase(), bg: 'var(--bg-subtle)', color: 'var(--text-3)' }
 }
 
@@ -404,6 +470,82 @@ function close() {
 function scrollToBottom() {
   void reading.latest()
 }
+
+// ===== 中列简要历史: 折叠展示全部步骤, 点击行跳到右列详情 =====
+const activeStepKey = ref('')
+let stepTops: { key: string; top: number }[] = []
+let spyRaf = 0
+
+// 缩略文本: 压平空白后按长度截断
+function outlineSnippet(text: string | null | undefined, max = 64): string {
+  const t = (text ?? '').replace(/\s+/g, ' ').trim()
+  return t.length > max ? `${t.slice(0, max)}…` : t
+}
+
+function toolNamesOf(entry: ContextEntry): string {
+  return (entry.tool_calls ?? []).map(tc => tc.function.name).join(' · ')
+}
+
+// 大纲徽章用短标签 (详情里的 roleMeta 仍用长标签)
+function roleShort(role: string): string {
+  const r = (role || '').toLowerCase()
+  if (r === 'assistant') return 'LLM'
+  if (r === 'user') return 'USER'
+  if (r === 'system') return 'SYS'
+  if (r === 'tool') return 'TOOL'
+  return (role || '?').toUpperCase()
+}
+
+function outlineAnchors(): HTMLElement[] {
+  return listRef.value ? Array.from(listRef.value.querySelectorAll<HTMLElement>('[data-outline-key]')) : []
+}
+
+// 缓存各步骤锚点在滚动内容里的纵坐标 (折叠思考链/轮询刷新后重测)
+function measureSteps() {
+  requestAnimationFrame(() => {
+    const el = listRef.value
+    if (!el) { stepTops = []; return }
+    const base = el.getBoundingClientRect().top
+    const top = el.scrollTop
+    stepTops = outlineAnchors()
+      .map(n => ({ key: n.dataset.outlineKey ?? '', top: n.getBoundingClientRect().top - base + top }))
+      .filter(s => s.key)
+      .sort((a, b) => a.top - b.top)
+    spyStep()
+  })
+}
+
+// 滚动定位: 二分找视口顶部当前所处的步骤, 高亮左侧对应行
+function spyStep() {
+  if (!stepTops.length) { activeStepKey.value = ''; return }
+  const el = listRef.value
+  if (!el) return
+  const threshold = el.scrollTop + 72
+  let lo = 0
+  let hi = stepTops.length - 1
+  let ans = 0
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (stepTops[mid].top <= threshold) { ans = mid; lo = mid + 1 } else hi = mid - 1
+  }
+  activeStepKey.value = stepTops[ans].key
+}
+
+function onDetailScroll() {
+  reading.onScroll()
+  if (!spyRaf) spyRaf = requestAnimationFrame(() => { spyRaf = 0; spyStep() })
+}
+
+function jumpToStep(key: string) {
+  const el = listRef.value
+  if (!el) return
+  const anchor = outlineAnchors().find(n => n.dataset.outlineKey === key)
+  if (!anchor) return
+  el.scrollTop += anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - 10
+  activeStepKey.value = key
+}
+
+watch([parsedEntries, () => props.visible], () => { void nextTick(); measureSteps() })
 </script>
 
 <template>
@@ -444,18 +586,23 @@ function scrollToBottom() {
       <template #sidebar>
       <!-- 左侧: 事件链文件夹树 (一个任务链 = 一个文件夹, 内含各 agent 的上下文文件) -->
       <aside class="ctx-sidebar">
-        <div class="ctx-tab-desc">
-          按任务链文件夹查看一个任务涉及的全部 agent 上下文（写入即落位, 归档不重命名）;
-          <span class="ctx-desc-live">进行中</span>的链随 LLM 运行实时刷新; 底部"未关联"为链外写入与历史归档
-        </div>
-
+        <!-- 第一列: 上下文文件列表 (选文件) -->
         <div class="ctx-file-list">
-          <!-- 每个任务链一个文件夹组 -->
-          <div
-            v-for="c in chains"
-            :key="c.chain_id"
-            :class="['ctx-chain-group', { active: currentSource?.chain === c.chain_id }]"
-          >
+          <!-- 按日折叠: 默认只展开当天 -->
+          <div v-for="g in dayGroups" :key="g.day" class="ctx-day-group">
+            <button type="button" class="ctx-day-head" @click="toggleDay(g.day)">
+              <el-icon :size="11" class="ctx-day-chevron" :class="{ open: isDayExpanded(g.day) }"><CaretRight /></el-icon>
+              <span class="ctx-day-title">{{ dayLabel(g.day) }}</span>
+              <span v-if="dayLabel(g.day) !== g.day" class="ctx-day-sub">{{ g.day }}</span>
+              <span class="ctx-day-count">{{ g.files }}</span>
+            </button>
+            <div v-show="isDayExpanded(g.day)" class="ctx-day-body">
+              <!-- 每个任务链一个文件夹组 -->
+              <div
+                v-for="c in g.chains"
+                :key="c.chain_id"
+                :class="['ctx-chain-group', { active: currentSource?.chain === c.chain_id }]"
+              >
             <div class="ctx-chain-head">
               <el-icon :size="13" :color="c.is_active ? 'var(--accent-2)' : 'var(--text-3)'">
                 <Share />
@@ -484,6 +631,8 @@ function scrollToBottom() {
               <span class="ctx-chain-file-size">{{ fileSize(f.size) }}</span>
             </div>
             <div v-if="!c.files.length" class="ctx-chain-file-empty">（该链暂无上下文文件）</div>
+              </div>
+            </div>
           </div>
 
           <!-- 未关联区: 链外写入 + legacy 迁移, 平铺展示, 不归属任何链 -->
@@ -515,12 +664,74 @@ function scrollToBottom() {
       </aside>
       </template>
 
-      <!-- 右侧: 内容 -->
-      <main class="ctx-main">
+      <!-- 第二列 + 第三列: 简要历史 | 详情查看 (再嵌套一层分栏) -->
+      <ResizableSplit
+        class="ctx-outline-split"
+        storage-key="abyss:context-outline"
+        label="简要历史"
+        :initial-width="250"
+        :min-width="200"
+        :max-width="420"
+        :content-min-width="380"
+      >
+        <template #sidebar>
+          <aside class="ctx-outline">
+            <div class="ctx-outline-head">
+              <span class="ctx-outline-title">简要历史</span>
+              <span class="ctx-outline-file" :title="currentFile?.name">{{ currentFile?.name }}</span>
+            </div>
+            <div class="ctx-outline-list">
+            <template v-for="(item, idx) in parsedEntries" :key="item.key">
+              <!-- 单条: user / system / 无 tool_call 的 assistant / 孤立 tool -->
+              <button
+                v-if="item.kind === 'single'"
+                type="button"
+                :class="['ctx-step', { active: activeStepKey === item.key }]"
+                @click="jumpToStep(item.key)"
+              >
+                <span class="ctx-step-idx">{{ idx + 1 }}</span>
+                <span
+                  class="ctx-step-badge"
+                  :style="{ background: roleMeta(item.entry.role).bg, color: roleMeta(item.entry.role).color }"
+                >{{ roleShort(item.entry.role) }}</span>
+                <span class="ctx-step-text">{{ outlineSnippet(item.entry.content) }}</span>
+              </button>
+              <!-- 配对: LLM 行 (工具名) + 每个 Tool 返回一行 (缩略) -->
+              <template v-else>
+                <button
+                  type="button"
+                  :class="['ctx-step', { active: activeStepKey === item.key + '::llm' }]"
+                  @click="jumpToStep(item.key + '::llm')"
+                >
+                  <span class="ctx-step-idx">{{ idx + 1 }}</span>
+                  <span class="ctx-step-badge llm">LLM</span>
+                  <span class="ctx-step-text">🔧 {{ outlineSnippet(toolNamesOf(item.assistant), 56) }}</span>
+                </button>
+                <button
+                  v-for="t in item.tools"
+                  :key="t.tool_call_id"
+                  type="button"
+                  :class="['ctx-step', 'sub', { active: activeStepKey === item.key + '::tool:' + t.tool_call_id }]"
+                  @click="jumpToStep(item.key + '::tool:' + t.tool_call_id)"
+                >
+                  <span class="ctx-step-idx"></span>
+                  <span class="ctx-step-badge tool">TOOL</span>
+                  <span class="ctx-step-tool-name">{{ t.name || '?' }}</span>
+                  <span class="ctx-step-text">{{ outlineSnippet(t.content, 44) }}</span>
+                </button>
+              </template>
+            </template>
+            <div v-if="!parsedEntries.length" class="ctx-file-empty">（空上下文）</div>
+            </div>
+          </aside>
+        </template>
+
+        <!-- 第三列: 详情 (现在的信息展示, 垂直单列) -->
+        <main class="ctx-main">
         <div v-if="loadingContent && !currentFile" class="ctx-loading reading-state">加载中…</div>
         <div v-else-if="currentError && !currentFile" class="ctx-error reading-state">读取失败: {{ currentError }}</div>
         <div v-else-if="!currentFile" class="ctx-empty reading-state">从左侧选一个文件查看</div>
-        <div v-show="currentFile" ref="listRef" class="ctx-list reading-scroll" @scroll.passive="reading.onScroll">
+        <div v-show="currentFile" ref="listRef" class="ctx-list reading-scroll" @scroll.passive="onDetailScroll">
           <template v-if="currentFile">
           <div class="ctx-file-banner">
             <div>
@@ -557,6 +768,7 @@ function scrollToBottom() {
               v-if="item.kind === 'single'"
               class="ctx-entry"
               :data-scroll-key="item.key"
+              :data-outline-key="item.key"
             >
               <div class="ctx-entry-header">
                 <span
@@ -591,7 +803,7 @@ function scrollToBottom() {
               </div>
               <div class="ctx-interaction-body">
                 <!-- 左: LLM 侧 -->
-                <section class="ctx-side ctx-side-llm">
+                <section class="ctx-side ctx-side-llm" :data-outline-key="item.key + '::llm'">
                   <div class="ctx-side-header">
                     <span
                       class="ctx-role-badge"
@@ -667,6 +879,7 @@ function scrollToBottom() {
                       v-for="t in item.tools"
                       :key="t.tool_call_id"
                       class="ctx-tool-response"
+                      :data-outline-key="item.key + '::tool:' + t.tool_call_id"
                     >
                       <div class="ctx-side-header">
                         <span
@@ -686,7 +899,8 @@ function scrollToBottom() {
           </template>
           </template>
         </div>
-      </main>
+        </main>
+      </ResizableSplit>
     </ResizableSplit>
   </el-dialog>
 </template>
@@ -738,16 +952,16 @@ function scrollToBottom() {
   height: 7px;
   border-radius: 50%;
   background: var(--accent-2);
-  box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.6);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--tag-success) 60%, transparent);
   animation: ctx-poll-pulse 2s ease-in-out infinite;
 }
 @keyframes ctx-poll-pulse {
   0%, 100% {
-    box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--tag-success) 55%, transparent);
     transform: scale(1);
   }
   50% {
-    box-shadow: 0 0 0 6px rgba(52, 211, 153, 0);
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--tag-success) 0%, transparent);
     transform: scale(1.15);
   }
 }
@@ -762,25 +976,11 @@ function scrollToBottom() {
 .ctx-sidebar {
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border-1);
+  /* ctx-body 已是 bg-app, 与 sidebar 的 bg-surface 靠色阶分隔, 不画硬边线 */
   background: var(--bg-surface);
   min-height: 0;
   flex: 1;
   min-width: 0;
-}
-.ctx-tab-desc {
-  margin: 6px 12px 10px 12px;
-  padding: 8px 10px;
-  background: var(--bg-subtle);
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  color: var(--text-3);
-  line-height: 1.5;
-}
-.ctx-desc-live {
-  color: var(--accent-2);
-  font-weight: 600;
 }
 .ctx-file-list {
   flex: 1 1 auto;
@@ -796,6 +996,53 @@ function scrollToBottom() {
   font-size: 12px;
   color: var(--text-3);
 }
+
+/* —— 按日折叠 —— */
+.ctx-day-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+.ctx-day-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s;
+}
+.ctx-day-head:hover { background: var(--bg-subtle); }
+.ctx-day-chevron { color: var(--text-3); transition: transform 0.15s; }
+.ctx-day-chevron.open { transform: rotate(90deg); }
+.ctx-day-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.ctx-day-sub { flex-shrink: 0; font-size: 10px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.ctx-day-count {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-3);
+  background: var(--bg-subtle);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+.ctx-day-body { display: flex; flex-direction: column; gap: 2px; }
 
 /* —— 任务链分组 —— */
 .ctx-chain-group {
@@ -897,6 +1144,112 @@ function scrollToBottom() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* —— 大纲模式: 选中文件后的折叠步骤列表 —— */
+.ctx-outline {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+}
+.ctx-outline-split { min-height: 0; }
+.ctx-outline-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-1);
+  flex-shrink: 0;
+  min-width: 0;
+}
+.ctx-outline-title {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.ctx-outline-file {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx-outline-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 8px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ctx-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.ctx-step:hover { background: var(--bg-subtle); }
+.ctx-step.active { background: var(--bg-subtle); box-shadow: inset 2px 0 0 var(--accent); }
+.ctx-step.sub { padding-left: 14px; }
+.ctx-step-idx {
+  flex-shrink: 0;
+  width: 16px;
+  font-size: 9.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.ctx-step-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 999px;
+}
+.ctx-step-badge.llm {
+  background: color-mix(in srgb, var(--tag-success) 18%, transparent);
+  color: var(--accent-2);
+}
+.ctx-step-badge.tool {
+  background: var(--bg-subtle);
+  color: var(--text-3);
+}
+.ctx-step-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+}
+.ctx-step-tool-name {
+  flex-shrink: 0;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
 }
 
 /* —— 右侧主区 —— */
@@ -1052,9 +1405,10 @@ function scrollToBottom() {
   font-variant-numeric: tabular-nums;
 }
 
+/* 详情垂直单列: LLM (思考链/调用) 在上, 各 Tool 响应依次在下 */
 .ctx-interaction-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   min-height: 0;
 }
 .ctx-side {
@@ -1065,11 +1419,11 @@ function scrollToBottom() {
   gap: 10px;
 }
 .ctx-side-llm {
-  border-right: 1px solid var(--border-1);
-  background: rgba(129, 140, 248, 0.04);  /* 淡紫底, 标识 LLM 侧 */
+  border-bottom: 1px solid var(--border-1);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);  /* 淡强调色底, 标识 LLM 侧 */
 }
 .ctx-side-tool {
-  background: rgba(52, 211, 153, 0.04);   /* 淡绿底, 标识 Tool 侧 */
+  background: color-mix(in srgb, var(--tag-success) 5%, transparent);   /* 淡绿底, 标识 Tool 侧 */
 }
 .ctx-side-header {
   display: flex;
@@ -1212,8 +1566,6 @@ function scrollToBottom() {
 }
 
 @container context-pane (max-width: 700px) {
-  .ctx-interaction-body { grid-template-columns: minmax(0, 1fr); }
-  .ctx-side-llm { border-right: 0; border-bottom: 1px solid var(--border-1); }
   .ctx-interaction-header { flex-wrap: wrap; gap: 6px; }
   .ctx-list { padding: 12px; }
 }

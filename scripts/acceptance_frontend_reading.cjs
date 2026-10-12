@@ -41,6 +41,8 @@ async function sameAnchor(locator, before) {
     const page = await browser.newPage({ viewport: { width: 1280, height: 820 } })
     const errors = []
     page.on('pageerror', error => errors.push(error.message))
+    await page.route('**/console/status', route => route.fulfill({ json: { manager_available: false, core_ready: true } }))
+    await page.route('**/console/trucks', route => route.fulfill({ json: { trucks: [], startup_paused: false, core_ready: true } }))
     await page.route('**/context/**', async route => {
       const url = new URL(route.request().url())
       if (url.pathname === '/context/chains') return route.fulfill({ json: { chains: [{ chain_id: 'validation-chain', is_active: true,
@@ -134,9 +136,13 @@ async function sameAnchor(locator, before) {
     await check('pointer resize clamps sidebar and keeps content usable', async () => {
       const handle = dialog.getByRole('separator')
       const bounds = await handle.boundingBox()
+      const beforeWidth = Number(await handle.getAttribute('aria-valuenow'))
+      const hit = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.className,
+        { x: bounds.x + 3, y: bounds.y + 120 })
       await page.mouse.move(bounds.x + 3, bounds.y + 120); await page.mouse.down()
       await page.mouse.move(bounds.x + 160, bounds.y + 120); await page.mouse.up()
-      assert.ok(Number(await handle.getAttribute('aria-valuenow')) > 350)
+      assert.ok(Number(await handle.getAttribute('aria-valuenow')) > 350,
+        JSON.stringify({ beforeWidth, afterWidth: await handle.getAttribute('aria-valuenow'), hit, bounds }))
       assert.ok((await dialog.locator('.ctx-main').boundingBox()).width >= 360)
     })
     await check('tool cards stack in narrow content and keep collapse state', async () => {

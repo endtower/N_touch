@@ -60,6 +60,7 @@ public class ManagerClient
         public bool Managed { get; set; }
         public string LastError { get; set; } = "";
         public double? UptimeSec { get; set; }
+        public bool? OneBotConnected { get; set; }
     }
 
     public static Target ParseTarget(JsonElement el)
@@ -80,6 +81,8 @@ public class ManagerClient
             Managed = el.TryGetProperty("managed", out var m) && m.GetBoolean(),
             LastError = el.TryGetProperty("last_error", out var le) ? le.GetString() ?? "" : "",
             UptimeSec = up,
+            OneBotConnected = el.TryGetProperty("onebot_connected", out var connected)
+                && connected.ValueKind is JsonValueKind.True or JsonValueKind.False ? connected.GetBoolean() : null,
         };
     }
 }

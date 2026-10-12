@@ -110,6 +110,8 @@ export interface TruckState {
   description: string
   category: string
   enabled: boolean
+  configured_enabled?: boolean
+  runtime_state?: string
   cycle_time: number | null
 }
 
@@ -417,6 +419,14 @@ export interface MemorySocialUpdateResponse {
   updated: boolean
 }
 
+// 删除社交实体响应 (DELETE /memory/social/{entity_type}/{entity_id})
+export interface MemorySocialDeleteResponse {
+  deleted: boolean
+  entity_type: 'character' | 'group' | 'fuzzy_role'
+  entity_id: string
+  cascaded_fuzzy_roles: number
+}
+
 // ============================================================
 // 记忆经验/嘱托 (bequests 表, 列表式查看)
 // ============================================================
@@ -456,19 +466,15 @@ export interface ExperienceDeleteResponse {
 // 任务管理 (quest 长期任务, 列表式查看 / 编辑 / 删除; 后端 /events/*)
 // ============================================================
 
-export type TaskStatus = 'active' | 'completed'
+export type TaskStatus = 'active' | 'expired'
 
 export interface TaskInfo {
   id: string
   task_id: string
   title: string
-  brief: string           // 简要总结 (前因与目的)
-  conclusion: string      // 已获取的、用于汇报的结论
-  stage: string           // 当前阶段 (还需要做什么)
-  notes: string           // 任务笔记 (quest 推进时整列清理并重填)
+  context: string         // 要传递给下次启动时的上下文 (目的/进展/线索/下次要做什么)
   status: TaskStatus
   next_occurrence?: string | null
-  deadline?: string | null
   start_time?: string | null
   end_time?: string | null
   updated_at?: string | null
@@ -596,12 +602,36 @@ export interface AmyPresence {
   debts: AmyDebtEntry[]
 }
 
+// 决策侧情感最近五条变动（两轴共用一份历史，按发生顺序）
+export interface AmyFeedbackHistoryEntry {
+  axis: 'competence' | 'recognition'
+  label: string
+  delta: number
+  before: number
+  after: number
+  title: string
+  reason: string
+  time: number
+}
+
+// 决策侧双轴：value=归属感，competence_value=效能感（默认 50，范围 0-100）
+export interface AmyDecisionFeedback {
+  schema_version: number
+  value: number              // 归属感
+  competence_value: number   // 效能感
+  competence_name: string
+  recognition_name: string
+  prompt: string
+  history: AmyFeedbackHistoryEntry[]
+}
+
 export interface AmyState {
   initialized: boolean
   fetched_at?: number
   mood: AmyMood
   amy_description: string
   presence: AmyPresence
+  decision_feedback?: AmyDecisionFeedback
   thoughts: {
     all_active_count: number
     all_active: AmyThought[]

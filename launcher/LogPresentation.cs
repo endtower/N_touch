@@ -27,7 +27,7 @@ public static class LogPresentation
                 ?? Path.Combine(folder, "service.out.log");
             files = [output, output.Replace(".out.log", ".err.log", StringComparison.Ordinal)];
         }
-        else if (source is "core" or "snowluma")
+        else if (source is "core" or "snowluma" or "ingress")
         {
             files = [Path.Combine(folder, source + ".out.log")];
             if (source == "core" && (!File.Exists(files[0]) || new FileInfo(files[0]).Length == 0))
@@ -69,12 +69,12 @@ public static class LogPresentation
         return string.Join("\n", text.Replace("\r\n", "\n").Split('\n').TakeLast(1000));
     }
 
-    public static IReadOnlyList<Segment> Colourise(string line)
+    public static IReadOnlyList<Segment> Colourise(string line, string defaultColour = "#CBD5E1")
     {
         if (line.Contains('\x1B'))
         {
             var segments = new List<Segment>();
-            var colour = "#CBD5E1";
+            var colour = defaultColour;
             var underline = false;
             string? background = null;
             var offset = 0;
@@ -87,10 +87,10 @@ public static class LogPresentation
                     for (int i = 0; i < codes.Length; i++)
                     {
                         var c = codes[i];
-                        if (c == 0) { colour = "#CBD5E1"; underline = false; background = null; }
+                        if (c == 0) { colour = defaultColour; underline = false; background = null; }
                         else if (c == 4) underline = true;
                         else if (c == 24) underline = false;
-                        else if (c == 39) colour = "#CBD5E1";
+                        else if (c == 39) colour = defaultColour;
                         else if (c == 49) background = null;
                         else if (c is >= 40 and <= 47) background = Colours[c - 40];
                         else if (c is >= 100 and <= 107) background = Colours[c - 100];
@@ -119,11 +119,13 @@ public static class LogPresentation
         }
         var match = Logger.Match(line);
         var level = match.Success ? match.Groups[3].Value : "";
-        var levelColour = level switch { "DEBUG" => "#22D3EE", "WARNING" => "#FBBF24", "ERROR" or "CRITICAL" => "#F87171", _ => "#CBD5E1" };
+        // 级别配色属于"日志内容"语义，保持固定（DEBUG 青 / WARN 黄 / ERROR 红）；
+        // 只有中性前景色跟主题走，由调用方通过 defaultColour 传入。
+        var levelColour = level switch { "DEBUG" => "#22D3EE", "WARNING" => "#FBBF24", "ERROR" or "CRITICAL" => "#F87171", _ => defaultColour };
         if (match.Success) return [new(match.Groups[1].Value + " ", "#34D399"),
             new(match.Groups[2].Value + " ", level == "CRITICAL" ? "#FFFFFF" : levelColour, false, level == "CRITICAL" ? "#DC2626" : null),
             new(match.Groups[4].Value, "#F87171", true), new(match.Groups[5].Value, levelColour)];
         return [new(line, line.StartsWith("ERROR:") || line.StartsWith("Traceback") ? "#F87171"
-            : line.StartsWith("WARNING:") ? "#FBBF24" : "#CBD5E1")];
+            : line.StartsWith("WARNING:") ? "#FBBF24" : defaultColour)];
     }
 }

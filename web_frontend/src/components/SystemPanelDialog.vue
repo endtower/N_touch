@@ -143,7 +143,7 @@ async function stopSnowluma() {
 
 async function restartCore() {
   try {
-    await ElMessageBox.confirm('重启 Core？页面会断开几秒，respawn 工人将在端口释放后拉起新实例。', '确认', { type: 'warning' })
+    await ElMessageBox.confirm('重启 Core？实时消息会暂时断开，管理页面和历史记录仍可使用。', '确认', { type: 'warning' })
   } catch { return }
   acting.value = true
   try {
@@ -154,12 +154,12 @@ async function restartCore() {
 
 async function shutdownCore() {
   try {
-    await ElMessageBox.confirm('优雅关闭 Core？SystemCore 将走完整收尾流程，之后需要 manager.py 或托盘重新启动。', '确认', { type: 'warning' })
+    await ElMessageBox.confirm('停止 Core？管理页面仍可使用，也可以从页面再次启动。', '确认', { type: 'warning' })
   } catch { return }
   acting.value = true
   try {
     await post('/system/core/shutdown')
-    ElMessage.warning('Core 关闭中……重新启动请用 manager.py 或托盘')
+    ElMessage.success('Core 已停止，管理页面仍可使用')
   } catch (e: any) { ElMessage.error(`关闭失败: ${e?.message || e}`) } finally { acting.value = false }
 }
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
-import { MagicStick, Refresh, ChatLineSquare, Sunny, Lightning, Clock, Plus, Edit, Delete, Star } from '@element-plus/icons-vue'
+import { MagicStick, Refresh, ChatLineSquare, Sunny, Lightning, Clock, Plus, Edit, Delete, TrendCharts, Connection } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { AmyState, AmyThought, AmyActEntry, AmyFinalEvaluationEntry, AmyDescriptionBand, NotesResponse } from '../types'
 
@@ -264,9 +264,9 @@ function durationShort(sec: number) {
 // 用 Math.abs() 把 -100..+100 映射到 0..100, 然后按强度上色.
 function moodTone(v: number) {
   const abs = Math.abs(v)
-  if (abs >= 60) return { color: 'var(--danger)', bg: 'rgba(239, 68, 68, 0.18)', label: '极度' }
-  if (abs >= 40) return { color: 'var(--warn)',    bg: 'rgba(245, 158, 11, 0.18)', label: '偏强' }
-  if (abs >= 20) return { color: 'var(--accent-2)', bg: 'rgba(52, 211, 153, 0.18)', label: '正向' }
+  if (abs >= 60) return { color: 'var(--danger)', bg: 'color-mix(in srgb, var(--tag-danger) 18%, transparent)', label: '极度' }
+  if (abs >= 40) return { color: 'var(--warn)',    bg: 'color-mix(in srgb, var(--tag-warning) 18%, transparent)', label: '偏强' }
+  if (abs >= 20) return { color: 'var(--accent-2)', bg: 'color-mix(in srgb, var(--tag-success) 18%, transparent)', label: '正向' }
   if (abs >= 10) return { color: 'var(--text-2)', bg: 'var(--bg-subtle)', label: '微弱' }
   return { color: 'var(--text-3)', bg: 'var(--bg-subtle)', label: '平静' }
 }
@@ -277,7 +277,7 @@ function actCategoryLabel(c: AmyThought['category'] | string) {
     case 'evaluation':   return { label: '评价',     color: 'var(--accent)' }
     case 'self_action':  return { label: '自身行为', color: 'var(--warn)' }
     case 'system':       return { label: '系统',     color: 'var(--text-3)' }
-    case 'final':        return { label: '最终评价', color: '#a78bfa' }
+    case 'final':        return { label: '最终评价', color: 'var(--tag-special)' }
     default:             return { label: '未知',     color: 'var(--text-3)' }
   }
 }
@@ -317,14 +317,17 @@ function gaugeWidth(v: number) {
   return Math.min(Math.abs(v), MOOD_RANGE) / MOOD_RANGE * 100
 }
 
-// 存在感：0-100 直接显示（非 NE/DA 绝对值语义），默认 50
-function presenceTone(v: number) {
-  if (v >= 60) return { color: 'var(--accent-2)', bg: 'rgba(52, 211, 153, 0.18)', label: '充盈' }
-  if (v >= 40) return { color: 'var(--warn)',    bg: 'rgba(245, 158, 11, 0.18)', label: '正常' }
-  if (v >= 20) return { color: 'var(--danger)',  bg: 'rgba(239, 68, 68, 0.18)', label: '较低' }
-  return { color: 'var(--danger)',                bg: 'rgba(239, 68, 68, 0.32)', label: '贫乏' }
+// 决策侧双轴（效能感 / 归属感）：0-100 直接显示（非 NE/DA 绝对值语义），默认 50
+function axisTone(v: number) {
+  if (v >= 60) return { color: 'var(--accent-2)', bg: 'color-mix(in srgb, var(--tag-success) 18%, transparent)', label: '充足' }
+  if (v >= 40) return { color: 'var(--warn)',    bg: 'color-mix(in srgb, var(--tag-warning) 18%, transparent)', label: '平稳' }
+  if (v >= 20) return { color: 'var(--danger)',  bg: 'color-mix(in srgb, var(--tag-danger) 18%, transparent)', label: '偏低' }
+  return { color: 'var(--danger)',                bg: 'color-mix(in srgb, var(--tag-danger) 32%, transparent)', label: '低落' }
 }
-function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
+function axisWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
+function feedbackAxisName(axis: string) {
+  return axis === 'competence' ? '效能感' : axis === 'recognition' ? '归属感' : axis
+}
 </script>
 
 <template>
@@ -342,7 +345,7 @@ function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
         <div class="amy-title">
           <el-icon :size="18" color="var(--accent)"><MagicStick /></el-icon>
           <span>LLM 情绪状态</span>
-          <span class="amy-sub">Amy · NE / DA · 想法池可编辑 · 3s 自动刷新</span>
+          <span class="amy-sub">Amy · NE / DA · 效能感 / 归属感 · 想法池可编辑 · 3s 自动刷新</span>
         </div>
         <div class="amy-actions">
           <span class="amy-fetched">最后更新 {{ timeShort(lastFetchedAt) }}</span>
@@ -423,15 +426,15 @@ function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
           </div>
         </div>
 
-        <!-- 存在感仪表 -->
-        <div class="amy-gauge-card" v-if="data.presence">
+        <!-- 效能感仪表（决策侧） -->
+        <div class="amy-gauge-card" v-if="data.decision_feedback">
           <div class="amy-gauge-head">
             <span class="amy-gauge-label">
-              <el-icon :size="13"><Star /></el-icon>
-              存在感
+              <el-icon :size="13"><TrendCharts /></el-icon>
+              效能感
             </span>
-            <span class="amy-gauge-value" :style="{ color: presenceTone(data.presence.value).color }">
-              {{ data.presence.value.toFixed(1) }}
+            <span class="amy-gauge-value" :style="{ color: axisTone(data.decision_feedback.competence_value).color }">
+              {{ data.decision_feedback.competence_value.toFixed(1) }}
             </span>
           </div>
           <div class="amy-gauge-bar">
@@ -439,8 +442,8 @@ function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
               <div
                 class="amy-gauge-fill pos"
                 :style="{
-                  width: presenceWidth(data.presence.value) + '%',
-                  background: presenceTone(data.presence.value).color,
+                  width: axisWidth(data.decision_feedback.competence_value) + '%',
+                  background: axisTone(data.decision_feedback.competence_value).color,
                 }"
               />
             </div>
@@ -449,8 +452,39 @@ function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
             </div>
           </div>
           <div class="amy-gauge-band">
-            <span class="amy-gauge-band-label">{{ presenceTone(data.presence.value).label }}</span>
-            <span class="amy-gauge-band-text">默认 50 · 优秀 +20 / 尚可 +10 / 无反馈 -10 / 欠佳 -20</span>
+            <span class="amy-gauge-band-label">{{ axisTone(data.decision_feedback.competence_value).label }}</span>
+            <span class="amy-gauge-band-text">默认 50 · 任务成功 +20 / 失败 -20 / 结果不明 0</span>
+          </div>
+        </div>
+
+        <!-- 归属感仪表（决策侧） -->
+        <div class="amy-gauge-card" v-if="data.decision_feedback">
+          <div class="amy-gauge-head">
+            <span class="amy-gauge-label">
+              <el-icon :size="13"><Connection /></el-icon>
+              归属感
+            </span>
+            <span class="amy-gauge-value" :style="{ color: axisTone(data.decision_feedback.value).color }">
+              {{ data.decision_feedback.value.toFixed(1) }}
+            </span>
+          </div>
+          <div class="amy-gauge-bar">
+            <div class="amy-gauge-track">
+              <div
+                class="amy-gauge-fill pos"
+                :style="{
+                  width: axisWidth(data.decision_feedback.value) + '%',
+                  background: axisTone(data.decision_feedback.value).color,
+                }"
+              />
+            </div>
+            <div class="amy-gauge-scale">
+              <span>0</span><span>25</span><span>50</span><span>75</span><span>100</span>
+            </div>
+          </div>
+          <div class="amy-gauge-band">
+            <span class="amy-gauge-band-label">{{ axisTone(data.decision_feedback.value).label }}</span>
+            <span class="amy-gauge-band-text">默认 50 · 明确好 +20 / 含蓄好 +10 / 含蓄坏 -10 / 明确坏 -20 / 无评价 -5</span>
           </div>
         </div>
 
@@ -464,17 +498,31 @@ function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
         <pre class="amy-prompt-body">{{ data.amy_description }}</pre>
       </section>
 
-      <!-- 存在感归因 prompt 监控（注入 PFCA / 人格系统的原文） -->
-      <section v-if="data.presence" class="amy-prompt-card">
+      <!-- 决策侧情感 prompt 监控（效能感 / 归属感，注入 PFCA / 人格系统） -->
+      <section v-if="data.decision_feedback" class="amy-prompt-card">
         <div class="amy-section-head amy-section-head-ops">
-          <span><el-icon :size="13"><Star /></el-icon> 存在感归因 prompt 监控（注入 PFCA / 人格系统）</span>
-          <span v-if="data.presence.debts.length" class="amy-presence-count">
-            {{ data.presence.debts.length }} 笔未偿 · 合计
-            {{ data.presence.debts.reduce((s, d) => s + d.score, 0) }} 点
+          <span><el-icon :size="13"><TrendCharts /></el-icon> 决策侧情感 prompt 监控（效能感 / 归属感，注入 PFCA / 人格系统）</span>
+          <span v-if="data.decision_feedback.history.length" class="amy-presence-count">
+            {{ data.decision_feedback.history.length }} 条最近变动
           </span>
         </div>
-        <pre class="amy-prompt-body">{{ data.presence.attribution_prompt }}</pre>
+        <pre class="amy-prompt-body">{{ data.decision_feedback.prompt }}</pre>
+        <div v-if="data.decision_feedback.history.length" class="amy-presence-debts">
+          <div v-for="(h, i) in data.decision_feedback.history" :key="i" class="amy-presence-debt">
+            <span class="amy-presence-debt-title">{{ h.title }}</span>
+            <span class="amy-presence-debt-kind">
+              {{ feedbackAxisName(h.axis) }} · {{ h.label }} · {{ h.before }}→{{ h.after }}
+            </span>
+            <span class="amy-presence-debt-score" :class="h.delta >= 0 ? 'pos' : 'neg'">
+              {{ h.delta >= 0 ? '+' : '' }}{{ h.delta }}
+            </span>
+          </div>
+        </div>
         <div v-if="data.presence.debts.length" class="amy-presence-debts">
+          <div class="amy-notes-block-title">
+            欠账台账 · {{ data.presence.debts.length }} 笔未偿 · 合计
+            {{ data.presence.debts.reduce((s, d) => s + d.score, 0) }} 点
+          </div>
           <div v-for="(d, i) in data.presence.debts" :key="i" class="amy-presence-debt">
             <span class="amy-presence-debt-title">{{ d.title }}</span>
             <span class="amy-presence-debt-kind">{{ d.kind }}</span>
@@ -756,10 +804,10 @@ function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
   gap: 14px;
 }
 
-/* —— 顶部三联仪表 —— */
+/* —— 顶部仪表（NE / DA / 效能感 / 归属感）—— */
 .amy-gauge-row {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 .amy-gauge-card {
@@ -873,7 +921,7 @@ function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
 .amy-ci.danger  { color: var(--danger); }
 .amy-straw {
   padding: 6px 8px;
-  background: rgba(239, 68, 68, 0.08);
+  background: color-mix(in srgb, var(--tag-danger) 8%, transparent);
   border-radius: var(--radius-sm);
   font-size: 11.5px;
   color: var(--danger);
@@ -918,7 +966,7 @@ function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
   overflow-y: auto;
 }
 
-/* —— 存在感归因 prompt 监控 —— */
+/* —— 决策侧情感 prompt 监控 —— */
 .amy-presence-count {
   font-size: 11px;
   color: var(--warn);
@@ -963,6 +1011,7 @@ function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
   font-variant-numeric: tabular-nums;
 }
 .amy-presence-debt-score.neg { color: var(--danger); }
+.amy-presence-debt-score.pos { color: var(--accent-2); }
 
 /* —— thought 卡片 —— */
 .amy-section {
@@ -1122,7 +1171,7 @@ function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
 .amy-act-add-ico {
   vertical-align: -2px;
   margin-left: 5px;
-  color: var(--primary);
+  color: var(--accent);
   opacity: 0.45;
   transition: opacity 0.12s ease, transform 0.12s ease;
   transform: translateX(-2px);
@@ -1149,8 +1198,8 @@ function presenceWidth(v: number) { return Math.min(Math.max(v, 0), 100) }
   padding: 1px 6px;
   border-radius: 4px;
 }
-.amy-act-delta.pos { color: var(--accent-2); background: rgba(52, 211, 153, 0.12); }
-.amy-act-delta.neg { color: var(--danger);    background: rgba(239, 68, 68, 0.12); }
+.amy-act-delta.pos { color: var(--accent-2); background: color-mix(in srgb, var(--tag-success) 12%, transparent); }
+.amy-act-delta.neg { color: var(--danger);    background: color-mix(in srgb, var(--tag-danger) 12%, transparent); }
 .amy-act-meta {
   font-size: 10.5px;
   color: var(--text-3);

@@ -128,7 +128,7 @@ function scopeBadge(scope?: string): string {
 }
 
 function scopeColor(scope?: string): string {
-  return scope === 'group' ? '#14b8a6' : '#6366f1'
+  return scope === 'group' ? 'var(--tag-success)' : 'var(--tag-info)'
 }
 
 // =====================================================================
@@ -396,7 +396,7 @@ watch(() => props.visible, (v) => {
 .schat-scope-tab.active {
   background: var(--bg-surface);
   color: var(--accent);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-1);
 }
 
 .schat-list-items {
@@ -514,7 +514,7 @@ watch(() => props.visible, (v) => {
   font-weight: 600;
   border-radius: 999px;
   padding: 2px 9px;
-  color: #fff;
+  color: var(--text-on-accent);
 }
 .schat-msg-name {
   font-size: 14px;
@@ -600,8 +600,8 @@ watch(() => props.visible, (v) => {
   font-weight: 600;
   border-radius: 999px;
   padding: 1px 7px;
-  background: rgba(99, 102, 241, 0.15);
-  color: #6366f1;
+  background: color-mix(in srgb, var(--tag-info) 15%, transparent);
+  color: var(--tag-info);
 }
 .chat-record-rawbtn {
   margin-left: auto;

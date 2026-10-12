@@ -1,6 +1,6 @@
 // 全局 chat 状态
 import { reactive, computed } from 'vue'
-import type { UiMessage, WebSession, FileMessage, SessionRuntime, Identity, GlobalStateSnapshot, TruckState, ActivityPayload, SocialMemorySnapshot, ExperienceList, TaskList, TaskInfo, SessionMessagesResponse, MemorySocialUpdateRequest, MemorySocialUpdateResponse, ExperienceUpdateRequest, ExperienceUpdateResponse, ExperienceDeleteResponse, SessionListResponse } from '../types'
+import type { UiMessage, WebSession, FileMessage, SessionRuntime, Identity, GlobalStateSnapshot, TruckState, ActivityPayload, SocialMemorySnapshot, ExperienceList, TaskList, TaskInfo, SessionMessagesResponse, MemorySocialUpdateRequest, MemorySocialUpdateResponse, MemorySocialDeleteResponse, ExperienceUpdateRequest, ExperienceUpdateResponse, ExperienceDeleteResponse, SessionListResponse } from '../types'
 import { channel } from '../api/channel'
 
 interface State {
@@ -39,7 +39,7 @@ interface State {
   tasks: TaskList | null
   tasksLoading: boolean
   tasksError: string | null
-  tasksStatus: 'active' | 'completed' | 'all'
+  tasksStatus: 'active' | 'expired' | 'all'
   // 会话聊天记录调试查看器 (HTTP, 独立于 WS 会话)
   sessionDebugList: WebSession[]
   sessionDebugLoading: boolean
@@ -230,11 +230,32 @@ function setTrucks(trucks: TruckState[]) {
 }
 
 function toggleTruck(truck_id: string, enabled: boolean) {
-  channel.send({ type: 'set_truck', truck_id, enabled })
+  return saveTruckSettings({ enabled: { [truck_id]: enabled } })
 }
 
-function refreshTrucks() {
-  channel.send({ type: 'get_trucks' })
+async function refreshTrucks() {
+  const res = await fetch('/console/trucks')
+  if (!res.ok) throw new Error(`Truck 配置读取失败 (${res.status})`)
+  const data = await res.json()
+  setTrucks(data.trucks ?? [])
+  return data as { startup_paused: boolean; core_ready: boolean }
+}
+
+async function saveTruckSettings(payload: { enabled?: Record<string, boolean>; startup_paused?: boolean }) {
+  const res = await fetch('/console/trucks', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || 'Truck 配置保存失败')
+  setTrucks(data.trucks ?? [])
+  return data as { startup_paused: boolean; core_ready: boolean }
+}
+
+async function applyTruckSettings(action: 'apply' | 'stop') {
+  const res = await fetch(`/console/trucks/${action}`, { method: 'POST' })
+  const data = await res.json()
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Truck 状态切换失败')
+  return refreshTrucks()
 }
 
 // ============================================================
@@ -247,11 +268,24 @@ const HISTORY_PAGE_SIZE = 20
 // 上滑每次额外拉 10 条 (更细颗粒, 避免一次插入过高导致视觉跳动)
 const HISTORY_MORE_SIZE = 10
 
-function loadHistory(sid: string) {
+async function loadHistory(sid: string) {
   const sess = state.sessions.find(s => s.session_id === sid)
   if (!sess) return
   if (state.messagesBySession[sid] && state.messagesBySession[sid].length > 0) return
   state.loadingHistoryBySession[sid] = true
+  if (!state.connected) {
+    try {
+      const qs = new URLSearchParams({ scope: sess.scope, id: sid, limit: String(HISTORY_PAGE_SIZE) })
+      const res = await fetch(`/messages?${qs}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = (await res.json()) as SessionMessagesResponse
+      applyHistory(sid, data.messages ?? [], { has_more: false })
+    } catch (e) {
+      state.loadingHistoryBySession[sid] = false
+      console.warn('[chat] 历史记录读取失败', e)
+    }
+    return
+  }
   // 首次只取末尾 HISTORY_PAGE_SIZE 条, 由后端按索引切片
   channel.send({ type: 'get_messages', session_id: sid, limit: HISTORY_PAGE_SIZE })
 }
@@ -588,6 +622,50 @@ async function updateSocialMemory(
     const idx = list.findIndex(n => n.id === data.node.id)
     if (idx >= 0) list[idx] = data.node
   }
+  if (entity_type !== 'fuzzy_role' && (payload.aliases !== undefined || payload.name !== undefined)) {
+    // 首个别名决定会话名；编辑后同步侧栏和会话记录查看器。
+    try {
+      const sessionsRes = await fetch('/sessions')
+      if (!sessionsRes.ok) throw new Error(`HTTP ${sessionsRes.status}`)
+      const sessionsData = (await sessionsRes.json()) as SessionListResponse
+      setSessions(sessionsData.sessions ?? [])
+      state.sessionDebugList = sessionsData.sessions ?? []
+    } catch (e) {
+      console.warn('[chat] 会话名称刷新失败', e)
+    }
+  }
+}
+
+/**
+ * 删除某个记忆实体 (角色 / 群组 / 模糊角色)。
+ * 后端对角色 / 群组会级联删除锚定到它的模糊角色；成功后本地同步移除该实体、
+ * 其依附的模糊角色以及相关关系边，并按类型重算计数。
+ */
+async function deleteSocialMemory(
+  entity_type: 'character' | 'group' | 'fuzzy_role',
+  entity_id: string,
+): Promise<void> {
+  const res = await fetch(`/memory/social/${entity_type}/${entity_id}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '')
+    throw new Error(`HTTP ${res.status}: ${errBody || res.statusText}`)
+  }
+  const data = (await res.json()) as MemorySocialDeleteResponse
+  if (state.memorySocialSnapshot && data.deleted) {
+    const snap = state.memorySocialSnapshot
+    const removed = new Set<string>([data.entity_id])
+    // 级联：角色 / 群组被删时，锚定到它的模糊角色也一并移除
+    if (entity_type !== 'fuzzy_role') {
+      for (const n of snap.nodes) {
+        if (n.type === 'FuzzyRole' && n.source_entity_uuid === data.entity_id) removed.add(n.id)
+      }
+    }
+    snap.nodes = snap.nodes.filter(n => !removed.has(n.id))
+    snap.edges = snap.edges.filter(e => !removed.has(e.source) && !removed.has(e.target))
+    snap.character_count = snap.nodes.filter(n => n.type === 'Character').length
+    snap.group_count = snap.nodes.filter(n => n.type === 'Group').length
+    snap.fuzzy_role_count = snap.nodes.filter(n => n.type === 'FuzzyRole').length
+  }
 }
 
 // ------------------------------------------------------------
@@ -668,7 +746,7 @@ async function deleteExperience(bequest_id: string): Promise<void> {
 // 任务列表 (状态查看 + 状态快改 + 删除)
 // ============================================================
 
-async function loadTasks(status: 'active' | 'completed' | 'all' = 'active', limit = 200, offset = 0): Promise<void> {
+async function loadTasks(status: 'active' | 'expired' | 'all' = 'active', limit = 200, offset = 0): Promise<void> {
   state.tasksLoading = true
   state.tasksError = null
   state.tasksStatus = status
@@ -901,6 +979,8 @@ export const chat = {
   setTrucks,
   toggleTruck,
   refreshTrucks,
+  saveTruckSettings,
+  applyTruckSettings,
   pushWarning,
   clearWarning,
   createIdentity,
@@ -912,6 +992,7 @@ export const chat = {
   loadMemorySocial,
   clearMemorySocial,
   updateSocialMemory,
+  deleteSocialMemory,
   // 记忆经验/嘱托
   loadExperiences,
   clearExperiences,

@@ -62,13 +62,21 @@ public partial class MainWindow
             .Where(line => filter.Length == 0 || LogPresentation.Plain(line).Contains(filter, StringComparison.OrdinalIgnoreCase))
             .ToArray();
         _copyText = string.Join(Environment.NewLine, lines.Select(LogPresentation.Plain));
+
+        // 日志的"中性前景色"跟主题走；级别色与 ANSI 色属于日志内容语义，保持固定
+        var defaultColour = FindResource("BrushTextSecondary") is System.Windows.Media.SolidColorBrush themeBrush
+            ? themeBrush.Color.ToString()
+            : "#C9C9C9";
+
         var doc = new FlowDocument { PagePadding = new Thickness(8), FontFamily = LogBox.FontFamily,
-            FontSize = LogBox.FontSize, Background = LogBox.Background,
+            FontSize = LogBox.FontSize,
             PageWidth = Math.Max(Math.Max(300, LogBox.ActualWidth - 24), lines.Select(x => LogPresentation.Plain(x).Length).DefaultIfEmpty(0).Max() * 7.3 + 24) };
+        SetTheme(doc, FlowDocument.BackgroundProperty, "BrushBgSunken");
+
         foreach (var line in lines)
         {
             var paragraph = new Paragraph { Margin = new Thickness(0), LineHeight = 18 };
-            foreach (var segment in LogPresentation.Colourise(line))
+            foreach (var segment in LogPresentation.Colourise(line, defaultColour))
             {
                 var run = new Run(segment.Text) { Foreground = Brush(segment.Colour) };
                 if (segment.Background is not null) run.Background = Brush(segment.Background);
@@ -78,27 +86,32 @@ public partial class MainWindow
             doc.Blocks.Add(paragraph);
         }
         if (string.IsNullOrWhiteSpace(_logText))
-            doc.Blocks.Add(new Paragraph(new Run("暂无日志。程序启动后会在这里显示输出。")) { Foreground = Brush("#94A3B8") });
+            doc.Blocks.Add(ThemedParagraph("暂无日志。程序启动后会在这里显示输出。"));
         else if (lines.Length == 0)
-            doc.Blocks.Add(new Paragraph(new Run("没有匹配的日志。")) { Foreground = Brush("#94A3B8") });
+            doc.Blocks.Add(ThemedParagraph("没有匹配的日志。"));
         LogBox.Document = doc;
         if (LogFollow.IsChecked == true) LogBox.ScrollToEnd();
         else LogBox.ScrollToVerticalOffset(scroll);
     }
 
+    /// <summary>灰色提示段落，颜色挂主题引用（换主题会自动重绘）。</summary>
+    private Paragraph ThemedParagraph(string text)
+    {
+        var paragraph = new Paragraph(new Run(text));
+        SetTheme(paragraph, TextElement.ForegroundProperty, "BrushTextTertiary");
+        return paragraph;
+    }
+
     private void UpdateLogTabs()
     {
-        foreach (var tab in new[] { LogTabCore, LogTabSnowluma, LogTabService })
-        {
-            var active = tab.Tag.ToString() == _logSource;
-            tab.Background = Brush(active ? "#4F46E5" : "#334155");
-            tab.Foreground = Brush("#FFFFFF");
-        }
+        // 选中态交给 SegmentedTab 的 IsChecked 触发器，颜色不在代码里写死
+        foreach (var tab in new[] { LogTabCore, LogTabSnowluma, LogTabIngress, LogTabService })
+            tab.IsChecked = tab.Tag?.ToString() == _logSource;
     }
 
     private async void LogTab_Click(object sender, RoutedEventArgs e)
     {
-        _logSource = ((Button)sender).Tag.ToString() ?? "core";
+        _logSource = (sender as FrameworkElement)?.Tag?.ToString() ?? "core";
         _logText = ""; _logFiles = "";
         UpdateLogTabs();
         RenderLogs();

@@ -1,99 +1,83 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { Van, Setting, Refresh, VideoPlay, VideoPause } from '@element-plus/icons-vue'
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
+import { ElMessage } from 'element-plus'
+import { Van, Refresh, VideoPlay, VideoPause } from '@element-plus/icons-vue'
 import type { TruckState } from '../types'
 import { chat } from '../stores/chat'
 
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [v: boolean] }>()
+const startupPaused = ref(false)
+const coreReady = ref(false)
+const saving = ref(false)
+const error = ref('')
+let timer: number | null = null
+let refreshing = false
 
-const localOverrides = ref<Record<string, boolean>>({})
-const lastSynced = ref<number>(Date.now())
+async function refresh() {
+  if (saving.value || refreshing) return
+  refreshing = true
+  try {
+    const data = await chat.refreshTrucks()
+    startupPaused.value = data.startup_paused
+    coreReady.value = data.core_ready
+    error.value = ''
+  } catch (e: any) { error.value = e?.message || String(e) }
+  finally { refreshing = false }
+}
 
-// 弹窗打开时拉一次最新状态
-watch(
-  () => props.visible,
-  (v) => {
-    if (v) {
-      try { chat.refreshTrucks() } catch {}
-    }
-  },
-)
+watch(() => props.visible, visible => {
+  if (timer !== null) window.clearInterval(timer)
+  timer = null
+  if (visible) {
+    void refresh()
+    timer = window.setInterval(refresh, 3000)
+  }
+})
+onBeforeUnmount(() => { if (timer !== null) window.clearInterval(timer) })
 
-// 同步后端状态到本地 overrides (后端是 source of truth)
-watch(
-  () => chat.state.trucks,
-  (trucks) => {
-    const m: Record<string, boolean> = {}
-    for (const t of (trucks as TruckState[])) m[t.truck_id] = t.enabled
-    localOverrides.value = m
-    lastSynced.value = Date.now()
-  },
-  { immediate: true, deep: true },
-)
-
-// 类别内部 truck 顺序: private 优先 (私聊最常看)
-const TRUCK_ORDER = ['private_truck', 'special_attention_truck']
 const trucksByCategory = computed(() => {
   const out: Record<string, TruckState[]> = {}
-  for (const t of chat.state.trucks) {
-    if (!out[t.category]) out[t.category] = []
-    out[t.category].push(t)
-  }
-  // 类别内部按 TRUCK_ORDER 排序
-  for (const cat of Object.keys(out)) {
-    out[cat] = out[cat].slice().sort((a, b) => {
-      const ia = TRUCK_ORDER.indexOf(a.truck_id)
-      const ib = TRUCK_ORDER.indexOf(b.truck_id)
-      if (ia === -1 && ib === -1) return 0
-      if (ia === -1) return 1
-      if (ib === -1) return -1
-      return ia - ib
-    })
-  }
+  for (const t of chat.state.trucks) (out[t.category] ??= []).push(t)
   return out
 })
-
-// 类别显示顺序: 消息获取 (含私聊 / 群聊) 排第一
-const CATEGORY_ORDER = ['消息获取', '监控']
-const orderedCategories = computed(() => {
-  const keys = Object.keys(trucksByCategory.value)
-  return [
-    ...CATEGORY_ORDER.filter(k => keys.includes(k)),
-    ...keys.filter(k => !CATEGORY_ORDER.includes(k)),
-  ]
-})
-
-const enabledCount = computed(
-  () => chat.state.trucks.filter((t) => localOverrides.value[t.truck_id] ?? t.enabled).length,
-)
+const orderedCategories = computed(() => Object.keys(trucksByCategory.value))
+const enabledCount = computed(() => chat.state.trucks.filter(t => t.enabled).length)
 const totalCount = computed(() => chat.state.trucks.length)
-
-function toggle(t: TruckState) {
-  const current = localOverrides.value[t.truck_id] ?? t.enabled
-  const next = !current
-  localOverrides.value[t.truck_id] = next
-  chat.toggleTruck(t.truck_id, next)
+function isOn(t: TruckState) { return t.configured_enabled ?? false }
+function runtimeLabel(t: TruckState) {
+  const labels: Record<string, string> = { running: '运行中', paused: '暂停中', stopped: '已停止', unknown: '未同步' }
+  return labels[t.runtime_state || 'unknown'] || t.runtime_state
 }
-
-function refresh() {
-  chat.refreshTrucks()
+async function save(payload: { enabled?: Record<string, boolean>; startup_paused?: boolean }) {
+  saving.value = true
+  try {
+    const data = await chat.saveTruckSettings(payload)
+    startupPaused.value = data.startup_paused
+    coreReady.value = data.core_ready
+    error.value = ''
+    ElMessage.success('启动配置已保存')
+  } catch (e: any) { ElMessage.error(e?.message || String(e)) }
+  finally { saving.value = false }
 }
-
-function isOn(t: TruckState) {
-  return localOverrides.value[t.truck_id] ?? t.enabled
+function toggle(t: TruckState) { void save({ enabled: { [t.truck_id]: !isOn(t) } }) }
+async function runtimeAction(action: 'apply' | 'stop') {
+  saving.value = true
+  try {
+    await chat.applyTruckSettings(action)
+    ElMessage.success(action === 'apply' ? '已应用到当前运行' : '已停止全部 Truck')
+  } catch (e: any) { ElMessage.error(e?.message || String(e)) }
+  finally { saving.value = false; void refresh() }
 }
-
-function close() {
-  emit('update:visible', false)
-}
+function close() { emit('update:visible', false) }
 </script>
 
 <template>
   <el-dialog
     :model-value="props.visible"
-    title="Truck 控制"
-    width="560"
+    title="Truck 配置与运行"
+    width="820"
+    class="truck-dialog"
     :close-on-click-modal="false"
     align-center
     @update:model-value="(v: boolean) => emit('update:visible', v)"
@@ -102,58 +86,83 @@ function close() {
       <div class="truck-dialog-header">
         <div class="truck-dialog-title">
           <el-icon :size="16" color="var(--accent)"><Van /></el-icon>
-          <span>Truck 控制</span>
+          <span>Truck 配置与运行</span>
         </div>
         <div class="truck-dialog-meta">
-          运行中 <strong>{{ enabledCount }}</strong> / {{ totalCount }}
+          已启动 <strong>{{ enabledCount }}</strong> / {{ totalCount }}
           <el-button :icon="Refresh" size="small" link @click="refresh">刷新</el-button>
         </div>
       </div>
     </template>
 
-    <div v-if="chat.state.trucks.length === 0" class="truck-empty">
-      加载中… (或后端尚未注册 truck)
-    </div>
+    <div class="truck-body">
+      <el-alert v-if="error" :title="error" type="error" :closable="false" />
+      <div class="truck-tip">
+        <el-checkbox :model-value="startupPaused" :disabled="saving"
+          @update:model-value="(v: any) => save({ startup_paused: !!v })">启动 Core 时暂停自动任务（开发）</el-checkbox>
+        <div>{{ coreReady ? 'Core 运行中；配置开关不会直接切换正在运行的 Truck。' : 'Core 未运行；可以保存下次启动配置。' }}</div>
+      </div>
+      <div v-if="chat.state.trucks.length === 0" class="truck-empty">
+        加载中… (或后端尚未注册 truck)
+      </div>
 
-    <div v-else class="truck-categories">
-      <div v-for="cat in orderedCategories" :key="cat" class="truck-category">
-        <div class="truck-category-label">{{ cat }}</div>
-        <div
-          v-for="t in trucksByCategory[cat]"
-          :key="t.truck_id"
-          :class="['truck-item', { on: isOn(t) }]"
-        >
-          <div class="truck-item-main">
-            <div class="truck-item-icon">
-              <el-icon v-if="isOn(t)" :size="15" color="var(--accent-2)"><VideoPlay /></el-icon>
-              <el-icon v-else :size="15" color="var(--text-3)"><VideoPause /></el-icon>
-            </div>
-            <div class="truck-item-text">
-              <div class="truck-item-name">
-                {{ t.label }}
-                <span class="truck-item-id">({{ t.truck_id }})</span>
+      <div v-else class="truck-categories">
+        <div v-for="cat in orderedCategories" :key="cat" class="truck-category">
+          <div class="truck-category-label">{{ cat }}</div>
+          <div
+            v-for="t in trucksByCategory[cat]"
+            :key="t.truck_id"
+            :class="['truck-item', { on: isOn(t) }]"
+          >
+            <div class="truck-item-main">
+              <div class="truck-item-icon">
+                <el-icon v-if="isOn(t)" :size="14" color="var(--accent-2)"><VideoPlay /></el-icon>
+                <el-icon v-else :size="14" color="var(--text-3)"><VideoPause /></el-icon>
               </div>
-              <div class="truck-item-desc">{{ t.description }}</div>
-              <div v-if="t.cycle_time" class="truck-item-cycle">
-                周期 {{ t.cycle_time }}s
+              <div class="truck-item-text">
+                <div class="truck-item-head">
+                  <span class="truck-item-name">{{ t.label }}</span>
+                  <span class="truck-item-id">{{ t.truck_id }}</span>
+                </div>
+                <div class="truck-item-desc">{{ t.description }}</div>
+              </div>
+            </div>
+            <div class="truck-item-action">
+              <div class="truck-item-meta">
+                <span :class="['truck-status', t.runtime_state || 'unknown']">
+                  <i class="truck-status-dot" />{{ runtimeLabel(t) }}
+                </span>
+                <span v-if="t.cycle_time" class="truck-cycle">周期 {{ t.cycle_time }}s</span>
+              </div>
+              <div class="truck-switch-row">
+                <span class="truck-switch-label">启动启用</span>
+                <el-switch
+                  :disabled="saving"
+                  :model-value="isOn(t)"
+                  size="default"
+                  @update:model-value="toggle(t)"
+                />
               </div>
             </div>
           </div>
-          <el-switch
-            :model-value="isOn(t)"
-            size="default"
-            @update:model-value="toggle(t)"
-          />
         </div>
+      </div>
+
+      <div class="truck-tip">
+        启动配置会保留到下次运行。Core 运行时，点击“应用到当前运行”使这些开关立即生效；
+        “停止全部”只改变本次运行状态。保存配置不会启动 Core。
+      </div>
+      <div class="truck-tip">
+        “效能感反思”和“归属感反思”各自同时控制低值与高值触发，没有单独的高值开关。
+        低于20时进行补偿性反思；达到100时，效能感用于申请专题维护，归属感用于安排关系建设。
+        两种触发都等待系统空闲；高值还需满足维护或已有任务的限制。
+        关系建设任务到期自动执行，需要另行启用“任务到期触发”。
       </div>
     </div>
 
-    <div class="truck-tip">
-      💡 开关会立即生效 (运行时切换), 状态会保存到
-      <code>adapt/web/data/web_trucks.json</code>, 重启后自动恢复.
-    </div>
-
     <template #footer>
+      <el-button :disabled="!coreReady || saving" @click="runtimeAction('stop')">停止全部</el-button>
+      <el-button type="primary" :disabled="!coreReady || saving" @click="runtimeAction('apply')">应用到当前运行</el-button>
       <el-button @click="close">关闭</el-button>
     </template>
   </el-dialog>
@@ -194,6 +203,13 @@ function close() {
   font-size: 13px;
 }
 
+.truck-body {
+  /* 留出弹窗 header / footer 的高度，避免整个弹窗超出视口 */
+  max-height: calc(88vh - 150px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
 .truck-categories {
   display: flex;
   flex-direction: column;
@@ -202,7 +218,7 @@ function close() {
 .truck-category {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
 }
 .truck-category-label {
   font-size: 10.5px;
@@ -217,8 +233,8 @@ function close() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
+  gap: 16px;
+  padding: 9px 13px;
   border-radius: var(--radius);
   background: var(--bg-surface);
   border: 1px solid var(--border-1);
@@ -234,21 +250,20 @@ function close() {
 
 .truck-item-main {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
   min-width: 0;
   flex: 1;
 }
 .truck-item-icon {
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   border-radius: var(--radius-sm);
   background: var(--bg-subtle);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  margin-top: 1px;
 }
 .truck-item.on .truck-item-icon {
   background: var(--accent-2);
@@ -258,29 +273,97 @@ function close() {
   flex: 1;
   min-width: 0;
 }
+.truck-item-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
 .truck-item-name {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-1);
   letter-spacing: -0.005em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .truck-item-id {
+  flex-shrink: 0;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 400;
-  margin-left: 4px;
+  font-family: var(--font-mono);
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-app);
 }
 .truck-item-desc {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-2);
   margin-top: 2px;
-  line-height: 1.45;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.truck-item-cycle {
+
+.truck-item-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.truck-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.truck-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 11px;
   color: var(--text-3);
-  margin-top: 4px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.truck-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.truck-status.running {
+  color: var(--accent-2);
+}
+.truck-status.running .truck-status-dot {
+  box-shadow: 0 0 0 3px var(--accent-2-soft);
+}
+.truck-status.paused {
+  color: var(--warn);
+}
+.truck-cycle {
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.truck-cycle::before {
+  content: '·';
+  margin-right: 6px;
+}
+.truck-switch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.truck-switch-label {
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
 }
 
 .truck-tip {

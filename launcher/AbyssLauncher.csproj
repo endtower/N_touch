@@ -11,6 +11,7 @@
     <RootNamespace>AbyssLauncher</RootNamespace>
     <AssemblyTitle>Abyss 桌面启动管理器</AssemblyTitle>
     <Version>0.3.3</Version>
+    <ApplicationIcon>..\assets\icon.ico</ApplicationIcon>
     <!-- 验证版锁定构建配置 -->
     <InvariantGlobalization>false</InvariantGlobalization>
   </PropertyGroup>
@@ -19,10 +20,12 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
   </ItemGroup>
 
-  <!-- UseWindowsForms 会隐式引入 System.Windows.Forms 全局 using，
-       与 WPF 的 Application/MessageBox 产生二义性；托盘代码全部用全限定名 -->
+  <!-- UseWindowsForms 会隐式引入 System.Windows.Forms / System.Drawing 全局 using，
+       与 WPF 的 Application/MessageBox/Brush/Size 等类型产生二义性（CS0104）；
+       托盘与图标代码全部用全限定名，所以这里直接摘掉这两个隐式 using。 -->
   <ItemGroup>
     <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
   </ItemGroup>
 
 </Project>

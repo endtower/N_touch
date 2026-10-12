@@ -302,7 +302,7 @@ const inlineParts = computed(() => parseInline(props.message.text || ''))
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--text-on-accent);
   transition: background 0.12s, border-color 0.12s;
 }
 .msg-check.checked {
@@ -344,7 +344,7 @@ const inlineParts = computed(() => parseInline(props.message.text || ''))
   background: var(--bg-subtle);
 }
 .msg-context-menu-item.danger:hover {
-  background: rgba(220, 50, 50, 0.1);
-  color: var(--danger, #e53935);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
 }
 </style>
