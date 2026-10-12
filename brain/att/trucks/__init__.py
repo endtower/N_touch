@@ -3,9 +3,10 @@ from .ongoing_truck import OngoingTruck
 from .special_attention_truck import SpecialAttentionTruck
 from .scheduled_proactive_truck import ScheduledProactiveTruck
 from .reflection_truck import ReflectionCharTruck, ReflectionTimeTruck
+from .feedback_reflection_truck import ReflectionEfficacyTruck, ReflectionBelongingTruck
 from .task_truck import TaskTruck
 
-__all__ = ['PrivateTruck', 'OngoingTruck', 'SpecialAttentionTruck', 'ScheduledProactiveTruck', 'ReflectionCharTruck', 'ReflectionTimeTruck', 'TaskTruck']
+__all__ = ['PrivateTruck', 'OngoingTruck', 'SpecialAttentionTruck', 'ScheduledProactiveTruck', 'ReflectionCharTruck', 'ReflectionTimeTruck', 'ReflectionEfficacyTruck', 'ReflectionBelongingTruck', 'TaskTruck']
 
 # 注册所有truck
 truck_registry = {
@@ -15,6 +16,8 @@ truck_registry = {
     'scheduled_proactive_truck': ScheduledProactiveTruck,
     'reflection_char_truck': ReflectionCharTruck,
     'reflection_time_truck': ReflectionTimeTruck,
+    'reflection_efficacy_truck': ReflectionEfficacyTruck,
+    'reflection_belonging_truck': ReflectionBelongingTruck,
     'task_truck': TaskTruck
 }
 

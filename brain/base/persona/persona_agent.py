@@ -17,8 +17,8 @@
 - user 消息共用格式：
     当前现状：
     {现状总结}
-    存在感：{数值}/100            <- 常显（与决策侧一致，2026-09-29）
-    原因：{事件标题} {事件评价} {数值减益}   <- 存在负面记录时每笔一行
+    每轴【当前情绪】{轴名}：数值与感受（与决策侧一致）
+    该轴最近五条：{事件标题} {评价标签} {分数变化}
 
     请以你的人格立场审视该现状，判断你介入处理此事的适配程度，给出参与度评分。
     评分规则：0-100 的整数，越高表示越该由你上场。
@@ -47,8 +47,7 @@ from typing import Dict, List, Any, Optional
 from brain.base.light_agent.lightweight_agent import LightweightAgent
 from brain.base.persona.persona_registry import get_persona
 from brain.amy.feedback_state import get_feedback_state
-from brain.amy.debt_ledger import get_debt_ledger
-from brain.amy.prompt_engine import build_presence_attribution
+from brain.amy.decision_feelings import build_decision_feedback_prompt
 from utils.logger import get_logger
 
 logger = get_logger('persona_agent', "INFO")
@@ -159,9 +158,9 @@ class PersonaAgent(LightweightAgent):
     async def run(self) -> Dict[str, Any]:
         # user 消息共用格式（内荐，2026-09-28）：
         #   当前现状：{现状总结}
-        #   存在感归因（格式与决策侧一致，2026-09-29）：
-        #     存在感：{数值}/100      <- 常显
-        #     原因：{事件标题} {事件评价} {数值减益}   <- 存在负面记录时每笔一行
+        #   双轴感受与归因（格式与决策侧一致）：
+        #     每轴【当前情绪】{轴名}：数值与感受，紧随该轴最近五条
+        #     「{事件标题} {评价标签} {分数变化}」
         #   请以你的人格立场审视该现状，判断你介入处理此事的适配程度，给出参与度评分。
         #   评分规则：0-100 的整数，越高表示越该由你上场。
         #   输出格式（严格三行，不要多余内容）：
@@ -169,9 +168,7 @@ class PersonaAgent(LightweightAgent):
         #   理由：<一句话理由>
         #   行动：<一句话：若你上场，将采取的行动方向与思路>
         # 归因块构建失败直接上抛阻断（user_rules，关键状态缺失不吞错继续）。
-        attribution = build_presence_attribution(
-            get_feedback_state().read_value(), get_debt_ledger().list_debts()
-        )
+        attribution = build_decision_feedback_prompt(get_feedback_state().snapshot())
         parts = ["当前现状：", self.current_summary or "（无）"]
         if attribution:
             parts += ["", attribution]

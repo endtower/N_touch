@@ -19,6 +19,7 @@ from brain.base.common_ways import (
     ToolBequest,
     ToolTask,
     ToolPersona,
+    ToolJinnang,
 )
 
 __all__ = [
@@ -37,4 +38,5 @@ __all__ = [
     'ToolBequest',
     'ToolTask',
     'ToolPersona',
+    'ToolJinnang',
 ]

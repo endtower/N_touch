@@ -135,6 +135,19 @@ class CharacterOperations:
         await self.update_character_vector(uuid)
         return True
 
+    async def delete_character(self, uuid: str) -> bool:
+        """删除角色行。
+
+        别名 / 印象 / 熟悉度 / 联系方式 / 关系 / 好感度事件 / 向量都在同一行的
+        JSON/BLOB 列内，随行一并删除；返回 False 表示 uuid 不存在。
+        """
+        if not uuid:
+            return False
+        conn = await self.db._ensure_connection()
+        cur = await conn.execute("DELETE FROM characters WHERE uuid=?", (uuid,))
+        await conn.commit()
+        return cur.rowcount > 0
+
     # ============================================================
     # 查询
     # ============================================================

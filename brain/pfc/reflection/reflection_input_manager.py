@@ -21,10 +21,9 @@ Reflection user 消息的两条构造路径：
 
 amy_effect 段的语义（与增量共用）：
 - 核心是 Reflection 专用情绪出口 get_reflection_description()（见 docs/api/amy.md），
-  为存在感数值状态行（如「存在感 50/100 正常」），**不显示任何想法**。
-  情绪体系隔离（与 PFCA 隔离；决策侧出口 get_decision_description 供
-  pfca / proactive / light_agent 使用，Reflection 不再走该出口）。
-- 前缀由本模块添加：首条【当前情绪】，增量"你的心情变为："。
+  为效能感、归属感各自按轴分组的数值、感受与最近五条变动。
+  与表达侧 NE/DA 隔离；与 PFCA 使用相同的双轴渲染，保留独立读取入口。
+- 首条与增量同构，前缀【当前情绪】由出口自带，本模块不再拼接前缀。
 - 游标推进在成功取到描述之后执行：取描述失败时不推进，事件留给下一轮，不丢。
 """
 
@@ -113,8 +112,9 @@ class ReflectionInputManager:
             NORMAL_STARTUP 路径：
             {message_base}                        <- 外部注入的反思请求
             【当前环境状态】{年月日 时刻 时段}     <- 纯同步取系统时间，恒非空
-            【当前情绪】{存在感数值状态行}       <- 存在感数值 + 词档（不显示想法）；
-                                                    如「存在感 50/100 正常」，取到非空才拼
+            【当前情绪】{轴名}：{值}/100。{感受}    <- 决策情感状态，取到非空才拼；
+            {事件标题} {评价标签} {分数变化}          <- 每轴现状行下紧跟该轴最近五条变动
+            ...
             {近期经历}                            <- temporary_memory 取到非空才拼（≤3 条，
                                                      label "近期经历" 内置标题）
             【当前已经承接的任务】                <- 任务命中才拼（≤10 行轻量简表：
@@ -159,6 +159,14 @@ class ReflectionInputManager:
         self._collect_recent_memory(limit=3)
         await self._collect_ongoing_tasks()
         await self._collect_notebook_manual()
+        from brain.hc.maintenance import MaintenanceService
+        maintenance = await MaintenanceService().query()
+        eligibility = maintenance["eligibility"]
+        lines = ["【最近维护与共治机会】", f"专题维护：{eligibility['maintenance']['reason'] or '可以申请'}；关系建设：{eligibility['social_growth']['reason'] or '可以安排'}。"]
+        lines += [f"申请：{r['topic']}，状态{r['status']}，主人结论：{r['conclusion'] or '尚无'}。" for r in maintenance["requests"][:3]]
+        lines += [f"人工维护：{r['topic']} / {r['title']}，{r['action']}。" for r in maintenance["reviews"][:3]]
+        lines.append("每次只选一个具体专题；查看 query_maintenance 了解条目编号与完整记录，不重复催促主人。")
+        self._blocks["maintenance"] = "\n".join(lines)
 
         content = self._compile()
         if content:
@@ -176,7 +184,7 @@ class ReflectionInputManager:
           FinalEvaluationAct 词表）才构造内容；表现侧 NE/DA 事件对本模块是
           噪声，仅推进游标消费掉。
         - 有最终评价类事件：取当前 Reflection 专用情绪描述（无参
-          get_reflection_description，为反馈维度数值状态行，不含任何想法），
+          get_reflection_description，为两轴数值、感受与最近五条变动原因），
           取到后再 advance_cursor 推进游标（取描述失败/为空时不推进，事件留给下一轮，不丢）。
         - 输出"你的心情变为：{description}"。
 
@@ -207,9 +215,9 @@ class ReflectionInputManager:
             return None
         await ei.advance_cursor("reflection", max_seq)
 
-        # 输出情绪（反馈数值状态行，见 _format_amy_segment）
+        # 输出情绪（每轴自带【当前情绪】，见 build_decision_feedback_prompt）
         logger.info(f"增量 - 情绪变化: '{current_amy[:60]}'")
-        return await self._format_amy_segment(current_amy, prefix="你的心情变为：")
+        return current_amy
 
     # ===== 内部辅助 =====
 
@@ -223,19 +231,8 @@ class ReflectionInputManager:
             "notebook_manual": "",
             "decision_thought": "",
             "current_summary": "",
+            "maintenance": "",
         }
-
-    async def _format_amy_segment(self, description: str, prefix: str) -> str:
-        """构造"情绪描述"段。
-
-        description 来自 Reflection 专用出口 get_reflection_description()，为存在感
-        数值状态行（如「存在感 50/100 正常」），因此这里只加前缀。
-
-        prefix:
-          - 首条：'【当前情绪】'
-          - 增量：'你的心情变为：'
-        """
-        return f"{prefix}{description}"
 
     # ===== 槽位收集 =====
 
@@ -265,7 +262,7 @@ class ReflectionInputManager:
 
         策略：
         - 无条件取当前 Reflection 专用情绪描述（get_reflection_description：
-          反馈维度数值状态行，不显示任何想法）；只要 amy 有描述就写槽。
+          两轴现状与各自最近五条变动）；只要 amy 有描述就写槽。
           情绪体系隔离：Reflection 不走决策侧出口，也不见 NE/DA 表现侧激素行。
         - 首条消费掉当前全部未读事件并推进游标，避免这些事件在后续增量轮
           重复注入（决策侧过滤下，NE/DA 噪声事件也一并消费掉）。
@@ -282,9 +279,7 @@ class ReflectionInputManager:
         if events:
             await ei.advance_cursor("reflection", max(e["seq"] for e in events))
 
-        self._blocks["amy_effect"] = await self._format_amy_segment(
-            current, prefix="【当前情绪】"
-        )
+        self._blocks["amy_effect"] = current
 
     def _collect_recent_memory(self, limit: int = 3) -> None:
         """首条专用槽位：拉取近期经历。
@@ -314,7 +309,7 @@ class ReflectionInputManager:
             self._blocks["ongoing_tasks"] = f"【当前已经承接的任务】\n{text}"
 
     async def _collect_notebook_manual(self) -> None:
-        """首条专用槽位：记事本手册（全部已落库条目，usage 不参与路由）。
+        """首条专用槽位：记事本手册（全部已落库条目，条目的 category 不参与路由）。
 
         聚合渲染见 notepad.render_manual（章节式裸文本，细节经 query_note 工具溯源）；
         字符预算 max_chars=500：逐步拉取，累计超过 500 字符即停止继续拉取

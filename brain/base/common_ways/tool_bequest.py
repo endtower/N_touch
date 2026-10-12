@@ -159,10 +159,9 @@ class ToolBequest:
                 "name": "upsert_bequest",
                 "description": (
                     "创建话术经验。如果已存在同名经验则覆盖内容，否则创建新的经验。"
-                    "「话术」是发言/回复技巧类，"
+                    "「话术」是一种固定搭配的发言结构，或是特殊网络用词。"
                     "评判标准是是否能更加快速便捷的表达出具体意思，而不是对于事件结果的影响"
-                    "示例： 标题：表达惊讶，滑稽，震撼。 内容：可以用‘卧槽啊！’表示对过于离谱的事情的震惊。"
-                    "错误示例：遇到对方明显不想搭理、摆烂或怼人的回复，直接发「……」（或无语流汗表情）表示无语，不解释、不追问、不给台阶。（因为夹杂了不解释、不追问、不给台阶这些无意义的内容）"
+                    "示例： 标题：表达惊讶，滑稽，震撼。 内容：用‘卧槽啊！’表示对过于离谱的事情的震惊。"
                     "可选 persona 参数：给这条经验打人格标签——标记它属于某个人格"
                     "的应对方式；通用技巧不要传 persona（默认全局通用）。"
                     "仅当经验明确只属于某个人格的应对方式时才绑定；"
@@ -249,7 +248,7 @@ class ToolBequest:
 
         bequest_ops = BequestOperations()
         hits = await bequest_ops.search_bequest_by_vector(
-            query, top_k=top_k, category=category,
+            query, top_k=top_k, category=category, record_usage=True,
         )
 
         results = []
@@ -257,6 +256,7 @@ class ToolBequest:
             bequest = await bequest_ops.get_bequest_by_id(bequest_id)
             if bequest:
                 results.append({
+                    "bequest_id": bequest_id,
                     "title": bequest.get("title", ""),
                     "summary": bequest.get("summary", ""),
                     "similarity": round(sim, 4),

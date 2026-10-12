@@ -44,6 +44,7 @@ class ReflectionSession(HeavySession):
     def __init__(self):
         self.history_manager = get_reflection_history_manager()
         self.tool_manager = get_reflection_tool_manager()
+        self.tool_manager._begin_session()
         self._input_manager = get_reflection_input_manager()
 
         self.running = True

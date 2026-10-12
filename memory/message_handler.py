@@ -94,7 +94,8 @@ class MessageHandler:
         """
         await self._message_repository.ensure_ready()
 
-    def normalize_message_format(self, raw_message: Dict[str, Any]) -> Dict[str, Any]:
+    @staticmethod
+    def normalize_message_format(raw_message: Dict[str, Any]) -> Dict[str, Any]:
         """将接收到的消息转换为标准格式，并验证关键信息
 
         Args:

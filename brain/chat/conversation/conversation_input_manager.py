@@ -149,6 +149,8 @@ class ConversationInputManager:
         # 读取该人格提示词（基本人格 + kernel_prompt，基本人格在前）作为语言与行为基准；
         # 人格不存在在 get_persona 直接抛 KeyError 崩溃阻断（user_rules）。
         persona_header = self._build_persona_header()
+        from brain.hc.maintenance import MaintenanceService
+        await MaintenanceService().record_usage("persona", ["common", core.persona_name], "selected")
 
         # 按实际消息拼接顺序组装：人格 -> 聊天记录 -> 会话环境 -> 任务 -> 情绪
         _parts = [f"{message_str}"]
@@ -170,7 +172,7 @@ class ConversationInputManager:
         if persona_header:
             user_input = f"{persona_header}\n{user_input}"
 
-        # 记事本手册：长期经验底色（全部已落库条目，usage 不参与路由），
+        # 记事本手册：长期经验底色（全部已落库条目，条目的 category 不参与路由），
         # 章节式裸文本；拉取失败直接上抛崩溃阻断（按 user_rules），细节经 query_note 工具溯源
         from brain.hc.shortlight import get_shortlight_notepad
         manual = await get_shortlight_notepad().render_manual()

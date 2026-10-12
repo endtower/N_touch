@@ -9,7 +9,7 @@ PFCA 输入管理模块。
 
 PFCA user 消息的两条构造路径：
 1. 首条 (_build_first_input)：由外部 prepare_first_message 触发，
-   把 persona_roster / message_base / amy_effect / recent_memory /
+   把 message_base / persona_roster / amy_effect / recent_memory /
    ongoing_tasks / notebook_manual 等槽位拼成一条 user 消息
    （完整拼接格式见 _build_first_input docstring）。会话消息不再在此拉取
    （消息由 PFCA 侧 query_history 等工具自行读取），故不再处理/推进 pfca 消息游标。
@@ -23,9 +23,9 @@ PFCA user 消息的两条构造路径：
 
 amy_effect 段的语义（与增量共用）：
 - 核心是决策侧情绪描述，来自无参 get_decision_description()（决策侧出口，见 docs/api/amy.md），
-  为 "原因："（仅最终评价类想法摘要，成因由出口内嵌）。
+  为按轴分组的两轴现状与各自最近五条变动（每轴以【当前情绪】开头）。
   情绪体系隔离（2026-09-13；2026-09-27 SC 轴剔除）：PFCA 不见 NE/DA 表现侧激素行。
-- 前缀由本模块添加：首条【当前情绪】，增量"你的心情变为："。
+- 首条与增量同构，前缀【当前情绪】由出口自带，本模块不再拼接前缀。
 - 游标推进在成功取到描述之后执行：取描述失败时不推进，事件留给下一轮，不丢。
 """
 
@@ -106,13 +106,15 @@ class PFCAInputManager:
         预期拼接格式（_reset_blocks 槽位定义序即拼接序，_compile 过滤空槽，
         条件段可能缺席）：
 
-            {人格总览}                            <- render_persona_roster 生成的常备描述（固定首段）：
+            {message_base}                        <- truck 注入的第一轮消息（输入）
+            {人格总览}                            <- render_persona_roster 生成的常备描述：
             你具有以下人格。                          人格名：适配场景，逐行列出；不含基本人格条目
             {人格名}：{适配场景}
             ...
-            {message_base}                        <- truck 注入的第一轮消息
             【当前环境状态】{年月日 时刻 时段}     <- 纯同步取系统时间，恒非空
-            【当前情绪】{amy 统一出口描述}        <- 三行激素 + 原因；取到非空才拼
+            【当前情绪】{轴名}：{值}/100。{感受}    <- amy 统一出口描述，取到非空才拼；
+            {事件标题} {评价标签} {分数变化}          <- 每轴现状行下紧跟该轴最近五条变动
+            ...
             {近期经历}                            <- temporary_memory 取到非空才拼（≤3 条，
                                                      label "近期经历" 内置标题）
             【当前已经承接的任务】                <- 任务命中才拼（≤10 行轻量简表：
@@ -135,9 +137,9 @@ class PFCAInputManager:
 
         self._reset_blocks()
 
-        self._collect_persona_roster()
-
         self._collect_message_base(request["message"] or "")
+
+        self._collect_persona_roster()
 
         # _collect_current_environment 为纯同步方法（仅取系统时间），不可 await，
         # 否则抛 TypeError: object NoneType can't be used in 'await' expression，
@@ -195,16 +197,16 @@ class PFCAInputManager:
             return None
         await ei.advance_cursor("pfca", max_seq)
 
-        # 输出情绪（description 已含成因，见 _format_amy_segment）
+        # 输出情绪（每轴自带【当前情绪】，见 build_decision_feedback_prompt）
         logger.info(f"增量 - 情绪变化: '{current_amy[:60]}'")
-        return await self._format_amy_segment(current_amy, prefix="你的心情变为：")
+        return current_amy
 
     # ===== 内部辅助 =====
 
     def _reset_blocks(self) -> None:
         self._blocks = {
-            "persona_roster": "",
             "message_base": "",
+            "persona_roster": "",
             "current_environment": "",
             "amy_effect": "",
             "recent_memory": "",
@@ -212,25 +214,13 @@ class PFCAInputManager:
             "notebook_manual": "",
         }
 
-    async def _format_amy_segment(self, description: str, prefix: str) -> str:
-        """构造"情绪描述"段。
-
-        description 来自决策侧出口 get_decision_description()，为 "原因："
-        （仅最终评价类想法摘要，成因出口内嵌），因此这里只加前缀。
-
-        prefix:
-          - 首条：'【当前情绪】'
-          - 增量：'你的心情变为：'
-        """
-        return f"{prefix}{description}"
-
     # ===== 槽位收集 =====
 
     def _collect_persona_roster(self) -> None:
         """首条专用槽位：人格总览（可见人格清单及其适配场景）。
 
-        常备描述，每次会话首条固定注入（固定首段），让 PFCA 知道可调用 /
-        可指派哪些人格；不含基本人格条目（render_persona_roster 已排除）。
+        常备描述，每次会话首条固定注入（位于输入 message_base 之后），让 PFCA
+        知道可调用 / 可指派哪些人格；不含基本人格条目（render_persona_roster 已排除）。
         人格注册表在模块导入时加载，读取失败直接上抛崩溃阻断（user_rules）。
         """
         from brain.base.persona.persona_registry import render_persona_roster
@@ -258,7 +248,7 @@ class PFCAInputManager:
         """首条专用的情绪槽收集（情绪消费者游标，决策侧）。
 
         策略：
-        - 无条件取当前决策侧描述（统一出口 get_decision_description：最终评价类想法原因）；
+        - 无条件取当前决策侧描述（统一出口 get_decision_description：两轴现状与各自最近五条变动）；
           只要 amy 有描述就写槽。
           情绪体系隔离：PFCA 不见 NE/DA 表现侧激素行。
         - 首条消费掉当前全部未读事件并推进游标，避免这些事件在后续增量轮
@@ -276,9 +266,7 @@ class PFCAInputManager:
         if events:
             await ei.advance_cursor("pfca", max(e["seq"] for e in events))
 
-        self._blocks["amy_effect"] = await self._format_amy_segment(
-            current, prefix="【当前情绪】"
-        )
+        self._blocks["amy_effect"] = current
 
     def _collect_recent_memory(self, limit: int = 3) -> None:
         """首条专用槽位：拉取近期经历。
@@ -290,25 +278,19 @@ class PFCAInputManager:
         if text:
             self._blocks["recent_memory"] = text
 
-    async def _collect_ongoing_tasks(self, limit: int = 10) -> None:
-        """首条专用槽位：当前已经承接的任务（轻量简表：标题 + 下次处理时间）。
+    async def _collect_ongoing_tasks(self, limit: int = 5) -> None:
+        """首条只注入总数与最近的少量接续安排，细节按标题查询。
 
-        仅在首条注入一次。任务概况全文极易带偏 LLM 表现，这里只给
-        轻量索引行（format_tasks_brief，每行标题+相对时间），
-        细节由 query_task_status 工具按需查询；任务量很少变化，不进增量。
-        按 user_rules，关键任务拉取失败直接崩溃阻断，不使用 try-except 静默跳过。
+        目录不代表当前要执行所有事项。数据库失败直接上抛。
         """
         from brain.hc.database.task import TaskOperations
         task_ops = TaskOperations()
-        task_ids = await task_ops.get_active_tasks(limit=limit)
-        if not task_ids:
-            return
-        text = await task_ops.format_tasks_brief(task_ids)
+        text = await task_ops.format_active_task_overview(limit=limit)
         if text:
-            self._blocks["ongoing_tasks"] = f"【当前已经承接的任务】\n{text}"
+            self._blocks["ongoing_tasks"] = f"【待接续事项目录】\n{text}"
 
     async def _collect_notebook_manual(self) -> None:
-        """首条专用槽位：记事本手册（全部已落库条目，usage 不参与路由）。
+        """首条专用槽位：记事本手册（全部已落库条目，条目的 category 不参与路由）。
 
         聚合渲染见 notepad.render_manual（章节式裸文本，细节经 query_note 工具溯源）；
         字符预算 max_chars=1000：逐步拉取，累计超过 1000 字符即停止继续拉取

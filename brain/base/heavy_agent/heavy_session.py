@@ -170,7 +170,17 @@ class HeavySession(ABC):
             if assistant_message.tool_calls:
                 self.no_tool_call_count = 0
                 repeat_warned = False
+                speech_used = False
                 for tool_call in assistant_message.tool_calls:
+                    if tool_call.function.name in {"send_message", "send_to_master", "send_to_target"}:
+                        if speech_used:
+                            self.history_manager.append({
+                                "role": "tool", "tool_call_id": tool_call.id,
+                                "name": tool_call.function.name,
+                                "content": "【警告】每轮只能调用一次文字发送工具，本次调用未执行，全部内容未发送：" + tool_call.function.arguments,
+                            })
+                            continue
+                        speech_used = True
                     # 连续重复调用检测：同参数空转的熔断（如反复 query_history 等新消息）
                     verdict = self._register_tool_call(tool_call)
                     if verdict != "ok":

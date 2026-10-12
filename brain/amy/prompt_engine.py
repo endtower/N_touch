@@ -9,12 +9,14 @@ Amy 提示词拼接引擎
 
 情绪体系隔离（2026-09-13；2026-09-27 SC 轴剔除；2026-09-28 新增反馈数值视图）：
 - 表现侧（NE/DA）：conversation / social_chat 专用，build_language_mood_prompt
-- 决策侧         ：pfca / proactive / light_agent 专用，build_decision_mood_prompt
+- 旧决策侧想法渲染：build_decision_mood_prompt 保留兼容；当前双轴转到 decision_feelings
 - 完整视图       ：仅供 adapt/web/amy_api 前端展示，build_mood_prompt
-- 存在感数值视图：reflection 专用，build_feedback_prompt（不显示任何想法）
+- 旧单轴视图：build_feedback_prompt / build_presence_attribution 保留兼容
+- 当前决策与 Reflection：decision_feelings.build_decision_feedback_prompt
 两侧通过 FinalEvaluationAct 类别切分想法原因段，实现情绪体系互不可见。
 """
 
+from brain.amy.decision_feelings import AXIS_NAMES
 from typing import List
 from utils.logger import get_logger
 from brain.amy.constants import (
@@ -175,26 +177,38 @@ def build_decision_mood_prompt(snapshot: MoodSnapshot, with_reason: bool = False
     return "\n".join(parts)
 
 def build_feedback_prompt(value: float) -> str:
-    """存在感数值视图：reflection 专用。
+    """旧归属感单轴兼容视图，Reflection 当前读取双轴。
 
-    直接显示存在感数值状态，**不显示任何想法**。
-    格式：存在感 {value}/{FEEDBACK_MAX} {词档}
-    例：存在感 50/100 正常（词档：贫乏 / 较低 / 正常 / 较高 / 充盈）。
+    直接显示归属感数值状态，**不显示任何想法**。
+    格式：归属感 {value}/{FEEDBACK_MAX} {词档}
+    例：归属感 50/100 正常（词档：贫乏 / 较低 / 正常 / 较高 / 充盈）。
     """
-    return f"存在感 {int(round(value))}/{int(FEEDBACK_MAX)} {get_feedback_desc(value)}"
+    return f"{AXIS_NAMES['recognition']} {int(round(value))}/{int(FEEDBACK_MAX)} {get_feedback_desc(value)}"
+
+
+def build_debt_attribution(entries: List[DebtEntry]) -> str:
+    """未偿欠账的"原因："归因列表（每笔一行）；当前仅由前端页面视图（build_presence_attribution）消费。
+
+    格式：
+        原因：{事件标题} {事件评价} {数值减益}
+    无欠账时返回空字符串。
+    """
+    return "\n".join(f"原因：{entry.title} {entry.kind} {int(entry.score)}" for entry in entries)
 
 
 def build_presence_attribution(value: float, entries: List[DebtEntry]) -> str:
-    """存在感归因块：决策侧出口 / 人格系统统一注入（2026-09-29）。
+    """旧归属感归因块（页面兼容）；决策与人格当前读取双轴。
 
-    存在感行**常显**（PFCA / 人格无条件可见自身数值）：
-        存在感：{当前值}/100
+    归属感行**常显**（PFCA / 人格无条件可见自身数值）：
+        归属感：{当前值}/100
     存在未偿欠账（负面记录）时追加每笔一行归因：
         原因：{事件标题} {事件评价} {数值减益}
-    无欠账时仅返回存在感行。
+    无欠账时仅返回归属感行。
     """
-    lines = [f"存在感：{int(round(value))}/{int(FEEDBACK_MAX)}"]
-    lines += [f"原因：{entry.title} {entry.kind} {int(entry.score)}" for entry in entries]
+    lines = [f"{AXIS_NAMES['recognition']}：{int(round(value))}/{int(FEEDBACK_MAX)}"]
+    attribution = build_debt_attribution(entries)
+    if attribution:
+        lines.append(attribution)
     return "\n".join(lines)
 
 

@@ -50,7 +50,7 @@ class SocialChatSession(HeavySession):
 
         master / working 会话 ID 一律从 social_chat_core 读，调用方不传。
         social_chat_core 必须非 None——未注入就直接崩溃（符合 user_rules）。
-        发送模式不在此注入：SocialChatToolManager 从 config（SOCIAL_CHAT_SEND_MODE）取初始值。
+        发送模式不在此注入：工具和输入管理器从当前事件链读取同一目标会话的权限。
         """
         if social_chat_core is None:
             raise ValueError("SocialChatSession 缺少 social_chat_core 引用")

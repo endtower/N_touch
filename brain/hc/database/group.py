@@ -140,6 +140,19 @@ class GroupOperations:
         await self.update_group_vector(uuid)
         return True
 
+    async def delete_group(self, uuid: str) -> bool:
+        """删除群组行。
+
+        别名 / 印象 / 熟悉度 / 成员印象 / 联系方式 / 群组自我形象 / 向量都在同一
+        行的 JSON/BLOB 列内，随行一并删除；返回 False 表示 uuid 不存在。
+        """
+        if not uuid:
+            return False
+        conn = await self.db._ensure_connection()
+        cur = await conn.execute("DELETE FROM groups WHERE uuid=?", (uuid,))
+        await conn.commit()
+        return cur.rowcount > 0
+
     # ============================================================
     # 查询
     # ============================================================

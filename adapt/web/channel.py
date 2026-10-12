@@ -351,14 +351,33 @@ class WebChannel:
         self._app.router.add_get("/health", self._handle_health)
         self._app.router.add_get("/sessions", self._handle_list_sessions_http)
         self._app.router.add_get("/messages", self._handle_list_messages_http)  # ?scope=&id=
+        from .truck_control import (
+            handle_console_status, handle_console_trucks, handle_console_truck_action,
+        )
+        self._app.router.add_get("/console/status", handle_console_status)
+        self._app.router.add_get("/console/trucks", handle_console_trucks)
+        self._app.router.add_put("/console/trucks", handle_console_trucks)
+        self._app.router.add_post("/console/trucks/{action:apply|stop}", handle_console_truck_action)
 
         # 记忆社交实体可视化 (只读) + 长期事件列表
         from .memory_api import (
             handle_get_social_memory,
-            handle_get_experiences,
+            handle_create_social_memory,
             handle_update_social_memory,
+            handle_delete_social_memory,
+            handle_get_experiences,
+            handle_create_experience,
             handle_update_experience,
             handle_delete_experience,
+        )
+        from .decision_memory_api import (
+            handle_get_kits, handle_create_kit, handle_update_kit, handle_delete_kit,
+            handle_get_observations, handle_search_observations,
+            handle_create_observation, handle_update_observation, handle_delete_observation,
+        )
+        from .maintenance_api import (
+            handle_maintenance, handle_maintenance_items, handle_review,
+            handle_maintenance_request, handle_personas, handle_update_persona,
         )
         from .graph_api import (
             handle_list_tasks,
@@ -417,12 +436,31 @@ class WebChannel:
 
         # 记忆社交实体: 以 00000000 为中心的星形图 (只读)
         self._app.router.add_get("/memory/social", handle_get_social_memory)
+        self._app.router.add_post("/memory/social/{entity_type}", handle_create_social_memory)
         # 记忆内容编辑: PATCH 修改角色/群组/模糊角色的具体字段
         self._app.router.add_patch("/memory/social/{entity_type}/{entity_id}", handle_update_social_memory)
+        # 记忆内容删除: DELETE 删除角色/群组/模糊角色 (角色/群组级联清理模糊角色)
+        self._app.router.add_delete("/memory/social/{entity_type}/{entity_id}", handle_delete_social_memory)
         # 记忆经验/嘱托: bequests 表 (只读 + 内联编辑 + 删除)
         self._app.router.add_get("/memory/experiences", handle_get_experiences)
+        self._app.router.add_post("/memory/experiences", handle_create_experience)
         self._app.router.add_patch("/memory/experiences/{bequest_id}", handle_update_experience)
         self._app.router.add_delete("/memory/experiences/{bequest_id}", handle_delete_experience)
+        self._app.router.add_get("/memory/kits", handle_get_kits)
+        self._app.router.add_get("/memory/maintenance", handle_maintenance)
+        self._app.router.add_get("/memory/maintenance/items", handle_maintenance_items)
+        self._app.router.add_post("/memory/maintenance/reviews", handle_review)
+        self._app.router.add_patch("/memory/maintenance/requests/{request_id}", handle_maintenance_request)
+        self._app.router.add_get("/memory/personas", handle_personas)
+        self._app.router.add_patch("/memory/personas/{persona_name}", handle_update_persona)
+        self._app.router.add_post("/memory/kits", handle_create_kit)
+        self._app.router.add_patch("/memory/kits/{kit_id}", handle_update_kit)
+        self._app.router.add_delete("/memory/kits/{kit_id}", handle_delete_kit)
+        self._app.router.add_get("/memory/observations", handle_get_observations)
+        self._app.router.add_get("/memory/observations/search", handle_search_observations)
+        self._app.router.add_post("/memory/observations", handle_create_observation)
+        self._app.router.add_patch("/memory/observations/{note_id}", handle_update_observation)
+        self._app.router.add_delete("/memory/observations/{note_id}", handle_delete_observation)
         # 任务列表 (只读 + 状态快改 + 字段编辑 + 创建 + 删除；URL 暂沿用 /events/*)
         self._app.router.add_get("/events/list", handle_list_tasks)
         self._app.router.add_post("/events/set_type", handle_set_task_status)

@@ -12,15 +12,11 @@ proactive 工具模块
 - launch_pfca:               启动 PFCA（终结工具：调完 session 退出）
 - query_address_book:        查看通讯录（ToolSocial 通用实现，对齐 PFCA_tool_manager）
 - query_history:             查看一个会话的聊天记录（ToolSocial 通用实现，对齐 PFCA_tool_manager）
-- update_long_term_task:     受限更新任务（仅 update；用于推迟唤醒时间，详见工具 docstring）
+- quest_agent:               登记一条待接续事项（委托 ToolTask，交给 Quest 查重后登记）
 - skip_proactive:            主动跳过本次任务（终结工具）
 
 暂未暴露给 LLM 的工具（实现 + 注册保留，仅从 TOOL_SCHEMAS 中隐藏，避免 LLM 发现/误调）：
 - memory_agent:              调整记忆（实现仍保留在 _tool_memory_adjustment）
-- task_judgement:            调整任务（实现仍保留在 _tool_task_judgement；2026-09-17 起委托
-                             QuestAgent.run 的多轮 LLM 决策，可 create/update/review_stage；
-                             与 update_long_term_task 不同：后者直调 ToolTask 底层、仅 update，
-                             proactive 不把 task_judgement 开放给 LLM）
 """
 
 import json
@@ -28,7 +24,7 @@ from functools import partial
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from utils.logger import get_logger
-from brain.base import ToolManager, ToolSocial
+from brain.base import ToolManager, ToolSocial, ToolTask
 
 logger = get_logger("ProactiveTools", "DEBUG")
 
@@ -107,67 +103,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_long_term_task",
-            "description": (
-                "更新一条【已存在】的任务。\n"
-                "重要限制（proactive 上下文）：只能更新已有任务，禁止创建/删除；"
-                "task_title 必须精确匹配到一条已存在任务，不确定存在就先查证，不要靠模糊标题硬调。\n"
-                "典型用途——推迟再次唤醒：审视到一个已到期的未完成任务、此刻不宜执行时，"
-                "必须调用本工具把下次唤醒推迟到更晚，这是防止系统短期重复唤起的唯一受支持手段。\n"
-                "也可用于更新任务阶段 stage，或把任务标记为完成（next_occurrence 填「完结」）。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_title": {
-                        "type": "string",
-                        "description": (
-                            "要更新的任务标题，必须能在任务表中精确匹配到一条已存在的任务。"
-                        ),
-                    },
-                    "next_occurrence": {
-                        "type": "string",
-                        "description": (
-                            "下次处理时间。推迟唤醒时必填一个比当前时间更晚的 ISO 8601 时间点"
-                            "（例如 '2024-01-20T10:00:00'），否则系统会立刻再次唤醒；"
-                            "如要标记任务完成，填「完结」。"
-                        ),
-                    },
-                    "notes": {
-                        "type": "string",
-                        "description": (
-                            "一条简短的说明性笔记（覆盖任务笔记列）；"
-                            "若本次为推迟唤醒，说明推迟原因，例如：时机不成熟、缺关键信息等。"
-                        ),
-                    },
-                    "stage": {
-                        "type": "string",
-                        "description": (
-                            "更新后的当前阶段（一句话、刚性目标，说明还需要做什么）。"
-                            "不填则保持原值不变。"
-                        ),
-                    },
-                    "deadline": {
-                        "type": "string",
-                        "description": (
-                            "最终汇报时间（可选，ISO 8601）。仅在需要顺延/提前任务的最终汇报时限时填写；"
-                            "不填则保持原值不变。到了该时间仍未达标，系统会要求整理已有材料收尾。"
-                        ),
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": (
-                            "本次更新的原因（给 history/日志留痕），例如：'主动推迟，理由：时机不成熟'。"
-                        ),
-                    },
-                },
-                "required": ["task_title", "next_occurrence"],
-            },
-        },
-    },
+    # quest_agent 联系通道（2026-10-11 接入：原 update_long_term_task 的更新语义已随任务
+    # 系统收敛移除——任务触发即过期、续办靠新建。此刻不宜执行时，交给 Quest 查重后
+    # 登记一条更晚唤醒的同类事项，而非就地更新原任务）
+    ToolTask.get_quest_agent_tool_schema(),
 ]
 
 
@@ -192,9 +131,8 @@ class ProactiveToolRegistry(ToolManager):
             # consumer_id 显式传 "pfca"：LLM 已读到的消息推进 pfca 游标，truck 不再重复触发
             "query_history": partial(ToolSocial.query_history, consumer_id="pfca"),
             "memory_adjustment": _tool_memory_adjustment,
-            "task_judgement": _tool_task_judgement,
             "skip_proactive": _tool_skip_proactive,
-            "update_long_term_task": _tool_update_long_term_task,
+            "quest_agent": ToolTask.quest_agent,
         }
         self._initialized = True
         logger.debug("ProactiveToolRegistry 初始化完成")
@@ -379,43 +317,6 @@ async def _tool_memory_adjustment(
     return str(result)
 
 
-async def _tool_task_judgement(content: str, operation_type: str) -> str:
-    """任务调整，根据请求对任务进行创建或更新。
-
-    对齐 reflection_tools.task_judgement 的任务语义（2026-09-15 由 event_judgement 改来；
-    2026-09-17 升级为 QuestAgent：阶段拆解 / 进展追踪 / 推进裁决）。
-
-    Args:
-        content: 具体情况的详细描述
-        operation_type: 操作类型
-            - 'create_task': 创建新任务
-            - 'update_task': 推进或完结一个已有任务
-            - 'review_stage': 阶段裁决（进展到哪一步、下一阶段能否推进）
-
-    Returns:
-        str: QuestAgent 的最终文本回复（未使用工具的轮次）
-    """
-    logger.info(f"执行task_judgement操作，operation_type={operation_type}，内容: {content}")
-
-    from brain.hc.global_session_state import get_global_session_state
-    from brain.base.light_agent.quest_agent import QuestAgent
-
-    focus_state = get_global_session_state()
-    action_desc = {
-        "create_task": f"新增任务：{content}",
-        "update_task": f"更新任务：{content}",
-        "review_stage": f"阶段裁决：{content}",
-    }.get(operation_type, f"记录任务：{content}")
-    focus_state.manager_pfca_actions('add', action_desc)
-
-    agent = QuestAgent()
-    result = await agent.run(additional_content=content, operation_type=operation_type)
-
-    if isinstance(result, dict) and result.get('formatted_output'):
-        return result['formatted_output']
-    return str(result) if result else "任务已记录"
-
-
 async def _tool_skip_proactive(reason: str = "no_action_needed") -> str:
     """主动任务跳过/退出工具。
 
@@ -431,74 +332,3 @@ async def _tool_skip_proactive(reason: str = "no_action_needed") -> str:
     """
     logger.info(f"proactive LLM 决定跳过: {reason}")
     return f"已跳过本次主动任务, reason={reason}"
-
-
-async def _tool_update_long_term_task(
-    task_title: str,
-    next_occurrence: str,
-    notes: str = "",
-    stage: str = "",
-    deadline: str = "",
-    reason: str = "",
-) -> str:
-    """受限的任务更新工具（proactive 专用）。
-
-    与 QuestAgent 暴露的 update_task_status 不同，这里**直接复用
-    QuestAgent._update_task_status_impl**（绕过 QuestAgent.run 的多轮
-    LLM 决策层），因此只能 update、不能 create。
-
-    注：update_task_status 属裁决级工具（2026-09-17 权限分区调整），
-    实现私有于 QuestAgent，不再作为 common way——ToolTask 只收口
-    append_task_log / query_task_status。
-
-    Args:
-        task_title: 任务标题（必须能在任务表里精确匹配到一条已存在的任务）
-        next_occurrence: 下次处理时间（ISO 8601）；输入「完结」则标记任务已完成
-        notes: 一条说明性笔记（覆盖任务笔记列）；用于推迟唤醒时说明原因
-        stage: 更新后的当前阶段；留空则保持原值不变
-        deadline: 最终汇报时间（ISO 8601，可选）；不传则保持原值不变
-        reason: 本次更新原因（仅日志/留痕，不影响行为）
-
-    Returns:
-        JSON 字符串，包含 task_title / next_occurrence / deadline / status / success / reason
-    """
-    if not task_title:
-        return json.dumps(
-            {"success": False, "error": "task_title 不能为空"},
-            ensure_ascii=False,
-        )
-    if not next_occurrence:
-        return json.dumps(
-            {"success": False, "error": "next_occurrence 不能为空（推迟唤醒填更晚的 ISO 8601 时间，完结任务填「完结」）"},
-            ensure_ascii=False,
-        )
-
-    logger.info(
-        f"proactive 更新任务: task_title={task_title!r}, "
-        f"next_occurrence={next_occurrence!r}, reason={reason!r}"
-    )
-
-    # 懒导入：update_task_status 属裁决级工具，实现私有于 QuestAgent
-    # （2026-09-17 权限分区调整，不再收口于 common_ways/tool_task.py）
-    from brain.base.light_agent.quest_agent import QuestAgent
-
-    result = await QuestAgent._update_task_status_impl(
-        task_title=task_title,
-        next_occurrence=next_occurrence,
-        notes=notes or None,
-        stage=stage or None,
-        deadline=deadline or None,
-    )
-
-    # 记录 reason 到历史/日志（不影响 update 行为本身）
-    if reason:
-        from brain.hc.global_session_state import get_global_session_state
-        focus_state = get_global_session_state()
-        focus_state.manager_pfca_actions(
-            'add',
-            f"更新任务「{task_title}」：{reason}",
-        )
-
-    # 包装返回：补一个 reason 字段供 LLM 校对
-    result.setdefault("reason", reason)
-    return json.dumps(result, ensure_ascii=False, default=str)

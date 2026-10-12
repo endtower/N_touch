@@ -35,13 +35,10 @@ class ConversationToolManager(ToolManager):
                 "enum": _SEND_MESSAGE_NATURES
             }
 
-        # 通用 record_to_notepad schema（ToolHC 收口）+ conversation 专有经验匮乏上报扩展
-        record_note_schema = ToolHC.get_conversation_record_note_tool_schema()
-        record_note_schema["function"]["description"] = (
-            "将对话中观察到的对方素材写入记事本缓存，供反思系统后续提炼。"
-            "优先记录对方的言论（原话短引最佳）、要求与标准、好恶、反应模式；"
-            "完整事件经过不用记（由 terminate 的 summary 承担）。"
-            "也可记录经验匮乏情况：某类场景检索不到可用经验、现有经验效果不佳、"
+        # 统一 record_to_notepad schema（ToolHC 收口）+ conversation 专有经验匮乏上报扩展
+        record_note_schema = ToolHC.get_record_note_tool_schema()
+        record_note_schema["function"]["description"] += (
+            "\n也可记录经验匮乏情况：某类场景检索不到可用经验、现有经验效果不佳、"
             "缺少某类话术或表情包素材等，写明场景与缺口，供反思系统裁决是否登记、修订或删除经验。"
         )
 
@@ -59,12 +56,21 @@ class ConversationToolManager(ToolManager):
                         "properties": {
                             "summary": {
                                 "type": "string",
-                                "description": "本段对话的总结，含情绪感受补充。"
+                                "description": "本段对话的简要总结，由于上游可以看到对话记录，所以主要是对情绪感受补充。"
                             },
                             "encounter_type": {
                                 "type": "string",
                                 "description": f"遭遇类型（可选）。流转前进行情感判断时使用，必须从 EvaluationAct 列表中选择之一：{'、'.join(EvaluationAct.names())}。",
                                 "enum": EvaluationAct.names()
+                            },
+                            "failure_reason": {
+                                "type": "string",
+                                "description": (
+                                    "失败原因归纳（可选；表现不佳或表现很好时填写）。"
+                                    "用于归纳失败与好的原因，例如某条经验是错误的、自身发言不佳、"
+                                    "上游 PFCA 经验错误等。填写后将自动以「自我修正」类别记入笔记，"
+                                    "供系统自我改进。限 1 句话、50 字以内。"
+                                )
                             }
                         },
                         "required": ["summary"]
@@ -229,12 +235,34 @@ class ConversationToolManager(ToolManager):
             consumer_id=CONVERSATION_CONSUMER_ID,
         )
 
-    async def transfer_task_to_PFCA_agent(self, summary: str, encounter_type: str = None) -> Dict[str, Any]:
+    async def transfer_task_to_PFCA_agent(
+        self,
+        summary: str,
+        encounter_type: str = None,
+        failure_reason: str = None,
+    ) -> Dict[str, Any]:
+        """流转回 PFCA。
+
+        failure_reason: 失败原因归纳（可选）——表现不佳或表现很好时填写，
+            归纳失败与好的原因（如某条经验错误、自身发言不佳、上游 PFCA 经验错误），
+            自动以「自我修正」类别记入笔记，供系统自我改进。
+        """
         logger.debug(f"收到仔细思索请求，总结: {summary}")
 
         if encounter_type:
             logger.debug(f"检测到遭遇类型参数: {encounter_type}，执行情感判断")
             await self.emotional_judgment(act=encounter_type)
+
+        # 失败原因归纳：以「自我修正」类别记入记事本（同一事件链缓存文档，
+        # 随 PFCA 结束落库）。写入在停止会话之前完成，避免漏记。
+        cleaned_reason = (failure_reason or "").strip()
+        if cleaned_reason:
+            from brain.hc.shortlight import NOTE_CATEGORY_SELF_FIX
+
+            await self.record_to_notepad(
+                text=cleaned_reason, category=NOTE_CATEGORY_SELF_FIX
+            )
+
         logger.debug("执行停止聊天操作")
         result = await self.conversation_core.stop_session(summary)
         return str(result)
@@ -267,24 +295,26 @@ class ConversationToolManager(ToolManager):
         logger.debug(f"情感判断完成，动作为: {act}, session={session_type}/{session_name}, 成功: {success}")
         return f"情感判断失败: {msg}"
 
-    async def record_to_notepad(self, text: str, usage: str) -> str:
+    async def record_to_notepad(self, text: str, category: str) -> str:
         """记事本（灵光一现）写入——对话现场观察采集（对方素材），不做经验提炼。
-        仅收纯文本与语境标注；元数据由系统侧自动附加，记录进当前事件链的缓存文档，
+        仅收纯文本与类别标签；元数据由系统侧自动附加，记录进当前事件链的缓存文档，
         PFCA 真正结束时统一以事件标题命名落库。"""
         from brain.base.common_ways import ToolHC
 
         note_id = await ToolHC.record_note(
             text=text,
+            category=category,
             source="conversation",
             session_id=self.conversation_core.conversation_id or "",
             session_name=self.conversation_core.session_name or "",
-            usage=usage,
         )
         return f"已记录至记事本（{note_id}）。"
 
     async def query_note(self, title: str) -> str:
-        """查询记事本某一章节（按标题精确匹配，重名取最新）的完整细节，
-        委托通用 ToolHC.query_note（起因/总结/自我评价/逐条记录及元数据）。"""
+        """按章节标题查询一篇普通笔记的完整细节，委托通用 ToolHC.query_note。
+
+        章节标题取自 list_notes 的普通笔记返回；见闻录 / 任务相关笔记等
+        特殊槽位由 list_notes 直接给全，不经此工具。"""
         return await ToolHC.query_note(title)
 
     async def query_bequest(self, query: str, top_k: int = 3) -> Dict[str, Any]:

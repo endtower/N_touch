@@ -31,8 +31,9 @@ def get_social_chat_system_prompt() -> str:
 - 你的话术、发言必须体现你的情绪，这与执行任务不冲突。
 
 【发送模式】
-- 对外发言的唯一入口是 send_to_target，受发送模式监管。
+- 对外文字与图片分别经 send_to_target、send_image_to_target，读取同一发送权限。
 - 当前模式与切换规则见首条消息的模式 block：approval=逐条审批，unrestricted=自由发送。
+- 自由授权仅限当前事件链的当前工作会话；交还 PFCA 后再次进入该会话仍有效，链结束即失效。
 
 【工作流程】
 1. 读首条任务书，确认目标；意向不明时先用 send_to_master 与主人对齐。

@@ -74,6 +74,7 @@ class BaseGlobalSessionState:
             # 事件链状态由实例属性持有（单一数据源）
             self._event_chain_active = False
             self._current_event_chain = None
+            self._event_chain_permissions = None
             self._processed_by_hc = False
 
             # 统一数据字典：各数据子类读写自己的分区

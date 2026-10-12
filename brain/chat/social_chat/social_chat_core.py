@@ -16,8 +16,8 @@ persona_name（2026-09-29 起）：本段社交使用的人格名，由 PFCA soc
 工具入参显式指定（缺省 normal）；core 持有之，供 input_manager 在首条 user
 消息注入【当前人格】段。
 
-发送模式（审批 / 自由）由 config.SOCIAL_CHAT_SEND_MODE 决定初始值，
-run 内可经 set_send_mode 工具切换（升级需主人『同意』），本类不接收模式参数。
+发送模式（审批 / 自由）由事件链权限服务统一持有，config 决定每条链的默认值。
+同一链同一目标会话继承授权；升级需主人『同意』，本类不接收模式参数。
 """
 
 import time

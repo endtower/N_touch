@@ -18,12 +18,15 @@ import time
 import asyncio
 from functools import partial
 from typing import Dict, Any, List
-from brain.amy.constants import FinalEvaluationAct, clamp, FEEDBACK_MAX
+from brain.amy.constants import FinalEvaluationAct, TaskResultAct, clamp, FEEDBACK_MAX
 from brain.amy.feedback_state import get_feedback_state
+from brain.amy.decision_feelings import AXIS_NAMES
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
-from brain.base import ToolManager, ToolHC, ToolSocial, ToolTask, ToolPersona
+from brain.base import ToolManager, ToolHC, ToolSocial, ToolTask, ToolPersona, ToolJinnang
+from brain.hc.shortlight import SCOPE_NORMAL
 from brain.hc.global_session_state import get_global_session_state
+from brain.base.common_ways.tool_maintenance import ToolMaintenance
 
 
 # 获取日志记录器
@@ -158,17 +161,21 @@ class PFCA_tool_manager(ToolManager):
                                 "maxLength": 15,
                                 "description": "本次事件的简易标题（不超过 15 字），最终评价想法将绑定该标题。"
                             },
-                            "final_evaluation": {
+                            "task_result": {
+                                "type": "string", "enum": TaskResultAct.names(),
+                                "description": "按实际承接的目标判断，不能仅凭 Quest/Reflection/闲聊来源判断。成功 +20；失败 -20；纯闲聊或结果不明不结算效能感。邀请尚未回应等结果未明不能算失败。"
+                            },
+                            "task_reason": {
                                 "type": "string",
-                                "enum": FinalEvaluationAct.names(),
-                                "description": (
-                                    "本次 PFCA 会话的最终评价（按他人反馈四档选）:"
-                                    "被夸选「被他人夸奖为优秀」(+20)；"
-                                    "评价尚可选「被他人评价为尚可」(+10)；"
-                                    "无反馈选「未得到他人评价与反馈」(-10)；"
-                                    "被否定选「被他人评价欠佳/不认可」(-20)。"
-                                    "仅第二次调用（确认退出时）生效；不填按无评价"
-                                )
+                                "description": "成功或失败时必填：任务结果的原因与依据。成功说明做对了什么；失败说明可能原因，如子 agent 表现、自身策略失误、经验缺失或外部条件。说明依据与不确定性，不能把猜测写成事实。总结中也需保留主要原因。纯闲聊或结果不明可省略。"
+                            },
+                            "evaluation_reason": {
+                                "type": "string",
+                                "description": "评价依据：已承接目标、可观察结果，以及主人或其他人的反馈。社交评价依赖外部回应，不能把自己的期待当成别人评价。"
+                            },
+                            "final_evaluation": {
+                                "type": "string", "enum": FinalEvaluationAct.names(),
+                                "description": "总体社交评价：明确好 +20，含蓄好 +10，含蓄坏 -10，明确坏 -20，无评价 -5。与任务成功失败独立；仅第二次确认退出时结算。"
                             },
                             "enter_reflection": {
                                 "type": "boolean",
@@ -186,18 +193,20 @@ class PFCA_tool_manager(ToolManager):
                                 )
                             }
                         },
-                        "required": ["summary", "title"]
+                        "required": ["summary", "title", "task_result", "final_evaluation", "evaluation_reason"]
                     }
                 }
             },
             ToolHC.get_list_notes_tool_schema(),
             ToolHC.get_query_note_tool_schema(),
-            ToolHC.get_pfca_record_note_tool_schema(),
-            # 通用级任务工具（2026-09-18 接入：查询任务状态 + 给任务添加笔记；
-            # 裁决级 create_task / update_task_status 仍私有于 QuestAgent，不对 PFCA 开放）
+            ToolHC.get_record_note_tool_schema(),
+            ToolJinnang.get_query_jinnang_tool_schema(),
+            ToolMaintenance.get_query_maintenance_tool_schema(),
+            # 通用级任务工具（2026-09-18 接入：查询任务状态；
+            # 裁决级 create_task 仍私有于 QuestAgent，不对 PFCA 开放）
             *ToolTask.get_task_tool_schemas(),
-            # quest_agent 联系通道（2026-09-18 接入：直接联系 quest agent，转交内容
-            # 由其裁决——审批推进 / 登记任务 / 修订任务；PFCA 不持有裁决权）
+            # quest_agent 联系通道（2026-09-18 接入：直接联系 quest agent 登记待接续事项，
+            # 由其查重后登记；PFCA 不持有裁决权）
             ToolTask.get_quest_agent_tool_schema(),
         ]
 
@@ -217,8 +226,9 @@ class PFCA_tool_manager(ToolManager):
             "query_note": self.query_note,
             "list_notes": self.list_notes,
             "record_to_notepad": self.record_to_notepad,
+            "query_jinnang": ToolJinnang.query_jinnang,
+            "query_maintenance": ToolMaintenance.query_maintenance,
             # 通用级任务工具（直接引用 ToolTask 类方法，风格同 query_history 引用 ToolSocial）
-            "append_task_log": ToolTask.append_task_log,
             "query_task_status": ToolTask.query_task_status,
             # quest_agent 联系通道（直接引用 ToolTask 类方法）
             "quest_agent": ToolTask.quest_agent,
@@ -522,30 +532,36 @@ class PFCA_tool_manager(ToolManager):
         return f"等待观察完成，未收到对方回复，总共等待 {int(seconds)} 秒，当前时间：{current_time}"
 
     async def query_note(self, title: str) -> str:
-        """查询记事本某一章节（按标题精确匹配，重名取最新）的完整细节，
-        委托通用 ToolHC.query_note（起因/总结/自我评价/逐条记录及元数据）。"""
+        """按章节标题查询一篇普通笔记的完整细节，委托通用 ToolHC.query_note。
+
+        章节标题取自 list_notes 的普通笔记返回；见闻录 / 任务相关笔记等
+        特殊槽位由 list_notes 直接给全，不经此工具。"""
         return await ToolHC.query_note(title)
 
-    async def list_notes(self) -> str:
-        """列出记事本全部已落库笔记概览，委托通用 ToolHC.list_notes
-        （标题/触发原因摘要/落库时间/记录条数；为 query_note 提供标题来源）。"""
-        return await ToolHC.list_notes()
+    async def list_notes(self, scope: str = SCOPE_NORMAL) -> str:
+        """列出笔记概览，委托通用 ToolHC.list_notes。
 
-    async def record_to_notepad(self, text: str, usage: str) -> str:
+        scope 可选普通笔记（默认，已落库事件链文档，给章节标题与条目数）/
+        见闻录 / 任务相关笔记（后两者为特殊储存槽位台账，逐条给全）。"""
+        return await ToolHC.list_notes(scope=scope)
+
+    async def record_to_notepad(self, text: str, category: str) -> str:
         """记事本（灵光一现）写入——PFCA 策略视角：采集观察到的对方素材，不做经验提炼。
-        仅收纯文本与语境标注；来源标注 source="pfca"，溯源走事件链，
+        仅收纯文本与类别标签；来源标注 source="pfca"，溯源走事件链，
         记录进当前事件链的缓存文档，terminate 落库时统一以事件标题命名。"""
         note_id = await ToolHC.record_note(
             text=text,
+            category=category,
             source="pfca",
             session_id="",
             session_name="",
-            usage=usage,
         )
         return f"已记录至记事本（{note_id}）。"
 
     async def terminate(self, summary: str, title: str = "", check: bool = False, final_evaluation: str = "",
-                        enter_reflection: bool = False, reflection_purpose: str = "") -> str:
+                        enter_reflection: bool = False, reflection_purpose: str = "",
+                        task_result: str = TaskResultAct.NEUTRAL, task_reason: str = "",
+                        evaluation_reason: str = "") -> str:
         """
         结束当前全部的任务链。
 
@@ -561,7 +577,10 @@ class PFCA_tool_manager(ToolManager):
             title: 本次事件的简易标题（≤15 字），最终评价想法绑定该标题
             check: 已废弃，不再使用
             final_evaluation: 本次 PFCA 会话的最终评价（词表名，来自 FinalEvaluationAct）；
-                仅第二次调用（确认退出）时生效；留空按「未得到他人评价与反馈」登记
+                仅第二次调用（确认退出）时生效；留空按「无评价」登记（旧调用兼容）
+            task_result: 成功 / 失败 / 纯闲聊或结果不明；默认中性用于旧调用兼容
+            task_reason: 成功或失败时必填，任务结果的原因与依据（证据与不确定性）
+            evaluation_reason: 已承接目标、结果与外部反馈依据
             enter_reflection: 是否在本会话结束后进入反思状态（接力 Reflection 会话）；
                 仅第二次调用（确认退出）时生效
             reflection_purpose: 进入反思的目的（作为反思会话首条输入）；
@@ -582,6 +601,18 @@ class PFCA_tool_manager(ToolManager):
             if not (reflection_purpose or "").strip():
                 raise ValueError("enter_reflection=true 时必须提供 reflection_purpose")
 
+        TaskResultAct.validate(task_result, task_reason)
+        if not isinstance(evaluation_reason, str):
+            raise ValueError("评价依据必须是文本")
+        if not title.strip():
+            raise ValueError("收尾必须提供事件标题 title")
+        final_evaluation = (final_evaluation or "").strip()
+        if not final_evaluation:
+            final_evaluation = FinalEvaluationAct.default_name()
+        if not FinalEvaluationAct.contains(final_evaluation):
+            raise ValueError(f"未知社交评价：{final_evaluation}")
+        final_evaluation = FinalEvaluationAct.normalize(final_evaluation)
+
         terminate_confirmed = focus_state._data.get("terminate_confirmed", False)
 
         if not terminate_confirmed:
@@ -596,6 +627,9 @@ class PFCA_tool_manager(ToolManager):
                 "summary": summary,
                 "title": title,
                 "final_evaluation": final_evaluation,
+                "task_result": task_result,
+                "task_reason": task_reason,
+                "evaluation_reason": evaluation_reason,
             }
 
             # ===== 结束预览（确认退出前的预告） =====
@@ -605,18 +639,18 @@ class PFCA_tool_manager(ToolManager):
             task_ids = await task_ops.get_active_tasks(limit=10)
             tasks_text = await task_ops.format_tasks_brief(task_ids) if task_ids else ""
 
-            # 2) 本次最终评价 → 存在感变化预览（当前 → 结算后）+ 新增欠账原因行。
-            #    评价归一与第二次调用同源：空/词表外一律按「未得到他人评价与反馈」预览。
-            fe = (final_evaluation or "").strip()
-            if not FinalEvaluationAct.contains(fe):
-                fe = FinalEvaluationAct.default_name()
+            # 2) 两轴预览。参数已前置校验，这里只计算，不结算。
+            fe = final_evaluation
             delta = FinalEvaluationAct.feedback_delta(fe)
             current = get_feedback_state().read_value()
             after = clamp(current + delta, 0.0, FEEDBACK_MAX)
             presence_line = (
-                f"存在感：{int(round(current))}/{int(FEEDBACK_MAX)} "
+                f"{AXIS_NAMES['recognition']}：{int(round(current))}/{int(FEEDBACK_MAX)} "
                 f"→ {int(round(after))}/{int(FEEDBACK_MAX)}"
             )
+            competence = get_feedback_state().snapshot()["competence_value"]
+            competence_after = clamp(competence + TaskResultAct.deltas[task_result], 0.0, FEEDBACK_MAX)
+            competence_line = f"{AXIS_NAMES['competence']}：{competence:g}/100 → {competence_after:g}/100（{task_result}）"
             reason_line = ""
             if delta < 0:
                 reason_line = f"原因：{title} {fe} {int(delta)}   ←新增"
@@ -624,7 +658,9 @@ class PFCA_tool_manager(ToolManager):
             preview = ["你需要二次确认才能真正结束。", "", "本次行动结束后："]
             if tasks_text:
                 preview += ["有以下任务仍未完成，将择时再次处理", tasks_text]
-            preview += ["", presence_line]
+            preview += ["", competence_line, presence_line, f"评价依据：{evaluation_reason or '详见本轮总结'}"]
+            if task_reason.strip():
+                preview.append(f"任务原因：{task_reason}")
             if reason_line:
                 preview.append(reason_line)
             preview += [
@@ -649,17 +685,12 @@ class PFCA_tool_manager(ToolManager):
         get_temporary_memory().add(summary)
         logger.info("已将 terminate 总结写入短期记忆（最后一次调用）")
 
-        # 登记本次 PFCA 会话的最终评价（自我评价记录：计入想法池 + 随记事本落库）。
-        # 评价归一：LLM 未给出词表内取值（空值、词表外、含糊文本）一律自动落
-        # 「未得到他人评价与反馈」，不让幻觉词表值触发 ValueError 崩溃。
-        final_evaluation = (final_evaluation or "").strip()
-        if not FinalEvaluationAct.contains(final_evaluation):
-            final_evaluation = FinalEvaluationAct.default_name()
+        # 本次参数已经校验；确认退出后登记任务结果与外部评价。
         # 关键闭环步骤，禁止 try-except 吞异常；获取失败直接上抛崩溃阻断。
-        # title 透传给最终评价，想法 desc 采用可追溯形式：因为 {title} 任务中，导致的{上升/降低}。
+        # 事件标题及原因进入可追溯变动历史。
         from brain.amy.emotional_interface import get_emotional_interface
         ei = await get_emotional_interface()
-        await ei.apply_final_evaluation(final_evaluation, title)
+        await ei.apply_final_evaluation(final_evaluation, title, task_result, task_reason, evaluation_reason)
 
         # 灵光一现记事本落库（真正结束）：以本次事件标题命名，将本事件链期间
         # conversation 记录的素材、触发原因、PFCA 总结与最终评价一并持久化到 shortlight/notes/。

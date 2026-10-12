@@ -2,7 +2,7 @@
 """
 Amy 模块状态契约（stable public API）
 
-供预设测试环境使用：把 amy 的 thought 持久化状态导出/还原为可读 JSON
+供预设测试环境使用：把 amy 的 thought 与决策情感持久化状态导出/还原为可读 JSON
 （崩溃/覆盖机制已移除，system_state 载荷随之取消）。
 - 载体：JSON（可肉眼编辑、可版本化），设计记录见 docs/已完成.md（测试系统）
 - 归属：本契约归 Amy 模块暴露；tests 只做隔离运行时的组装与应用。
@@ -34,18 +34,20 @@ class AmyState:
     """Amy 模块状态契约（stable public API，JSON 载体）。
 
     属性：
-        thoughts:     thought_cache.json 内容（thoughts + timestamp）
+        thoughts: thought_cache.json 内容（thoughts + timestamp）
+        feedback: feedback_state.json 内容（两轴及最近五条原因）
     """
 
-    def __init__(self, thoughts: Dict[str, Any]) -> None:
+    def __init__(self, thoughts: Dict[str, Any], feedback: Dict[str, Any] = None) -> None:
         self.thoughts = thoughts
+        self.feedback = feedback if feedback is not None else {"value": 50, "competence_value": 50, "history": []}
 
     @classmethod
     async def capture(cls) -> "AmyState":
         """从当前实例（单例指向的 persistence 目录）导出状态。"""
         ei = await get_emotional_interface()
         thoughts = _read_json(ei.thought_cache.persistence_file)
-        return cls(thoughts=thoughts)
+        return cls(thoughts=thoughts, feedback=ei.feedback_state.snapshot())
 
     @classmethod
     async def capture_from(cls, persistence_dir) -> "AmyState":
@@ -56,10 +58,11 @@ class AmyState:
         persistence_dir = Path(persistence_dir)
         return cls(
             thoughts=_read_json(persistence_dir / "thought_cache.json"),
+            feedback=_read_json(persistence_dir / "feedback_state.json"),
         )
 
     async def restore(self, persistence_dir: Path) -> None:
-        """在隔离 persistence 目录写回 thought_cache.json / system_state.json。
+        """在隔离 persistence 目录写回 thought_cache.json / feedback_state.json。
 
         随后复用 get_emotional_interface(persistence_dir) 把单例指向隔离目录
         （其 bootstrap 对已存在的系统 act 自动跳过）。
@@ -67,6 +70,7 @@ class AmyState:
         """
         persistence_dir = Path(persistence_dir)
         _write_json(persistence_dir / "thought_cache.json", self.thoughts)
+        _write_json(persistence_dir / "feedback_state.json", self.feedback)
         await get_emotional_interface(persistence_dir)
 
     # ---- 情景文档（JSON 文件）存/取 ----
@@ -79,6 +83,7 @@ class AmyState:
             "module": "amy",
             "state": {
                 "thoughts": self.thoughts,
+                "feedback": self.feedback,
             },
         }
         _write_json(path, payload)
@@ -93,4 +98,5 @@ class AmyState:
         state = data["state"]
         return cls(
             thoughts=state.get("thoughts", {}),
+            feedback=state.get("feedback"),
         )

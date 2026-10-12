@@ -162,23 +162,12 @@ class ProactiveInputManager:
         lines = ["【当前计划中要做的任务】"]
         for i, task in enumerate(planned_tasks, 1):
             title = task.get("title", "未知")
-            brief = task.get("brief", "")
-            conclusion = task.get("conclusion", "")
-            stage = task.get("stage", "")
-            notes = task.get("notes", "")
+            context = task.get("context", "")
             next_occ = task.get("next_occurrence") or "未排期"
-            deadline = task.get("deadline") or "未设置"
             lines.append(f"{i}. {title}")
-            if brief:
-                lines.append(f"   简要: {brief}")
-            if stage:
-                lines.append(f"   当前阶段: {stage}")
-            if conclusion:
-                lines.append(f"   已获结论: {conclusion}")
-            if notes:
-                lines.append(f"   任务笔记: {notes}")
+            if context:
+                lines.append(f"   上下文: {context}")
             lines.append(f"   下次处理时间: {next_occ}")
-            lines.append(f"   最终汇报时间: {deadline}")
         self._blocks["planned_tasks"] = "\n".join(lines)
 
     def _collect_triggered_task(self, triggered_task: Optional[Dict[str, Any]]) -> None:
@@ -186,28 +175,16 @@ class ProactiveInputManager:
         if not triggered_task:
             return
         title = triggered_task.get("title", "未知")
-        brief = triggered_task.get("brief", "")
-        conclusion = triggered_task.get("conclusion", "")
-        stage = triggered_task.get("stage", "")
-        notes = triggered_task.get("notes", "")
+        context = triggered_task.get("context", "")
         next_occ = triggered_task.get("next_occurrence", "")
-        deadline = triggered_task.get("deadline", "")
         lines = [
             "【当前已到达计划再处理时间的未完成任务】",
             f"标题: {title}",
         ]
-        if brief:
-            lines.append(f"简要: {brief}")
-        if stage:
-            lines.append(f"当前阶段: {stage}")
-        if conclusion:
-            lines.append(f"已获结论: {conclusion}")
-        if notes:
-            lines.append(f"任务笔记: {notes}")
+        if context:
+            lines.append(f"上下文: {context}")
         if next_occ:
             lines.append(f"下次处理时间: {next_occ}")
-        if deadline:
-            lines.append(f"最终汇报时间: {deadline}")
         self._blocks["triggered_task"] = "\n".join(lines)
 
     def _collect_recent_memory(self, limit: int = 5) -> None:

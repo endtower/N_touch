@@ -201,6 +201,21 @@ class FuzzyRoleOperations:
             return {"status": "error", "message": f"FuzzyRole {fuzzy_role_id} 不存在"}
         return {"status": "success", "message": f"已删除 FuzzyRole {fuzzy_role_id}"}
 
+    async def delete_by_source_entity(self, source_entity_uuid: str) -> int:
+        """级联删除锚定到某来源实体（角色/群组）的全部 FuzzyRole。
+
+        角色或群组被删除时，其名下依附的模糊角色已失去锚点，一并清除。
+        返回删除条数。
+        """
+        if not source_entity_uuid:
+            return 0
+        conn = await self.db._ensure_connection()
+        cur = await conn.execute(
+            "DELETE FROM fuzzy_roles WHERE source_entity_uuid=?", (source_entity_uuid,)
+        )
+        await conn.commit()
+        return cur.rowcount
+
     async def update_fuzzy_role(self, fuzzy_role_id: str, **fields: Any) -> bool:
         """更新 FuzzyRole 可编辑字段（名称/内容），成功后记录 updated_at。
 

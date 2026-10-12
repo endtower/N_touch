@@ -13,6 +13,9 @@ adapt.web.graph_api
 
 内部已全部切到 tasks 表（brain.hc.database.task.TaskOperations）。
 
+任务字段：title / context / next_occurrence，status 仅 active / expired
+（任务一次性：到期交付后自动置 expired，续办靠重新登记）。
+
 所有方法都是 async，基于 SQLite 记忆数据库（brain.hc.database）。
 
 注：旧的 /graph/characters 角色关系图已废弃（系统重构后角色图范式被移除），
@@ -27,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from aiohttp import web
 
 from brain.hc.database.core import get_memory_db
-from brain.hc.database.task import TaskOperations, TASK_STATUS_ACTIVE, TASK_STATUS_COMPLETED
+from brain.hc.database.task import TaskOperations, TASK_STATUS_ACTIVE, TASK_STATUS_EXPIRED
 from utils.logger import get_logger
 
 logger = get_logger(__name__, "DEBUG")
@@ -45,13 +48,12 @@ def _safe_int(s: Optional[str], default: int) -> int:
 # ============================================================
 
 _TASK_FIELDS = (
-    "task_id", "title", "status",
-    "brief", "conclusion", "stage", "notes",
-    "next_occurrence", "deadline",
+    "task_id", "title", "context", "status",
+    "next_occurrence",
     "start_time", "end_time", "updated_at",
 )
 
-_TASK_STATUS_ALLOW = {TASK_STATUS_ACTIVE, TASK_STATUS_COMPLETED}
+_TASK_STATUS_ALLOW = {TASK_STATUS_ACTIVE, TASK_STATUS_EXPIRED}
 
 
 async def handle_list_tasks(request: web.Request) -> web.Response:
@@ -130,18 +132,19 @@ async def handle_set_task_status(request: web.Request) -> web.Response:
         )
 
     try:
-        ops = TaskOperations()
         db = get_memory_db()
         conn = await db._ensure_connection()
-        cur = await conn.execute("SELECT title FROM tasks WHERE task_id=?", (task_id,))
+        cur = await conn.execute("SELECT task_id FROM tasks WHERE task_id=?", (task_id,))
         rec = await cur.fetchone()
         if rec is None:
             return web.json_response({"error": f"Task {task_id} 不存在"}, status=404)
-        current_title = rec["title"] or ""
 
-        ok = await ops.update_task(current_title, status=status)
-        if not ok:
-            return web.json_response({"error": "update_task 返回 False"}, status=500)
+        now = datetime.now().isoformat()
+        await conn.execute(
+            "UPDATE tasks SET status=?, updated_at=? WHERE task_id=?",
+            (status, now, task_id),
+        )
+        await conn.commit()
 
         cur = await conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,))
         rec = await cur.fetchone()
@@ -157,12 +160,9 @@ async def handle_set_task_status(request: web.Request) -> web.Response:
         return web.json_response({"error": f"更新失败: {e}"}, status=500)
 
 
-_TASK_EDITABLE = {"title", "status",
-                  "brief", "conclusion", "stage", "notes",
-                  "next_occurrence", "deadline",
-                  "start_time", "updated_at"}
+_TASK_EDITABLE = {"title", "context", "status", "next_occurrence", "start_time"}
 
-_TASK_TIME_FIELDS = {"start_time", "updated_at", "next_occurrence", "deadline"}
+_TASK_TIME_FIELDS = {"start_time", "next_occurrence"}
 
 
 def _validate_iso_datetime(value: Any, field_name: str) -> Tuple[bool, str]:
@@ -219,40 +219,25 @@ async def handle_update_task(request: web.Request) -> web.Response:
         )
 
     try:
-        ops = TaskOperations()
         db = get_memory_db()
         conn = await db._ensure_connection()
 
-        cur = await conn.execute("SELECT title FROM tasks WHERE task_id=?", (task_id,))
+        cur = await conn.execute("SELECT task_id FROM tasks WHERE task_id=?", (task_id,))
         rec = await cur.fetchone()
         if rec is None:
             return web.json_response({"error": f"Task {task_id} 不存在"}, status=404)
-        current_title = rec["title"] or ""
 
-        non_title_kwargs = {k: v for k, v in kwargs.items() if k != "title"}
-        new_title = kwargs.get("title")
-        title_changed = bool(new_title) and new_title != current_title
-        user_set_updated_at = "updated_at" in kwargs and kwargs["updated_at"] is not None
-
-        if non_title_kwargs:
-            ok = await ops.update_task(
-                current_title,
-                preserve_updated_at=user_set_updated_at,
-                **non_title_kwargs,
-            )
-            if not ok:
-                return web.json_response({"error": "update_task 返回 False"}, status=500)
-
-        if title_changed:
-            if user_set_updated_at:
-                await conn.execute("UPDATE tasks SET title=? WHERE task_id=?", (new_title, task_id))
-            else:
-                now = datetime.now().isoformat()
-                await conn.execute("UPDATE tasks SET title=?, updated_at=? WHERE task_id=?", (new_title, now, task_id))
-            await conn.commit()
-
-        # 任务不落向量（2026-09-19）：文本字段变化仅覆盖对应列，无需重生成
-        # summary_vector（无语义检索消费方），updated_at 由 update_task 处理
+        # 字段名取自 _TASK_EDITABLE 白名单，拼入 SQL 安全
+        sets = [f"{k}=?" for k in kwargs]
+        params: List[Any] = list(kwargs.values())
+        sets.append("updated_at=?")
+        params.append(datetime.now().isoformat())
+        params.append(task_id)
+        await conn.execute(
+            f"UPDATE tasks SET {', '.join(sets)} WHERE task_id=?",
+            params,
+        )
+        await conn.commit()
 
         cur = await conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,))
         rec = await cur.fetchone()
@@ -289,15 +274,11 @@ async def handle_create_task(request: web.Request) -> web.Response:
                 status=400,
             )
 
-        brief = data.get("brief") or ""
-        conclusion = data.get("conclusion") or ""
-        stage = data.get("stage") or ""
-        notes = data.get("notes") or ""
+        context = data.get("context") or ""
         next_occurrence = data.get("next_occurrence")
-        deadline = data.get("deadline")
         start_time_user = data.get("start_time")
 
-        for f in ("next_occurrence", "deadline", "start_time"):
+        for f in ("next_occurrence", "start_time"):
             v = data.get(f)
             if v is None:
                 continue
@@ -308,12 +289,8 @@ async def handle_create_task(request: web.Request) -> web.Response:
         ops = TaskOperations()
         task_id = await ops.create_task(
             title=title,
-            brief=brief,
-            conclusion=conclusion,
-            stage=stage,
-            notes=notes,
+            context=context,
             next_occurrence=next_occurrence,
-            deadline=deadline,
             status=status,
         )
 

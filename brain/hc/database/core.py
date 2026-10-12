@@ -141,20 +141,15 @@ class MemoryDatabase:
             DROP TABLE IF EXISTS events;
 
             -- 任务表（独立）
-            -- 2026-10-01 改造：summary 单列拆为四个独立语义列——
-            -- brief（简要总结：前因与目的）/ conclusion（已获取的汇报结论）/
-            -- stage（当前阶段：还需要做什么）/ notes（任务笔记）。
-            -- 列独立承载语义，不再靠「首行当前阶段 + 平铺笔记」的文本约定拼接。
+            -- 2026-10-11 收敛：title（标题）+ context（要传递给下次启动时的上下文）
+            -- + next_occurrence（下次唤醒时间）。status 仅 active / expired。
+            -- 触发即过期（task_truck 交付 PFCA 后自动置 expired），续办靠新建。
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY,
                 title TEXT DEFAULT '',
+                context TEXT DEFAULT '',
                 status TEXT DEFAULT 'active',
-                brief TEXT DEFAULT '',
-                conclusion TEXT DEFAULT '',
-                stage TEXT DEFAULT '',
-                notes TEXT DEFAULT '',
                 next_occurrence TEXT DEFAULT '',
-                deadline TEXT DEFAULT '',
                 start_time TEXT DEFAULT '',
                 end_time TEXT DEFAULT '',
                 updated_at TEXT DEFAULT ''
@@ -177,6 +172,46 @@ class MemoryDatabase:
                 updated_at TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_bequests_category ON bequests(category);
+
+            -- 人工维护的决策锦囊，与自动话术经验分开。
+            CREATE TABLE IF NOT EXISTS decision_kits (
+                kit_id TEXT PRIMARY KEY,
+                advice TEXT NOT NULL,
+                dilemma TEXT NOT NULL,
+                category TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            -- 见闻正文向量缓存；原始见闻仍保存在独立台账。
+            CREATE TABLE IF NOT EXISTS observation_vectors (
+                note_id TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                model_key TEXT NOT NULL,
+                vector BLOB NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS maintenance_reviews (
+                review_id TEXT PRIMARY KEY, kind TEXT NOT NULL, item_id TEXT NOT NULL,
+                title TEXT NOT NULL, revision TEXT NOT NULL, topic TEXT NOT NULL,
+                action TEXT NOT NULL, reviewed_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_reviews_item ON maintenance_reviews(kind, item_id, reviewed_at);
+            CREATE TABLE IF NOT EXISTS memory_usage_events (
+                kind TEXT NOT NULL, item_id TEXT NOT NULL, event_type TEXT NOT NULL,
+                scope TEXT NOT NULL, revision TEXT NOT NULL, used_at REAL NOT NULL,
+                PRIMARY KEY(kind, item_id, event_type, scope, revision)
+            );
+            CREATE TABLE IF NOT EXISTS maintenance_requests (
+                request_id TEXT PRIMARY KEY, topic TEXT NOT NULL, reason TEXT NOT NULL,
+                items_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                defer_until REAL NOT NULL DEFAULT 0, conclusion TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS growth_actions (
+                action_id TEXT PRIMARY KEY, axis TEXT NOT NULL, reference_json TEXT NOT NULL,
+                title TEXT NOT NULL, reason TEXT NOT NULL, created_at REAL NOT NULL,
+                effect_applied INTEGER NOT NULL DEFAULT 0
+            );
 
             -- 模糊角色表（独立，唯一单独建表的依附性节点）
             CREATE TABLE IF NOT EXISTS fuzzy_roles (
@@ -216,65 +251,42 @@ class MemoryDatabase:
         await self._conn.commit()
 
     async def _migrate_tasks_table(self) -> None:
-        """任务表结构迁移（2026-10-01 二次收敛：summary 拆四列）。
+        """任务表结构收敛（2026-10-11：重建为 title/context/next_occurrence）。
 
-        `CREATE TABLE IF NOT EXISTS` 不会改动已存在的旧表，故旧库走一次重建：
-        重命名 → 建新表 → 逐行搬迁（旧的 summary 数据整体丢弃，四个新列一律置空，
-        待 quest agent 下次推进时按新语义重新填写）→ 删旧表 → 重建索引。
+        `CREATE TABLE IF NOT EXISTS` 不会改动已存在的旧表。旧库结构
+        （brief/conclusion/stage/notes/deadline）整体重建为空表；旧记录按用户
+        确认一并丢弃，不做迁移（任务语义已从「可更新」收敛为「触发即过期、续办靠新建」）。
 
-        幂等：新表已含 brief 列时直接返回（零开销）。
+        幂等：新表已含 context 列且无 brief 列时直接返回（零开销）。
         迁移失败直接上抛崩溃阻断，不吞错。
         """
         assert self._conn is not None
         cur = await self._conn.execute("PRAGMA table_info(tasks)")
         cols = {r["name"] for r in await cur.fetchall()}
-        if "brief" in cols:
+        if "context" in cols and "brief" not in cols:
             return
 
-        logger.info("tasks 表结构迁移：summary 拆为 brief/conclusion/stage/notes 四列")
-        cur = await self._conn.execute(
-            "SELECT task_id, title, status, next_occurrence, deadline, "
-            "start_time, end_time, updated_at FROM tasks"
-        )
-        rows = await cur.fetchall()
-
-        await self._conn.execute("ALTER TABLE tasks RENAME TO tasks_old")
+        logger.info("tasks 表结构迁移：重建为 title/context/next_occurrence（旧记录丢弃）")
+        await self._conn.execute("DROP TABLE IF EXISTS tasks")
         await self._conn.execute(
             """
             CREATE TABLE tasks (
                 task_id TEXT PRIMARY KEY,
                 title TEXT DEFAULT '',
+                context TEXT DEFAULT '',
                 status TEXT DEFAULT 'active',
-                brief TEXT DEFAULT '',
-                conclusion TEXT DEFAULT '',
-                stage TEXT DEFAULT '',
-                notes TEXT DEFAULT '',
                 next_occurrence TEXT DEFAULT '',
-                deadline TEXT DEFAULT '',
                 start_time TEXT DEFAULT '',
                 end_time TEXT DEFAULT '',
                 updated_at TEXT DEFAULT ''
             )
             """
         )
-        for r in rows:
-            await self._conn.execute(
-                "INSERT INTO tasks (task_id, title, status, brief, conclusion, "
-                "stage, notes, next_occurrence, deadline, start_time, end_time, "
-                "updated_at) VALUES (?, ?, ?, '', '', '', '', ?, ?, ?, ?, ?)",
-                (
-                    r["task_id"], r["title"], r["status"],
-                    r["next_occurrence"] or "", r["deadline"] or "",
-                    r["start_time"] or "", r["end_time"] or "",
-                    r["updated_at"] or "",
-                ),
-            )
-        await self._conn.execute("DROP TABLE tasks_old")
         await self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
         )
         await self._conn.commit()
-        logger.info(f"tasks 表结构迁移完成，搬迁 {len(rows)} 条（旧概况已丢弃）")
+        logger.info("tasks 表结构迁移完成（旧记录已清空）")
 
     async def close(self) -> None:
         """关闭数据库连接（与初始化串行化，避免和建表/迁移竞争）。"""

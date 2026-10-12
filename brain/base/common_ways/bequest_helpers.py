@@ -39,7 +39,7 @@ async def search_speech_bequests(
     """
     bequest_ops = BequestOperations()
     scored = await bequest_ops.search_bequest_by_vector(
-        scenario, top_k=top_k, category="speech",
+        scenario, top_k=top_k, category="speech", record_usage=True,
     )
 
     matched: List[Dict[str, Any]] = []
@@ -85,7 +85,7 @@ async def activate_bequests_for_input(
 
     bequest_ops = BequestOperations()
     scored = await bequest_ops.search_bequest_by_vector(
-        query, top_k=top_k, category="speech",
+        query, top_k=top_k, category="speech", record_usage=True,
     )
 
     matched: List[Dict[str, Any]] = []
@@ -106,4 +106,6 @@ async def activate_bequests_for_input(
         })
         if len(matched) >= max_activate:
             break
+    from brain.hc.maintenance import MaintenanceService
+    await MaintenanceService().record_usage("experience", [item["id"] for item in matched], "injected")
     return matched

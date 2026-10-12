@@ -114,8 +114,7 @@ class OngoingTruck(BaseTruck):
             if not task:
                 continue
 
-            # 触发时间取「下次处理时间」与「最终汇报时间」中更早者：
-            # 到了最终汇报时间仍未达标，也要唤醒收尾（硬化点 A），与 task_truck 一致。
+            # 触发时间取「下次处理时间」。
             due_time = self._resolve_due_time(task)
             if due_time is None:
                 continue
@@ -129,9 +128,11 @@ class OngoingTruck(BaseTruck):
         if triggered_task:
             logger.info(
                 f"任务触发: {triggered_task.get('title')} "
-                f"(next_occurrence: {triggered_task.get('next_occurrence')}, "
-                f"deadline: {triggered_task.get('deadline')})"
+                f"(next_occurrence: {triggered_task.get('next_occurrence')})"
             )
+            # 触发即过期：任务一次性，交付后不再保留；续办由 PFCA 经 quest_agent 重新登记。
+            # 不置过期会因 next_occurrence 已在过去而每轮重复触发。
+            await task_ops.expire_task(triggered_task["task_id"])
             return [triggered_task]
 
         logger.debug("进行中任务检查完成，无触发任务")
@@ -139,20 +140,17 @@ class OngoingTruck(BaseTruck):
 
     @staticmethod
     def _resolve_due_time(task: dict):
-        """解析任务的触发时间：取「下次处理时间」与「最终汇报时间」中更早的一个。
+        """解析任务的触发时间（next_occurrence）。
 
-        非 ISO 8601 的值（如「完结」/空串）视为未设置；两个都没有时返回 None。
+        非 ISO 8601 的值（如空串）视为未设置，返回 None。
         """
-        candidates = []
-        for key in ("next_occurrence", "deadline"):
-            raw = task.get(key)
-            if not raw:
-                continue
-            try:
-                candidates.append(datetime.fromisoformat(raw.replace('Z', '+00:00')))
-            except (ValueError, AttributeError):
-                continue
-        return min(candidates) if candidates else None
+        raw = task.get("next_occurrence")
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        except (ValueError, AttributeError):
+            return None
 
     async def _get_task(self, task_ops, task_id):
         """获取单个任务详情
@@ -164,13 +162,9 @@ class OngoingTruck(BaseTruck):
         return {
             "task_id": rec.get("task_id"),
             "title": rec.get("title"),
-            "brief": rec.get("brief"),
-            "conclusion": rec.get("conclusion"),
-            "stage": rec.get("stage"),
-            "notes": rec.get("notes"),
+            "context": rec.get("context"),
             "next_occurrence": rec.get("next_occurrence"),
-            "deadline": rec.get("deadline"),
-            "start_time": rec.get("start_time")
+            "start_time": rec.get("start_time"),
         }
 
     async def get_truck_messages(self):
@@ -293,19 +287,17 @@ class OngoingTruck(BaseTruck):
         }
 
     async def format_ongoing_tasks(self, tasks):
-        """格式化任务信息 - 使用通用的格式化方法"""
+        """格式化任务信息 - 直接用内存中的任务快照（任务触发后 DB 已置 expired）。"""
         if not tasks:
             return "暂无进行中的任务"
 
-        from brain.hc.database.task import TaskOperations
-        task_ops = TaskOperations()
-
         lines = ["你想起来有一件事还没有完成。"]
-
         for task in tasks:
-            task_id = task.get("task_id")
-            if task_id:
-                formatted_task = await task_ops.format_task_by_id(task_id)
-                lines.append(formatted_task)
+            title = task.get("title") or "未知标题"
+            context = task.get("context") or "（无）"
+            lines.append(f"名称：{title}")
+            lines.append(f"上下文：{context}")
+        lines.append("")
+        lines.append("该事项到点已结束（任务一次性），如需继续请经 quest_agent 重新登记新的接续事项。")
 
         return "\n".join(lines)

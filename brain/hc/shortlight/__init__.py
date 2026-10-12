@@ -6,6 +6,34 @@
 注意：本模块新增对外接口后，必须同步更新 docs/api/hc.md（scripts/check_api_docs.py 会校验）。
 """
 
-from .notepad import ShortlightNotepad, get_shortlight_notepad
+from .notepad import (
+    ShortlightNotepad,
+    get_shortlight_notepad,
+    NOTE_CATEGORIES,
+    NOTE_CATEGORY_TASK,
+    NOTE_CATEGORY_EVENT,
+    NOTE_CATEGORY_SELF_FIX,
+    NOTE_CATEGORY_QUOTE,
+    SLOT_EVENT,
+    SLOT_TASK,
+    SLOT_NAMES,
+    CATEGORY_TO_SLOT,
+    SCOPE_NORMAL,
+    SCOPES,
+)
 
-__all__ = ["ShortlightNotepad", "get_shortlight_notepad"]
+__all__ = [
+    "ShortlightNotepad",
+    "get_shortlight_notepad",
+    "NOTE_CATEGORIES",
+    "NOTE_CATEGORY_TASK",
+    "NOTE_CATEGORY_EVENT",
+    "NOTE_CATEGORY_SELF_FIX",
+    "NOTE_CATEGORY_QUOTE",
+    "SLOT_EVENT",
+    "SLOT_TASK",
+    "SLOT_NAMES",
+    "CATEGORY_TO_SLOT",
+    "SCOPE_NORMAL",
+    "SCOPES",
+]

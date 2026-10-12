@@ -20,6 +20,7 @@ adapt.web.memory_api
 from __future__ import annotations
 
 import json
+import asyncio
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -37,6 +38,99 @@ logger = get_logger(__name__, "DEBUG")
 
 # 00000000 是 LLM 扮演的角色（未命名），星形图中心节点
 ROOT_ID = "00000000"
+_creation_lock = asyncio.Lock()
+
+
+def _create_fields(data, allowed, required):
+    if not isinstance(data, dict) or set(data) - set(allowed):
+        raise ValueError("必须提交 JSON 对象，且只能包含页面可填写的字段")
+    result = {}
+    for key, value in data.items():
+        if not isinstance(value, str):
+            raise ValueError(f"{key} 必须是文字")
+        result[key] = value.strip()
+    if any(not result.get(key) for key in required):
+        raise ValueError("请填写必填字段：" + "、".join(required))
+    return result
+
+
+async def handle_create_social_memory(request: web.Request) -> web.Response:
+    """POST /memory/social/{entity_type}，复用既有实体操作与向量维护。"""
+    entity_type = request.match_info["entity_type"]
+    fields = {
+        "character": ({"name", "impression", "session_id"}, {"name"}),
+        "group": ({"name", "impression", "session_id"}, {"name"}),
+        "fuzzy_role": ({"name", "content", "source_session_id"}, {"name", "content", "source_session_id"}),
+    }
+    if entity_type not in fields:
+        return web.json_response({"error": "未知实体类型"}, status=400)
+    try:
+        data = _create_fields(await request.json(), *fields[entity_type])
+        contact = data.get("session_id") or data.get("source_session_id", "")
+        if contact and not (contact.startswith(("private_", "group_")) and contact.split("_", 1)[1]):
+            raise ValueError("会话 ID 应为 private_用户ID 或 group_群ID")
+        if entity_type == "character" and contact and not contact.startswith("private_"):
+            raise ValueError("角色应关联 private_ 私聊会话")
+        if entity_type == "group" and contact and not contact.startswith("group_"):
+            raise ValueError("群组应关联 group_ 群聊会话")
+    except (ValueError, TypeError) as error:
+        return web.json_response({"error": str(error)}, status=400)
+    async with _creation_lock:
+        conn = await get_memory_db()._ensure_connection()
+        entity_id = None
+        table = {"character": "characters", "group": "groups", "fuzzy_role": "fuzzy_roles"}[entity_type]
+        try:
+            if entity_type == "fuzzy_role":
+                existing = await conn.execute("SELECT uuid FROM fuzzy_roles WHERE name=? AND source_session_id=?", (data["name"], contact))
+                if await existing.fetchone():
+                    return web.json_response({"error": "该来源下已存在同名模糊角色，请编辑现有条目"}, status=409)
+                result = await FuzzyRoleOperations().create_fuzzy_role(data["name"], contact, data["content"])
+                if result["status"] != "success":
+                    return web.json_response({"error": result["message"]}, status=400)
+                entity_id = result["fuzzy_role_id"]
+            else:
+                ops = CharacterOperations() if entity_type == "character" else GroupOperations()
+                entity_id = await (ops.create_character_node(data["name"]) if entity_type == "character" else ops.create_group_node(data["name"]))
+                if contact:
+                    await ops.create_contact_node(contact, entity_id)
+                kwargs = {"impression": data.get("impression", "")}
+                await (ops.update_character(entity_id, **kwargs) if entity_type == "character" else ops.update_group(entity_id, **kwargs))
+            row = await (await conn.execute(f"SELECT * FROM {table} WHERE uuid=?", (entity_id,))).fetchone()
+            formatter, node_type = {"character": (_character_full, "Character"), "group": (_group_full, "Group"), "fuzzy_role": (_fuzzy_role_full, "FuzzyRole")}[entity_type]
+            return web.json_response({"node": _add_id_type_label(formatter(row), node_type)}, status=201)
+        except Exception:
+            # 既有操作分步 commit；失败时只清理本次创建的新实体，避免页面重试留下半条记忆。
+            if entity_id:
+                await conn.execute(f"DELETE FROM {table} WHERE uuid=?", (entity_id,))
+                await conn.commit()
+            logger.exception("创建社交实体失败")
+            return web.json_response({"error": "创建失败，请检查数据库或嵌入服务"}, status=500)
+
+
+async def handle_create_experience(request: web.Request) -> web.Response:
+    """POST /memory/experiences，复用经验创建与向量化。"""
+    try:
+        data = _create_fields(await request.json(), {"title", "summary", "category"}, {"title", "summary", "category"})
+        if data["category"] not in ("speech", "decision"):
+            raise ValueError("经验分类应为 speech 或 decision")
+    except (ValueError, TypeError) as error:
+        return web.json_response({"error": str(error)}, status=400)
+    async with _creation_lock:
+        ops = BequestOperations()
+        if await ops.get_bequest_id_by_title(data["title"], data["category"]):
+            return web.json_response({"error": "该分类下已有同名经验，请编辑现有条目"}, status=409)
+        try:
+            bequest_id = await ops.create_bequest(**data)
+            conn = await get_memory_db()._ensure_connection()
+            row = await (await conn.execute("SELECT bequest_id, title, summary, category, start_time, updated_at FROM bequests WHERE bequest_id=?", (bequest_id,))).fetchone()
+            from brain.hc.maintenance import MaintenanceService
+            service = MaintenanceService()
+            item = await service.item("experience", bequest_id)
+            await service.review("experience", bequest_id, item["revision"], action="edit")
+            return web.json_response({"experience": dict(row)}, status=201)
+        except Exception:
+            logger.exception("创建经验失败")
+            return web.json_response({"error": "创建失败，请检查数据库或嵌入服务"}, status=500)
 
 
 def _safe_int(s: Optional[str], default: int) -> int:
@@ -344,6 +438,10 @@ async def handle_update_experience(request: web.Request) -> web.Response:
             "updated_at": row["updated_at"] or "",
         }
         logger.debug(f"[/memory/experiences/{bequest_id}] 已更新")
+        from brain.hc.maintenance import MaintenanceService
+        service = MaintenanceService()
+        item = await service.item("experience", bequest_id)
+        await service.review("experience", bequest_id, item["revision"], action="edit")
         return web.json_response({"experience": experience, "updated": True})
     except Exception as e:
         logger.exception(f"[/memory/experiences/{bequest_id}] 更新失败")
@@ -371,6 +469,56 @@ async def handle_delete_experience(request: web.Request) -> web.Response:
         return web.json_response({"deleted": True, "bequest_id": bequest_id})
     except Exception as e:
         logger.exception(f"[/memory/experiences/{bequest_id}] 删除失败")
+        return web.json_response({"error": f"删除失败: {e}"}, status=500)
+
+
+# ============================================================
+# DELETE /memory/social/{entity_type}/{entity_id} — 删除社交实体
+# ============================================================
+
+async def handle_delete_social_memory(request: web.Request) -> web.Response:
+    """DELETE /memory/social/{entity_type}/{entity_id}
+
+    entity_type ∈ {character, group, fuzzy_role}
+
+    角色 / 群组的别名、印象、熟悉度、联系方式、关系与向量都在同一行内，随行删除；
+    同时级联删除锚定到它的模糊角色。删除成功返回
+    { deleted: True, entity_type, entity_id, cascaded_fuzzy_roles }；不存在返回 404。
+    """
+    entity_type = request.match_info.get("entity_type", "").lower()
+    entity_id = request.match_info.get("entity_id", "")
+    if entity_type not in ("character", "group", "fuzzy_role"):
+        return web.json_response(
+            {"error": "entity_type ∈ {character, group, fuzzy_role}"}, status=400
+        )
+    if not entity_id:
+        return web.json_response({"error": "entity_id 必填"}, status=400)
+    if entity_id == ROOT_ID:
+        return web.json_response({"error": f"{ROOT_ID} 为中心角色，不可删除"}, status=400)
+
+    try:
+        if entity_type == "character":
+            if not await CharacterOperations().delete_character(entity_id):
+                return web.json_response({"error": f"Character {entity_id} 不存在"}, status=404)
+            cascaded = await FuzzyRoleOperations().delete_by_source_entity(entity_id)
+        elif entity_type == "group":
+            if not await GroupOperations().delete_group(entity_id):
+                return web.json_response({"error": f"Group {entity_id} 不存在"}, status=404)
+            cascaded = await FuzzyRoleOperations().delete_by_source_entity(entity_id)
+        else:
+            result = await FuzzyRoleOperations().delete_fuzzy_role(entity_id)
+            if result["status"] != "success":
+                return web.json_response({"error": result["message"]}, status=404)
+            cascaded = 0
+        logger.debug(f"[/memory/social DELETE] {entity_type} {entity_id} 已删除，级联模糊角色 {cascaded}")
+        return web.json_response({
+            "deleted": True,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "cascaded_fuzzy_roles": cascaded,
+        })
+    except Exception as e:
+        logger.exception(f"[/memory/social DELETE] {entity_type} {entity_id} 删除失败")
         return web.json_response({"error": f"删除失败: {e}"}, status=500)
 
 

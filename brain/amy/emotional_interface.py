@@ -1,38 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Amy 情绪系统核心接口
-
-提供两个核心方法：
-- build_thought: 根方法，不约束 act 输入，调用方全责（唯一写入入口）
-- build_conversation_thought: 适配层（薄），用于 conversation tool 路径，内部调 build_thought
-- get_language_description: 表现侧出口（仅 NE/DA），conversation / social_chat 专用
-- get_decision_description: 决策侧出口（仅最终评价原因段），pfca / proactive / light_agent 专用
-- get_amy_description: 完整视图出口，仅供 adapt/web/amy_api 前端展示
-- get_mood_snapshot: 统一快照出口，供需要数值快照的消费者（strategy_check/amy_api）使用
-- apply_final_evaluation: PFCA 收尾最终评价登记，计入想法池并落库记事本
-- feedback_state: 存在感常驻标量（0-100，默认 50，原"反馈感" 2026-09-29 改名），评价时按格子步进结算
-- debt_ledger: 欠账台账（系统级共享单例），负向评价记账 / 正向评价按分数值销账；
-  有未偿欠账时决策侧出口条件输出「存在感 + 原因」归因行（proactive 据此补偿，不没事找事）
-
-情绪体系隔离（2026-09-13；2026-09-27 SC 轴剔除）：
-- 表现侧（NE/DA）与决策侧完全隔离：
-  conversation / social_chat 只见 NE/DA 两行 + 非最终评价类想法原因；
-  pfca / proactive / light_agent 只见最终评价类想法原因（SC 轴已剔除）。
-- 切分点：act 是否命中 FinalEvaluationAct 词表（prompt_engine._split_thoughts）。
-
-存在感（2026-09-28 上线为"反馈感"，2026-09-29 改名为"存在感"；与 AMY 原设计冲突的替代实现，随时可能推翻）：
-- 独立标量 feedback_state（0-100，默认 50），**不参与** NE/DA 快照计算；
-- 仅在 apply_final_evaluation 单点按格子结算：优秀 +20 / 尚可 +10 / 无评价 -10 / 欠佳 -20；
-- 决策侧提示词暂不输出该维度任何描述文本（见 docs/未来改进.md 第一节 1.1）。
-
-情绪消费者游标：
-- 用"事件日志 + 消费者游标"替代"记录上次情绪值"去重逻辑
-- get_unread_events(consumer_id) / advance_cursor(consumer_id, seq)
-
-注：崩溃/覆盖机制已于 2026-08-30 移除（拍板记录见 docs/amy情绪系统设计思路.md），
-get_amy_description / build_thought 不再包含覆盖态分支与崩溃到期检查。
+"""AMY 门面。表现侧沿用 NE/DA；决策侧提供效能感、归属感及可追溯变动。
+PFCA 确认收尾时结算两轴；旧 feedback_state value 和欠账台账保持兼容。
 """
 
 from paths import data_root
@@ -44,19 +14,19 @@ from brain.amy.constants import (
     ACT_EFFECTS, ACTEffects,
     SystemBuiltInAct,
     Thought, MoodSnapshot, generate_timestamp_id, THOUGHT_DURATION,
-    FinalEvaluationAct, FINAL_EVALUATION_THOUGHT_DURATION,
+    FinalEvaluationAct, TaskResultAct, FINAL_EVALUATION_THOUGHT_DURATION,
+    REFLECTION_VERIFICATION_COMPENSATION,
+    REFLECTION_SOCIAL_COMPENSATION,
 )
 from brain.amy.thought_cache import ThoughtCache, calculate_duration
 from brain.amy.affinity import AffinityStore
 from brain.amy.event_log import EventLog
+from brain.amy.decision_feelings import AXIS_NAMES, build_decision_feedback_prompt
 from brain.amy.feedback_state import get_feedback_state, reset_feedback_state
 from brain.amy.debt_ledger import get_debt_ledger, reset_debt_ledger
 from brain.amy.prompt_engine import (
     get_amy_description,
     build_language_mood_prompt,
-    build_decision_mood_prompt,
-    build_feedback_prompt,
-    build_presence_attribution,
 )
 from utils.logger import get_logger
 
@@ -74,7 +44,7 @@ class EmotionalInterface:
         self.event_log = EventLog()
         self.thought_cache = ThoughtCache(persistence_dir, event_log=self.event_log)
         self.affinity_store = AffinityStore(persistence_dir)
-        # 反馈维度常驻标量（与 AMY 原设计冲突的替代实现，见 docs/未来改进.md 第一节 1.1）
+        # 决策侧双轴；旧归属感数据保留，新效能感默认 50
         self.feedback_state = get_feedback_state(persistence_dir)
         # 欠账台账（系统级共享单例）：负向评价记账，正向评价按分数值销账
         self.debt_ledger = get_debt_ledger(persistence_dir)
@@ -193,24 +163,37 @@ class EmotionalInterface:
 
         return await self.build_thought(act=act, desc=desc, desc_extra=desc_extra)
 
+    async def apply_reflection_compensation(self, title: str, reason: str,
+                                            axis: str = "competence") -> str:
+        """安排自修正验证补偿效能感、安排主动社交补偿归属感，均为 +30。
+
+        由 Reflection 的发布入口调用，每项每轮只补偿一次由会话工具管理器保证。
+        仅修改指定轴，不生成表达侧想法，不改变 NE/DA 或欠账台账。
+        """
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("反思补偿必须提供事件标题")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("反思补偿必须提供安排行动的依据")
+        if axis == "competence":
+            label, delta = "已安排自修正验证", REFLECTION_VERIFICATION_COMPENSATION
+        elif axis == "recognition":
+            label, delta = "已安排主动社交", REFLECTION_SOCIAL_COMPENSATION
+        else:
+            raise ValueError("反思补偿轴必须为 competence 或 recognition")
+        self.feedback_state.settle(title.strip(), [
+            (axis, label, delta, reason.strip()),
+        ])
+        return await self.get_reflection_description()
+
     # ===== 最终评价登记 =====
 
-    async def apply_final_evaluation(self, final_evaluation: str, title: str) -> None:
-        """PFCA 收尾最终评价登记：把本次评价计入想法池，并结算反馈维度。
-
-        把本次评价作为 thought 入池（act=评价词，
-        desc=「因为 {title} 任务中，导致的{上升/降低}」，时长 4 小时），
-        并挂上该评价产生时对应笔记的标题（desc_extra），供 LLM 后续用 query_note 追溯。
-        不产生 NE/DA 增量（final 词表不注册进 ACTEffects）。
-
-        同时按**格子步进**结算反馈维度（feedback_state）：
-        优秀 +20 / 尚可 +10 / 无评价 -10 / 欠佳 -20（四档对称），clamp 到 [0,100]。
-        这是与 AMY 原设计的冲突点，暂以替代办法实现，随时可能推翻
-        （见 docs/未来改进.md 第一节 1.1）。
-
-        评价词未命中词表直接抛 ValueError（不吞异常，关键失败直接阻断上抛）；
-        title 为空直接抛 ValueError（最终评价想法必须绑定事件标题）。
-        """
+    async def apply_final_evaluation(self, final_evaluation: str, title: str,
+                                     task_result: str = TaskResultAct.NEUTRAL,
+                                     task_reason: str = "", evaluation_reason: str = "") -> None:
+        """确认收尾时结算效能感与归属感。成功/失败都必须给任务原因（通用条目）；不影响 NE/DA。"""
+        TaskResultAct.validate(task_result, task_reason)
+        if not isinstance(evaluation_reason, str):
+            raise ValueError("评价依据必须是文本")
         if not FinalEvaluationAct.contains(final_evaluation):
             allowed = "、".join(FinalEvaluationAct.names())
             raise ValueError(f"未知最终评价: '{final_evaluation}'，允许词表: {allowed}")
@@ -218,12 +201,17 @@ class EmotionalInterface:
             raise ValueError("最终评价必须提供事件标题 title（≤15 字）")
 
         title = title.strip()
+        final_evaluation = FinalEvaluationAct.normalize(final_evaluation)
         now = int(time.time())
 
-        # 反馈维度格子结算（不对称）：好评价上升，其余两词均下降。
+        # 任务结果与外部评价分别结算，两个值不相互抵扣。
         delta = FinalEvaluationAct.feedback_delta(final_evaluation)
-        self.feedback_state.apply_delta(delta)
-        self.feedback_state.save_to_file()
+        self.feedback_state.settle(title, [
+            ("competence", task_result, TaskResultAct.deltas[task_result],
+             task_reason.strip() or f"PFCA 收尾判断：{task_result}，详见笔记"),
+            ("recognition", final_evaluation, delta,
+             evaluation_reason.strip() or f"PFCA 根据本轮外部反馈判断：{final_evaluation}，详见笔记"),
+        ], task_result=task_result)
         trend = "上升" if delta > 0 else "降低"
 
         # 欠账台账（系统级共享）：负向评价记一笔明细；正向评价作为额度从最旧欠账开始抵扣。
@@ -234,13 +222,13 @@ class EmotionalInterface:
             self.debt_ledger.save_to_file()
 
         # 最终评价计入想法池：act=评价词（前端归为 final 分类），
-        # desc 采用可追溯形式（因为 {title} 任务中，导致的{上升/降低}），
+        # desc 包含事件标题、任务结果与任务原因（成功/失败对称），
         # desc_extra 挂该评价产生时对应笔记的标题，供 LLM 用 query_note 回溯原笔记。
         # 时长 4 小时；遵守统一堆叠上限 3（2026-09-24：池满 FIFO 替换最早）。
         thought = Thought(
             id=generate_timestamp_id(),
             create_time=now,
-            desc=f"因为 {title} 任务中，导致的{trend}",
+            desc=f"{title}：{AXIS_NAMES['recognition']}{trend}；任务结果：{task_result}" + (f"；任务原因：{task_reason.strip()}" if task_reason.strip() else ""),
             act=final_evaluation,
             expire_time=now + FINAL_EVALUATION_THOUGHT_DURATION,
             desc_extra=f"笔记：{title}",
@@ -266,38 +254,12 @@ class EmotionalInterface:
         return build_language_mood_prompt(snapshot, with_reason=with_reason)
 
     async def get_decision_description(self) -> str:
-        """决策侧出口：pfca / proactive / light_agent 专用。
-
-        仅原因（仅最终评价类想法），不含 NE/DA 行——表现侧（conversation/social_chat）
-        对此完全不可见，反之亦然。SC 轴已于 2026-09-27 剔除，此处不再输出行动行。
-
-        存在感归因（2026-09-29）：末尾追加存在感行（**常显**，PFCA 无条件可见自身数值）——
-        存在感：{当前值}/100
-        存在未偿欠账（负面记录）时追加每笔一行归因：
-        原因：{事件标题} {事件评价} {数值减益}
-        无欠账仅存在感行，系统不会凭空行动（"找点事做不能没事找事"）。
-        """
-        snapshot = await self.thought_cache.calculate_mood_snapshot()
-        base = build_decision_mood_prompt(snapshot, with_reason=True)
-        segments = [base] if base else []
-
-        attribution = build_presence_attribution(
-            self.feedback_state.read_value(), self.debt_ledger.list_debts()
-        )
-        if attribution:
-            segments.append(attribution)
-
-        return "\n".join(segments)
+        """决策侧读取两轴感受与各自最近五条变动；不注入 NE/DA 表达情绪。"""
+        return build_decision_feedback_prompt(self.feedback_state.snapshot())
 
     async def get_reflection_description(self) -> str:
-        """Reflection 专用出口：存在感数值视图（不显示任何想法）。
-
-        仅输出存在感数值状态行（如「存在感 50/100 正常」），
-        不含 NE/DA 行、不含任何想法原因——与决策侧出口
-        get_decision_description（pfca / proactive / light_agent 仍走该出口）
-        相互独立，仅 reflection 使用本出口。
-        """
-        return build_feedback_prompt(self.feedback_state.read_value())
+        """Reflection 读取两轴与各自最近五条变动；不新增低值唤醒或规定补偿行动。"""
+        return build_decision_feedback_prompt(self.feedback_state.snapshot())
 
     async def get_amy_description(self) -> str:
         """完整视图出口（激素描述 + 全部想法原因）：

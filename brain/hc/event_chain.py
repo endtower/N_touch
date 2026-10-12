@@ -41,26 +41,44 @@ class EventChainMixin:
 
         current_time = datetime.now().timestamp()
 
+        from config.settings import chat_config
+        from brain.hc.event_chain_permissions import EventChainPermissions
+        permissions = EventChainPermissions(
+            chain_id or f"event_chain_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            chat_config.SOCIAL_CHAT_SEND_MODE.strip().lower(),
+        )
+        from brain.hc.shortlight import get_shortlight_notepad
+        notepad = get_shortlight_notepad()
+
         self._event_chain_active = True
         self._current_event_chain = {
-            "chain_id": chain_id or f"event_chain_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "chain_id": permissions.chain_id,
             "start_time": current_time,
             "end_time": None,
         }
         self._processed_by_hc = False
+        self._event_chain_permissions = permissions
 
         # 灵光一现记事本：随事件链开启创建缓存文档（缓存态，自动记录触发原因；
         # PFCA terminate 真正结束时以事件标题命名落库）
-        from brain.hc.shortlight import get_shortlight_notepad
-        get_shortlight_notepad().begin_chain(
-            self._current_event_chain["chain_id"], trigger_text=trigger_text
-        )
-
-        self._real_time_file = self._storage_path / f"event_history_{self._current_event_chain['chain_id']}_real_time.json"
-
-        self._notify("event_chain", active=True)
-        # 事件链开始钩子：各子类（如 FrontendBroadcastMixin）在此实现自己的前处理
-        self._on_event_chain_start()
+        notepad_started = False
+        try:
+            notepad.begin_chain(
+                self._current_event_chain["chain_id"], trigger_text=trigger_text
+            )
+            notepad_started = True
+            self._real_time_file = self._storage_path / f"event_history_{permissions.chain_id}_real_time.json"
+            self._notify("event_chain", active=True)
+            self._on_event_chain_start()
+        except BaseException:
+            permissions.close()
+            self._event_chain_permissions = None
+            self._event_chain_active = False
+            self._current_event_chain = None
+            self._real_time_file = None
+            if notepad_started:
+                notepad.discard_chain()
+            raise
         logger.info(
             f"新事件链已开始: {self._current_event_chain['chain_id']}，"
             f"开始时间: {datetime.fromtimestamp(self._current_event_chain['start_time']).strftime('%Y-%m-%d %H:%M:%S')}"
@@ -72,6 +90,30 @@ class EventChainMixin:
             logger.warning("事件链未处于活动状态，无法结束")
             return
 
+        # 先撤销权限；即使后续归档失败，旧 Agent 也不能继续自由发送。
+        self.get_event_chain_permissions().close()
+        try:
+            self._archive_event_chain()
+        finally:
+            self._event_chain_permissions = None
+            self._event_chain_active = False
+            self._current_event_chain = None
+            self._real_time_file = None
+            from brain.hc.shortlight import get_shortlight_notepad
+            get_shortlight_notepad().discard_chain()
+            self._notify("event_chain", active=False)
+            self._on_event_chain_end()
+
+    def get_event_chain_permissions(self):
+        """取得当前链唯一的权限服务；链外调用直接阻断。"""
+        self._require_event_chain_active()
+        permissions = self._event_chain_permissions
+        if permissions is None:
+            raise RuntimeError("活动事件链缺少权限服务")
+        permissions.require_active()
+        return permissions
+
+    def _archive_event_chain(self) -> None:
         current_time = datetime.now().timestamp()
 
         start_time = self._current_event_chain['start_time']
@@ -88,17 +130,6 @@ class EventChainMixin:
 
         if self._real_time_file and self._real_time_file.exists():
             self._real_time_file.unlink()
-
-        self._event_chain_active = False
-        self._current_event_chain = None
-        self._real_time_file = None
-        self._notify("event_chain", active=False)
-        # 事件链结束钩子：各子类（如 FrontendBroadcastMixin）在此实现自己的后处理
-        self._on_event_chain_end()
-        # 事件链收尾：丢弃记事本缓存文档（真正结束路径已在 terminate 落库；
-        # 熔断/强停等未真正结束路径不落库，缓存丢弃）
-        from brain.hc.shortlight import get_shortlight_notepad
-        get_shortlight_notepad().discard_chain()
 
         logger.info(
             f"事件链已结束并持久化: {file_path}，"

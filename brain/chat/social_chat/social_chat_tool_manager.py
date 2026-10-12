@@ -5,12 +5,12 @@
 - 发送工具收口：文字与图片拆分——send_to_master / send_to_target 只发纯文字
   （message 换行自动拆成多条独立消息，委托 ToolConversation 统一执行）；
   图片走 send_image_to_target（图先发，配文随后单独一条）。
-- 两种发送模式（chat_config.SOCIAL_CHAT_SEND_MODE 为初始值）：
+- 两种发送模式由事件链权限服务统一持有（config 决定新链默认值）：
     approval     每次 send_to_target 先向主人发审批请求，主人首条非空回复 == 『同意』才放行；
                  其他任何回复立即拒绝；15 秒无回复超时拒绝。拒绝 / 超时不终止本次 run。
     unrestricted 直接发送；发送后按 SOCIAL_CHAT_UNRESTRICTED_NOTIFY 决定是否知会主人。
 - 模式切换走 set_send_mode：升级到 unrestricted 必须经主人『同意』审批（工具层硬拦截）；
-  降回 approval 立即生效。
+  降回 approval 立即生效；授权只限同一事件链的同一目标会话，链结束即失效。
 - 审批轮询基于消息库 seq 游标（consumer="social_chat_approval"），纯单调序号判定，
   不涉及时钟，根治"检测到主人上一条消息"的时序错位 bug。
 - LLM 看不到拦截层内部；拦截以"工具返回值"的形式对 LLM 暴露。
@@ -37,8 +37,6 @@ logger = get_logger('SocialChatToolManager', "INFO")
 
 # 审批轮询专用消费者游标（消息库 cursors 表，per session_id 隔离）
 APPROVAL_CONSUMER_ID = "social_chat_approval"
-# 初始发送模式（统一从 chat_config 读取，run 内可经 set_send_mode 切换）
-DEFAULT_SEND_MODE = chat_config.SOCIAL_CHAT_SEND_MODE
 VALID_SEND_MODES = ("approval", "unrestricted")
 
 # 审批参数
@@ -58,7 +56,6 @@ class SocialChatToolManager(ToolManager):
     def __init__(
         self,
         social_chat_core,
-        send_mode: str = DEFAULT_SEND_MODE,
     ):
         """构造工具集。
 
@@ -66,17 +63,14 @@ class SocialChatToolManager(ToolManager):
         通过 self.social_chat_core.master_session_id / working_session_id 读取
         （master 派生自 RoleConfig.MASTER_ID；working 由 social_chat_core.start() 注入）。
 
-        Args:
-            send_mode: 初始发送模式，取值见 VALID_SEND_MODES。
-                模式来源是 config（SOCIAL_CHAT_SEND_MODE），绝不接受 LLM 指定。
+        发送模式由当前事件链统一持有，重新进入同一目标会话继承授权。
         """
         self.social_chat_core = social_chat_core
-        mode = (send_mode or DEFAULT_SEND_MODE).strip().lower()
-        if mode not in VALID_SEND_MODES:
-            raise ValueError(
-                f"send_mode 非法: {send_mode!r}（仅支持 {VALID_SEND_MODES}）"
-            )
-        self.send_mode: str = mode
+        from brain.hc.global_session_state import get_global_session_state
+        self._permissions = get_global_session_state().get_event_chain_permissions()
+        self._permission_scope = (
+            social_chat_core.master_session_id, social_chat_core.working_session_id
+        )
 
         # 本次 run 实际发出的消息记录（core._build_result 汇总用）
         self._messages_sent: List[Dict[str, Any]] = []
@@ -105,6 +99,22 @@ class SocialChatToolManager(ToolManager):
             f"master={self.social_chat_core.master_session_id}, "
             f"working={self.social_chat_core.working_session_id}"
         )
+
+    def _require_permission_scope(self) -> None:
+        self._permissions.require_active()
+        if self._permission_scope != (
+            self.social_chat_core.master_session_id, self.social_chat_core.working_session_id
+        ):
+            raise RuntimeError("Social Chat 会话已切换，旧工具实例不能继续发送")
+
+    @property
+    def send_mode(self) -> str:
+        self._require_permission_scope()
+        return self._permissions.get_send_mode(*self._permission_scope)
+
+    @staticmethod
+    def _expired_approval() -> Dict[str, Any]:
+        return {"result": "expired", "content": "", "reason": "事件链已结束，授权及待审批请求均已失效"}
 
     async def wait_and_observe(self, seconds: float) -> str:
         """social_chat 等待并监听会话新消息（先观察，后等待）。
@@ -230,26 +240,27 @@ class SocialChatToolManager(ToolManager):
 
         return "\n".join(f"{entry['title']} - {entry['summary']}" for entry in matched)
 
-    async def record_to_notepad(self, text: str, usage: str) -> str:
+    async def record_to_notepad(self, text: str, category: str) -> str:
         """记事本（灵光一现）写入：与 conversation 共用 ToolHC.record_note。
 
-        仅收纯文本与应对场景标注；元数据由系统侧自动附加（来源 social_chat，
+        仅收纯文本与类别标签；元数据由系统侧自动附加（来源 social_chat，
         会话取工作会话——素材产生地），记录进当前事件链的缓存文档，
         PFCA 真正结束时统一以事件标题命名落库。
         """
         note_id = await ToolHC.record_note(
             text=text,
+            category=category,
             source="social_chat",
             session_id=self.social_chat_core.working_session_id,
             session_name="",
-            usage=usage,
         )
         return f"已记录至记事本（{note_id}）。"
 
     async def query_note(self, title: str) -> str:
-        """查询记事本某一章节的完整内容（标题来自首条输入的记事本手册）。
+        """按章节标题查询一篇普通笔记的完整内容，委托通用 ToolHC.query_note。
 
-        委托通用 ToolHC.query_note（起因/总结/自我评价/逐条记录及元数据）。
+        章节标题取自 list_notes 的普通笔记返回；见闻录 / 任务相关笔记等
+        特殊槽位由 list_notes 直接给全，不经此工具。
         """
         return await ToolHC.query_note(title)
 
@@ -266,7 +277,7 @@ class SocialChatToolManager(ToolManager):
                 "name": "send_to_master",
                 "description": (
                     "向主人私聊会话发送消息，用于与主人沟通、提议、反馈、询问等。"
-                    "想连发多条短句就在 message 里用换行分隔，一次调用会拆成多条独立消息逐条发出。"
+                    "每个LLM执行轮次只能调用一次文字发送工具。换行分段，一次最多3条，超出部分不发送。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -337,7 +348,7 @@ class SocialChatToolManager(ToolManager):
                 "name": "send_to_target",
                 "description": (
                     "向工作会话发送文字消息（你要对其他人说的话）。"
-                    "想连发多条短句就在 message 里用换行分隔，一次调用会拆成多条独立消息逐条发出。"
+                    "每个LLM执行轮次只能调用一次文字发送工具。换行分段，一次最多3条，超出部分不发送。"
                     "审批模式下，系统会先把消息全文发给主人审批，主人回复『同意』后才真正发出；"
                     "主人回复其他任何内容或超时都会拒绝本次发送。自由模式下直接发出。"
                     "发图片用 send_image_to_target。"
@@ -402,6 +413,8 @@ class SocialChatToolManager(ToolManager):
                     "切换到 unrestricted（自由发送，不再逐条审批）必须先征得主人同意："
                     "系统会向主人发起审批，主人回复『同意』才生效，其他回复或超时视为拒绝。"
                     "切换回 approval 立即生效，无需审批。"
+                    "模式仅针对当前事件链的当前工作会话；返回 PFCA 后再次进入该会话仍有效，"
+                    "事件链结束后失效，其他会话须另行申请。单条发送批准不会开启自由模式。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -505,9 +518,9 @@ class SocialChatToolManager(ToolManager):
             },
         })
 
-        # 7. 记事本（灵光一现，shortlight）：schema 与 conversation 共用（ToolHC 统一管理）；
+        # 7. 记事本（灵光一现，shortlight）：统一 schema（ToolHC 统一管理）；
         #    登记元数据由 record_to_notepad 委托注入（source=social_chat，会话取工作会话）
-        tools.append(ToolHC.get_conversation_record_note_tool_schema())
+        tools.append(ToolHC.get_record_note_tool_schema())
         tools.append(ToolHC.get_query_note_tool_schema())
 
         return tools
@@ -574,7 +587,7 @@ class SocialChatToolManager(ToolManager):
         # master_session_id 由 RoleConfig.MASTER_ID 派生，永远是 private_
         from brain.chat.social_chat.social_chat_session import SocialChatSession
         msid = self.social_chat_core.master_session_id or ""
-        await ToolConversation.send_message(
+        result = await ToolConversation.send_message(
             session_id=msid,
             message=message,
             typing_delay_per_char=SocialChatSession.TYPING_DELAY_PER_CHAR,
@@ -587,7 +600,7 @@ class SocialChatToolManager(ToolManager):
             except Exception as e:
                 logger.warning(f"send_to_master 性质登记情感判断失败（不影响主流程）: {e}")
 
-        return f"已发送给主人，当前时间 {datetime.now().strftime('%H:%M:%S')}"
+        return result
 
     async def query_history(
         self,
@@ -636,14 +649,17 @@ class SocialChatToolManager(ToolManager):
 
         tsid = self.social_chat_core.working_session_id or ""
         from brain.chat.social_chat.social_chat_session import SocialChatSession
-        await ToolConversation.send_message(
+        send_mode = self.send_mode  # 发送前检查链/目标仍有效，记录本次实际使用的模式。
+        sent_text = []
+        result = await ToolConversation.send_message(
             session_id=tsid,
             message=message,
             typing_delay_per_char=SocialChatSession.TYPING_DELAY_PER_CHAR,
+            on_sent=sent_text.append,
         )
-        sent_at = await self._finish_target_send(tsid, preview, nature)
+        sent_at = await self._finish_target_send(tsid, sent_text[0], nature, send_mode=send_mode)
 
-        return {"status": "ok", "sent_at": sent_at}
+        return {"status": "ok", "sent_at": sent_at, "result": result}
 
     async def send_image_to_target(self, image: str, nature: str = None) -> Dict[str, Any]:
         """向工作会话发送图片，与文字发送分离的专用工具。
@@ -674,11 +690,12 @@ class SocialChatToolManager(ToolManager):
         tsid = self.social_chat_core.working_session_id or ""
         scope, target_id = ToolConversation._resolve_target(tsid)
         from brain.chat.social_chat.social_chat_session import SocialChatSession
+        send_mode = self.send_mode
         await ToolConversation.send_segments_with_typing(
             scope, target_id, [image_seg],
             typing_delay_per_char=SocialChatSession.TYPING_DELAY_PER_CHAR,
         )
-        sent_at = await self._finish_target_send(tsid, preview, nature)
+        sent_at = await self._finish_target_send(tsid, preview, nature, send_mode=send_mode)
 
         return {"status": "ok", "sent_at": sent_at}
 
@@ -691,9 +708,12 @@ class SocialChatToolManager(ToolManager):
         未通过返回 {"status": "rejected", ...}（直接作为工具返回值透传给 LLM）；
         通过或非 approval 模式返回 None。
         """
-        if self.send_mode != "approval":
+        if not self._permissions.active:
+            verdict = self._expired_approval()
+        elif self.send_mode != "approval":
             return None
-        verdict = await self._request_master_approval(preview, request_kind=request_kind)
+        else:
+            verdict = await self._request_master_approval(preview, request_kind=request_kind)
         if verdict["result"] != "approved":
             logger.warning(
                 f"social_chat 审批未通过（{verdict['result']}），取消发送: {preview[:40]!r}"
@@ -706,7 +726,8 @@ class SocialChatToolManager(ToolManager):
             }
         return None
 
-    async def _finish_target_send(self, tsid: str, preview: str, nature: str = None) -> float:
+    async def _finish_target_send(self, tsid: str, preview: str, nature: str = None,
+                                  *, send_mode: str) -> float:
         """发送成功后的统一收尾：发送记录 / 日志 / nature 登记 / unrestricted 知会。
 
         Returns:
@@ -724,7 +745,7 @@ class SocialChatToolManager(ToolManager):
                 logger.warning(f"发送后性质登记情感判断失败（不影响主流程）: {e}")
 
         # unrestricted 模式知会主人（开关控制；内部直发，不走 LLM 版 send_to_master）
-        if self.send_mode == "unrestricted" and chat_config.SOCIAL_CHAT_UNRESTRICTED_NOTIFY:
+        if send_mode == "unrestricted" and chat_config.SOCIAL_CHAT_UNRESTRICTED_NOTIFY:
             working_name = self._resolve_working_session_name()
             await self._send_raw_to_master(f"【知会】已在 {working_name} 发送：\n{preview}")
 
@@ -757,6 +778,9 @@ class SocialChatToolManager(ToolManager):
         if mode not in VALID_SEND_MODES:
             raise ValueError(f"mode 非法: {mode!r}（仅支持 {VALID_SEND_MODES}）")
 
+        if not self._permissions.active:
+            return {"status": "rejected", "approval": "expired", "reason": self._expired_approval()["reason"]}
+
         if mode == self.send_mode:
             return {"status": "ok", "send_mode": self.send_mode, "note": "已是该模式，未变更"}
 
@@ -765,6 +789,8 @@ class SocialChatToolManager(ToolManager):
                 preview="（申请开启自由发送模式：之后向工作会话发送消息不再逐条审批）",
                 request_kind="mode_switch",
             )
+            if not self._permissions.active:
+                return {"status": "rejected", "approval": "expired", "reason": self._expired_approval()["reason"]}
             if verdict["result"] != "approved":
                 logger.warning(f"social_chat 模式升级被拒（{verdict['result']}），保持 {self.send_mode}")
                 return {
@@ -776,9 +802,14 @@ class SocialChatToolManager(ToolManager):
                 }
 
         old = self.send_mode
-        self.send_mode = mode
+        if mode == "unrestricted":
+            self._permissions.grant_free_send(*self._permission_scope, approval_seq=verdict["reply_seq"])
+        else:
+            self._permissions.revoke_free_send(*self._permission_scope)
         logger.info(f"social_chat 发送模式切换: {old} -> {mode}")
-        return {"status": "ok", "send_mode": mode, "previous": old}
+        return {"status": "ok", "send_mode": mode, "previous": old,
+                "chain_id": self._permissions.chain_id, "target_session_id": self._permission_scope[1],
+                "scope": "current_event_chain_and_target"}
 
     async def transfer_back(self, summary: str, encounter_type: str = None) -> Dict[str, Any]:
         """结束本次委托，触发 social_chat_core 的退出流程。
@@ -889,6 +920,14 @@ class SocialChatToolManager(ToolManager):
     # 审批机制（seq 游标轮询，零时钟依赖）
     # ============================================================
     async def _request_master_approval(self, preview: str, request_kind: str = "send") -> Dict[str, Any]:
+        # 同一链的审批串行；旧链关闭后，等待锁的请求也必须失效。
+        async with self._permissions.approval_lock:
+            if not self._permissions.active:
+                return self._expired_approval()
+            self._require_permission_scope()
+            return await self._poll_master_approval(preview, request_kind)
+
+    async def _poll_master_approval(self, preview: str, request_kind: str) -> Dict[str, Any]:
         """向主人发审批请求后，基于消息库 seq 游标轮询主人回复。
 
         锚点机制（根治时序错位）：
@@ -921,13 +960,21 @@ class SocialChatToolManager(ToolManager):
         anchor_seq = 0
         if latest.get("messages"):
             anchor_seq = int(latest["messages"][-1]["_seq"])
+        if not self._permissions.active:
+            return self._expired_approval()
+        self._require_permission_scope()
         await store.advance_cursor(master_id, APPROVAL_CONSUMER_ID, anchor_seq)
+
+        if not self._permissions.active:
+            return self._expired_approval()
+        self._require_permission_scope()
 
         # 2) 发审批请求
         working_name = self._resolve_working_session_name()
         if request_kind == "mode_switch":
             approval_prompt = (
-                f"AI 申请开启自由发送模式：{preview}\n"
+                f"AI 申请在 {working_name}（{self._permission_scope[1]}）开启自由发送模式：{preview}\n"
+                "仅限当前事件链的这个会话；返回 PFCA 后再次进入仍有效，事件链结束即失效。\n"
                 f"请回复『同意』开启；回复其他任何内容视为拒绝。"
             )
         else:
@@ -940,11 +987,14 @@ class SocialChatToolManager(ToolManager):
         await self._send_raw_to_master(approval_prompt)
 
         # 3) 轮询：seq > 锚点的第一条非 system 非空消息即裁决
-        deadline = time.time() + APPROVAL_TIMEOUT_S
+        deadline = time.monotonic() + APPROVAL_TIMEOUT_S
         polls = 0
         while True:
             polls += 1
             msgs = await store.get_unread_for(master_id, APPROVAL_CONSUMER_ID)
+            if not self._permissions.active:
+                return self._expired_approval()
+            self._require_permission_scope()
             for m in msgs:
                 if m.get("user_id") == "system":
                     continue
@@ -956,13 +1006,14 @@ class SocialChatToolManager(ToolManager):
                     f"sender={m.get('user_name', '?')!r}, seq={m.get('_seq')}, reply={content[:40]!r}"
                 )
                 if content == "同意":
-                    return {"result": "approved", "content": content, "reason": "主人回复『同意』"}
+                    return {"result": "approved", "content": content, "reason": "主人回复『同意』",
+                            "reply_seq": int(m["_seq"])}
                 return {
                     "result": "rejected",
                     "content": content,
                     "reason": "主人回复不是『同意』，视为拒绝",
                 }
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 logger.warning(
                     f"social_chat 审批超时（{request_kind}，polls={polls}，anchor_seq={anchor_seq}）"
                 )

@@ -9,6 +9,7 @@ from config.truck_settings import is_truck_enabled
 from .trucks.private_truck import PrivateTruck
 from .trucks.special_attention_truck import SpecialAttentionTruck
 from .trucks.reflection_truck import ReflectionCharTruck, ReflectionTimeTruck
+from .trucks.feedback_reflection_truck import ReflectionEfficacyTruck, ReflectionBelongingTruck
 
 logger = get_logger(__name__, 'WARNING')
 
@@ -57,6 +58,8 @@ class AttentionStation:
         self.scheduled_proactive_truck = None  # 定时主动任务 truck
         self.reflection_char_truck = None  # 反思系统字符触发 truck
         self.reflection_time_truck = None  # 反思系统定时触发 truck
+        self.reflection_efficacy_truck = None  # 效能感低值自发入口
+        self.reflection_belonging_truck = None  # 归属感低值自发入口
         self.task_truck = None  # 任务到期触发 truck
         # 任务队列 - 存储需要处理的truck请求
         self.task_queue = asyncio.Queue()
@@ -73,6 +76,7 @@ class AttentionStation:
         for t in (self.private_truck, self.ongoing_truck,
                   self.special_attention_truck, self.scheduled_proactive_truck,
                   self.reflection_char_truck, self.reflection_time_truck,
+                  self.reflection_efficacy_truck, self.reflection_belonging_truck,
                   self.task_truck):
             if t is None:
                 continue
@@ -138,6 +142,7 @@ class AttentionStation:
             chain_token = set_chain_context(chain_id)
             logger.debug(f"本轮任务链 ID: {chain_id}")
 
+            focus_state = None
             try:
                 # 请求truck生成完整消息
                 truck_messages = await truck.get_truck_messages()
@@ -213,29 +218,25 @@ class AttentionStation:
                         pass
                 os._exit(1)
             finally:
-                # === 收尾: 恢复 truck 运行（无论是否异常都要 resume，避免永久 paused）===
-                # 触发 truck 在 remind_station() 中已经 self.pause() 了自己，
-                # 这里 start() 会从 paused 状态恢复到 running。
-                # 其他 truck 是上面我们主动 pause 的，也一并恢复。
-                if truck.state == "paused":
-                    truck.start()
-                    logger.info(f"已恢复{truck_id}运行")
-                elif truck.state == "running":
-                    logger.debug(f"{truck_id}未暂停，无需恢复")
-                for t in other_paused:
-                    # other_paused 中可能也包含 truck 自身（如果它在 _all_running_trucks 里），
-                    # 上面的 truck.start() 已经处理过了，这里跳过避免重复 log
-                    if t is truck:
-                        continue
-                    if t.state == "paused":
-                        t.start()
-                        logger.info(f"已恢复{t.truck_id}运行（处理{truck_id}期间被暂停）")
-
-            # 链上下文收尾：恢复到无链状态，防止残留影响后续逻辑
-            reset_chain_context(chain_token)
-
-            # 标记任务为已完成
-            self.task_queue.task_done()
+                try:
+                    # CancelledError 不经过上面的 Exception 分支，仍必须关链撤权。
+                    if focus_state is not None and focus_state.is_event_chain_active():
+                        focus_state.end_event_chain()
+                finally:
+                    reset_chain_context(chain_token)
+                    self.task_queue.task_done()
+                    # 无论正常结束、取消或归档失败，都恢复被暂停的 truck。
+                    if truck.state == "paused":
+                        truck.start()
+                        logger.info(f"已恢复{truck_id}运行")
+                    elif truck.state == "running":
+                        logger.debug(f"{truck_id}未暂停，无需恢复")
+                    for t in other_paused:
+                        if t is truck:
+                            continue
+                        if t.state == "paused":
+                            t.start()
+                            logger.info(f"已恢复{t.truck_id}运行（处理{truck_id}期间被暂停）")
 
     async def station_input(self, message: Dict[str, any]):
         """处理从truck接收的消息 - truck只提醒station需要处理，不发送完整消息
@@ -310,6 +311,18 @@ class AttentionStation:
                     self.reflection_time_truck.start()
                 else:
                     logger.info("reflection_time_truck 已禁用，不启动线程")
+            if self.reflection_efficacy_truck is None:
+                self.reflection_efficacy_truck = ReflectionEfficacyTruck()
+                if is_truck_enabled('reflection_efficacy_truck'):
+                    self.reflection_efficacy_truck.start()
+                else:
+                    logger.info("reflection_efficacy_truck 已禁用，不启动线程")
+            if self.reflection_belonging_truck is None:
+                self.reflection_belonging_truck = ReflectionBelongingTruck()
+                if is_truck_enabled('reflection_belonging_truck'):
+                    self.reflection_belonging_truck.start()
+                else:
+                    logger.info("reflection_belonging_truck 已禁用，不启动线程")
             if self.task_truck is None:
                 from .trucks.task_truck import TaskTruck
                 self.task_truck = TaskTruck()
@@ -350,6 +363,10 @@ class AttentionStation:
             self.reflection_char_truck.stop()
         if self.reflection_time_truck:
             self.reflection_time_truck.stop()
+        if self.reflection_efficacy_truck:
+            self.reflection_efficacy_truck.stop()
+        if self.reflection_belonging_truck:
+            self.reflection_belonging_truck.stop()
         if self.task_truck:
             self.task_truck.stop()
 
@@ -370,6 +387,8 @@ class AttentionStation:
             'scheduled_proactive_truck': self.scheduled_proactive_truck,
             'reflection_char_truck': self.reflection_char_truck,
             'reflection_time_truck': self.reflection_time_truck,
+            'reflection_efficacy_truck': self.reflection_efficacy_truck,
+            'reflection_belonging_truck': self.reflection_belonging_truck,
             'task_truck': self.task_truck,
         }
         return mapping.get(truck_id)

@@ -16,6 +16,14 @@
   移入 notes/archive/<YYYY-MM>/ 归档文件夹，退出活动池；
   未转化为实际信息的笔记随归档视为自动丢弃（内容仍保留在归档文件中）
 
+特殊储存槽位：
+- 「任务进度相关」笔记双写到事件链缓存与任务槽位；普通笔记不再接受「事件见闻」类别。
+- 见闻录由 Reflection 经 record_observation 独立写入，不再自动复制事件见闻笔记。
+- 槽位独立于事件链文档与归档：archive_all 只 glob NOTES_DIR 顶层 *.json 并归档
+  普通笔记，槽位位于 NOTES_DIR/slots/ 子目录，天然不受影响（反思整理不触碰槽位）；
+- clear_slot 为显式清理接口；Quest 不再自动清空任务槽位。
+- 见闻录槽位无自动清理，长期累积，保留观察到的现象及其依据。
+
 约定：
 - 全异步：文件 IO 通过 asyncio.to_thread 执行；纯内存生命周期操作为同步接口
   （由 event_chain 的同步生命周期方法直接调用，无 IO）。
@@ -26,7 +34,9 @@
 from paths import data_root
 import asyncio
 import json
+import os
 import re
+from uuid import uuid4
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -42,6 +52,34 @@ NOTES_DIR = data_root() / "brain" / "hc" / "shortlight" / "notes"
 # get_all 只 glob NOTES_DIR 顶层 *.json（非递归），归档子目录天然退出活动池。
 ARCHIVE_DIR_NAME = "archive"
 
+# 笔记类别（record_to_notepad 的 category 取值）：LLM 记录时必选其一。
+NOTE_CATEGORY_TASK = "任务进度相关"
+NOTE_CATEGORY_EVENT = "事件见闻"
+# EVENT 保留用于历史数据识别及独立见闻录条目，不再属于普通笔记可写类别。
+NOTE_CATEGORY_SELF_FIX = "自我修正"
+NOTE_CATEGORY_QUOTE = "可借鉴的对方发言"
+NOTE_CATEGORIES = [
+    NOTE_CATEGORY_TASK,
+    NOTE_CATEGORY_SELF_FIX,
+    NOTE_CATEGORY_QUOTE,
+]
+
+# 特殊储存槽位：任务笔记双写，见闻录由反思独立写入。
+# 槽位存于 NOTES_DIR/slots/<槽位名>.json，不受 archive_all
+# 的顶层 glob 影响（反思整理只清普通笔记，不触碰槽位）。
+SLOT_DIR_NAME = "slots"
+SLOT_EVENT = "见闻录"
+SLOT_TASK = "任务相关笔记"
+SLOT_NAMES = [SLOT_EVENT, SLOT_TASK]
+# 类别 → 槽位映射（仅任务笔记双写，其余类别只进普通笔记）
+CATEGORY_TO_SLOT = {
+    NOTE_CATEGORY_TASK: SLOT_TASK,
+}
+
+# list_notes 的可选范围：普通笔记（活动池）/ 见闻录 / 任务相关笔记
+SCOPE_NORMAL = "普通笔记"
+SCOPES = [SCOPE_NORMAL, SLOT_EVENT, SLOT_TASK]
+
 # Windows 文件名非法字符 + 控制字符
 _INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
@@ -56,7 +94,7 @@ class ShortlightNotepad:
     """灵光一现记事本。"""
 
     # 单条记录文本长度上限（字符）：记原则不记叙事，超限抛 ValueError
-    # 走工具层 LLM 自纠通道（压缩重记）；补充语境由 usage 字段承载
+    # 走工具层 LLM 自纠通道（压缩重记）；类别标签由 category 字段承载
     # 2026-09-19 由 40 放宽到 60，允许带较短原话引用
     NOTE_TEXT_MAX_CHARS = 60
 
@@ -69,6 +107,10 @@ class ShortlightNotepad:
     def __init__(self) -> None:
         self._notes_dir = NOTES_DIR
         self._notes_dir.mkdir(parents=True, exist_ok=True)
+        # 特殊槽位目录（NOTES_DIR 子目录，archive_all 的顶层 glob 不会命中）
+        self._slots_dir = NOTES_DIR / SLOT_DIR_NAME
+        self._slots_dir.mkdir(parents=True, exist_ok=True)
+        self._slot_write_lock = asyncio.Lock()
         # 当前事件链的缓存文档（缓存态，真正结束时才落盘）
         self._current: Optional[Dict[str, Any]] = None
 
@@ -92,19 +134,22 @@ class ShortlightNotepad:
         }
         logger.debug(f"记事本缓存文档已创建: {chain_id}")
 
-    def append_note(
+    async def append_note(
         self,
         text: str,
         source: str,
+        category: str,
         session_id: str = "",
         session_name: str = "",
-        usage: str = "",
     ) -> str:
         """写入一条记录进当前缓存文档，返回 note_id。
 
-        usage 为该条记录的自由备注（元数据，完全自由填写，不参与手册路由；query_note 查详情可见）。
+        category 为该条记录的类别标签（三类之一，见 NOTE_CATEGORIES）。
         无活跃链文档属状态异常（conversation 只会运行在事件链内），直接崩溃阻断；
         空文本/超长（> NOTE_TEXT_MAX_CHARS）属输入校验错误，抛 ValueError（走工具层 LLM 自纠通道）。
+
+        仅「任务进度相关」双写任务槽位，其余类别只进缓存文档。
+        见闻录须由反思独立记录。槽位写入 IO 失败直接上抛崩溃阻断。
         """
         if self._current is None:
             raise RuntimeError("无活跃事件链的记事本缓存文档，无法记录")
@@ -114,20 +159,84 @@ class ShortlightNotepad:
         if len(cleaned_text) > self.NOTE_TEXT_MAX_CHARS:
             raise ValueError(
                 f"text 超长（{len(cleaned_text)} 字 > 上限 {self.NOTE_TEXT_MAX_CHARS} 字）。"
-                "只记提炼后的原则/规则（遇到什么情况→怎么做），不记事件经过与对话复述；"
-                "补充语境（适用场合、来由等）写入 usage 字段。"
+                "只记提炼后的一句话（对方言论原话短引 / 要求标准 / 好恶 / 反应模式），"
+                "不记事件经过与对话复述。"
+            )
+        cleaned_category = (category or "").strip()
+        if cleaned_category not in NOTE_CATEGORIES:
+            raise ValueError(
+                f"category 非法（{cleaned_category!r}），必须从以下类别中选择之一："
+                f"{'、'.join(NOTE_CATEGORIES)}。"
             )
         note_id = generate_timestamp_id("Note")
-        self._current["notes"].append({
+        note = {
             "note_id": note_id,
-            "text": text,
+            "text": cleaned_text,
             "source": source,
+            "category": cleaned_category,
             "session_id": session_id,
             "session_name": session_name,
-            "usage": (usage or "").strip(),
             "record_time": datetime.now().isoformat(timespec="milliseconds"),
-        })
+        }
+        self._current["notes"].append(note)
+        # 仅任务进度相关双写；见闻录由反思专属接口写入。
+        slot = CATEGORY_TO_SLOT.get(cleaned_category)
+        if slot is not None:
+            async with self._slot_write_lock:
+                await asyncio.to_thread(self._append_slot_note_sync, slot, note)
         return note_id
+
+    async def record_observation(self, text: str, source: str = "reflection") -> str:
+        """反思独立记录见闻，不要求活跃事件链，不占普通笔记预算。"""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text 必须是一段非空的见闻文字。")
+        if source not in ("reflection", "human"):
+            raise ValueError("见闻来源必须为 reflection 或 human")
+        note_id = "Note_" + uuid4().hex
+        note = {
+            "note_id": note_id,
+            "text": text.strip(),
+            "source": source,
+            "category": NOTE_CATEGORY_EVENT,
+            "session_id": "",
+            "session_name": "",
+            "record_time": datetime.now().isoformat(timespec="milliseconds"),
+        }
+        async with self._slot_write_lock:
+            await asyncio.to_thread(self._append_slot_note_sync, SLOT_EVENT, note)
+        return note_id
+
+    async def update_observation(self, note_id: str, text: str) -> Optional[Dict[str, Any]]:
+        """人从记忆页修订独立见闻；保留原始来源和记录时间。"""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text 必须是一段非空的见闻文字。")
+        async with self._slot_write_lock:
+            file_path = self._slot_path(SLOT_EVENT)
+            if not file_path.exists():
+                return None
+            payload = (await asyncio.to_thread(self._read_documents, [file_path]))[0]
+            note = next((item for item in payload.get("notes", []) if item.get("note_id") == note_id), None)
+            if note is None:
+                return None
+            note["text"] = text.strip()
+            note["updated_at"] = datetime.now().isoformat(timespec="milliseconds")
+            await asyncio.to_thread(self._write_slot_sync, file_path, payload)
+            return dict(note)
+
+    async def delete_observation(self, note_id: str) -> bool:
+        """删除指定独立见闻，不触碰普通笔记与任务槽位。"""
+        async with self._slot_write_lock:
+            file_path = self._slot_path(SLOT_EVENT)
+            if not file_path.exists():
+                return False
+            payload = (await asyncio.to_thread(self._read_documents, [file_path]))[0]
+            notes = payload.get("notes", [])
+            kept = [item for item in notes if item.get("note_id") != note_id]
+            if len(notes) == len(kept):
+                return False
+            payload["notes"] = kept
+            await asyncio.to_thread(self._write_slot_sync, file_path, payload)
+            return True
 
     def discard_chain(self) -> None:
         """事件链收尾：丢弃未落库的残留缓存（未真正结束路径不持久化）。"""
@@ -196,6 +305,29 @@ class ShortlightNotepad:
                 return doc
         return None
 
+    async def get_notes_by_category(self, category: str) -> List[Dict[str, Any]]:
+        """聚合指定类别的全部笔记条目（当前链缓存 + 已落库），按记录时间正序返回。
+
+        通用类别聚合接口：任务进度相关条目现在由 quest agent 直接读专用槽位
+        （get_slot_notes），此接口保留供其他类别的跨文档聚合查询使用。
+
+        Returns:
+            条目列表（每项含 text / source / category / record_time 等字段）；
+            无匹配返回空列表。
+        """
+        target = (category or "").strip()
+        results: List[Dict[str, Any]] = []
+        if self._current is not None:
+            for note in self._current.get("notes") or []:
+                if (note.get("category") or "").strip() == target:
+                    results.append(note)
+        for doc in await self.get_all():
+            for note in doc.get("notes") or []:
+                if (note.get("category") or "").strip() == target:
+                    results.append(note)
+        results.sort(key=lambda n: n.get("record_time", ""))
+        return results
+
     def _read_documents(self, file_paths: List[Path]) -> List[Dict[str, Any]]:
         """同步读盘。IO/解析失败直接上抛，崩溃阻断。"""
         results: List[Dict[str, Any]] = []
@@ -203,6 +335,69 @@ class ShortlightNotepad:
             with open(file_path, "r", encoding="utf-8") as f:
                 results.append(json.load(f))
         return results
+
+    # ============================================================
+    # 特殊储存槽位（见闻录 / 任务相关笔记）：独立于事件链文档与归档
+    # ============================================================
+
+    def _slot_path(self, slot: str) -> Path:
+        """校验槽位名并返回其文件路径。非法槽位名属编码错误，直接崩溃阻断。"""
+        cleaned = (slot or "").strip()
+        if cleaned not in SLOT_NAMES:
+            raise ValueError(
+                f"槽位名非法（{cleaned!r}），必须是以下之一：{'、'.join(SLOT_NAMES)}。"
+            )
+        return self._slots_dir / f"{_safe_filename(cleaned)}.json"
+
+    def _append_slot_note_sync(self, slot: str, note: Dict[str, Any]) -> None:
+        """同步向槽位文件追加一条笔记（读-改-写整文件）。
+
+        槽位文件为独立 JSON（{"slot", "notes": [...]}），与事件链文档解耦；
+        读/写 IO 失败直接上抛崩溃阻断。
+        """
+        file_path = self._slot_path(slot)
+        if file_path.exists():
+            with open(file_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        else:
+            payload = {"slot": slot, "notes": []}
+        payload.setdefault("notes", []).append(note)
+        self._write_slot_sync(file_path, payload)
+
+    async def get_slot_notes(self, slot: str) -> List[Dict[str, Any]]:
+        """读取指定槽位的全部笔记条目，按记录时间正序返回；无槽位文件返回空列表。"""
+        file_path = self._slot_path(slot)
+        if not file_path.exists():
+            return []
+        payload = await asyncio.to_thread(self._read_documents, [file_path])
+        notes = payload[0].get("notes") or []
+        return sorted(notes, key=lambda n: n.get("record_time", ""))
+
+    async def clear_slot(self, slot: str) -> int:
+        """清空指定槽位内容，返回被丢弃的条目数；无槽位文件返回 0。
+
+        任务 agent 处理完毕后调用（丢弃任务相关笔记槽位）；只清槽位，
+        不影响普通笔记中同条目的副本（仍可由反思系统消费）。
+        """
+        file_path = self._slot_path(slot)
+        if not file_path.exists():
+            return 0
+        payload = (await asyncio.to_thread(self._read_documents, [file_path]))[0]
+        dropped = len(payload.get("notes") or [])
+        payload["notes"] = []
+        await asyncio.to_thread(self._write_slot_sync, file_path, payload)
+        logger.info(f"槽位「{slot}」已清空 {dropped} 条笔记")
+        return dropped
+
+    def _write_slot_sync(self, file_path: Path, payload: Dict[str, Any]) -> None:
+        """同步写回槽位文件。IO 失败直接上抛，崩溃阻断。"""
+        temporary = file_path.with_name(file_path.name + "." + uuid4().hex + ".tmp")
+        try:
+            with open(temporary, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(temporary, file_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     # ============================================================
     # 反思消费接口（reflection 会话专用：独立落库 + 按时间归档）
@@ -258,9 +453,9 @@ class ShortlightNotepad:
                 "note_id": generate_timestamp_id("Note"),
                 "text": taken,
                 "source": "reflection",
+                "category": NOTE_CATEGORY_SELF_FIX,
                 "session_id": "",
                 "session_name": "",
-                "usage": "",
                 # 反思条目不落条目级时间（全部同属 finalize 时刻，逐条展示冗余无意义；
                 # 文档级 begin_time/finalize_time 已承载时间信息）
                 "record_time": "",
@@ -379,8 +574,8 @@ class ShortlightNotepad:
         存储不受影响：只影响呈现层注入文本体积，防止注入过大干扰 LLM；
         细节溯源走 query_note 工具。空库/全部被限幅挤出时返回空串（注入方应跳过）。
 
-        条目的 usage 字段仅作元数据记录（LLM 自由填写，query_note 查详情
-        可见），不参与手册路由——所有已落库条目全部入选渲染。
+        条目的 category 字段为类别标签（query_note 查详情可见，兼容历史类别），
+        不参与手册路由——所有已落库条目全部入选渲染。
 
         Args:
             max_chars: 字符预算上限；None 用 MANUAL_MAX_CHARS 默认值。

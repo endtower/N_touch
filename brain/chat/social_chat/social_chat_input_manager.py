@@ -33,31 +33,30 @@ logger = get_logger('SocialChatInputManager', "INFO")
 # 窗口期内继续到达的消息随本次 fetch_unread 一并消费，避免截断用户输入
 USER_OBSERVATION_WINDOW_S = 3.0
 
-# 初始发送模式（统一从 chat_config 读取，run 内可经 set_send_mode 工具切换）
-DEFAULT_SEND_MODE = chat_config.SOCIAL_CHAT_SEND_MODE
-
-
 # ---------- 发送模式 block 文案 ----------
 _MODE_APPROVAL = (
     "\n【发送模式：审批】\n"
     "- 你每次调用 send_to_target 前，系统会把消息全文发给主人审批："
     "主人回复『同意』才会真正发出；回复其他任何内容或超时都会拒绝本次发送。\n"
     "- 被拒 / 超时不是崩溃：与主人沟通调整后可再次尝试。\n"
-    "- 如需不再逐条审批，可用 set_send_mode 申请切换到自由模式（须主人回复『同意』开启）。"
+    "- 单条消息的批准不会开启自由模式。可用 set_send_mode 申请自由发送（须主人回复『同意』）。\n"
+    "- 自由授权只限当前事件链的当前工作会话；再次进入该会话仍有效，链结束即失效，其他会话需另行申请。"
 )
 _MODE_UNRESTRICTED = (
     "\n【发送模式：自由】\n"
     "- 你可以直接调用 send_to_target 向工作会话发送消息，无需逐条审批。\n"
-    "- 每条发出后系统会自动知会主人。\n"
+    "- 当前模式只限本事件链的当前工作会话；再次进入该会话仍有效，事件链结束后重新按配置初始化。\n"
     "- 如需恢复逐条审批，可调用 set_send_mode(mode=\"approval\")，立即生效。"
 )
 
 
 def _build_mode_block(mode: str) -> str:
-    mode = (mode or DEFAULT_SEND_MODE).strip().lower()
     if mode == "unrestricted":
-        return _MODE_UNRESTRICTED
-    return _MODE_APPROVAL
+        notice = "\n- 每条发出后系统会自动知会主人。" if chat_config.SOCIAL_CHAT_UNRESTRICTED_NOTIFY else ""
+        return _MODE_UNRESTRICTED + notice
+    if mode == "approval":
+        return _MODE_APPROVAL
+    raise ValueError(f"非法发送模式: {mode!r}")
 
 
 class SocialChatInputManager:
@@ -80,7 +79,8 @@ class SocialChatInputManager:
         # social_chat_core 是 single source of truth，本类只持有引用。
         self._social_chat_core = None
         self._task_purpose: str = ""
-        self._send_mode: str = DEFAULT_SEND_MODE
+        self._permissions = None
+        self._permission_scope = None
 
         # ========== 已激活经验缓存（避免重复注入） ==========
         self._activated_bequests: set = set()
@@ -102,6 +102,8 @@ class SocialChatInputManager:
         self._first_activation = True
         self._activated_bequests = set()
         self._no_tool_call_warning = ""
+        self._permissions = None
+        self._permission_scope = None
 
     # ----------------- 配置接口 -----------------
     def prepare_first_message(
@@ -113,7 +115,7 @@ class SocialChatInputManager:
 
         master / working 会话 ID 一律从 social_chat_core 读，调用方不传。
         social_chat_core 必须非 None——core 没初始化就直接崩溃（符合 user_rules）。
-        发送模式取自 config（SOCIAL_CHAT_SEND_MODE），不接受调用方指定。
+        发送模式从当前事件链权限服务实时读取，不接受调用方指定。
         """
         if not purpose:
             raise ValueError("prepare_first_message 缺少必要参数 purpose")
@@ -126,13 +128,22 @@ class SocialChatInputManager:
 
         self._social_chat_core = social_chat_core
         self._task_purpose = purpose
-        self._send_mode = (chat_config.SOCIAL_CHAT_SEND_MODE or DEFAULT_SEND_MODE).strip().lower()
+        from brain.hc.global_session_state import get_global_session_state
+        self._permissions = get_global_session_state().get_event_chain_permissions()
+        self._permission_scope = (social_chat_core.master_session_id, social_chat_core.working_session_id)
         self._first_activation = True
         logger.info(
-            f"social_chat 准备首条 user 消息: send_mode={self._send_mode}, "
+            f"social_chat 准备首条 user 消息: send_mode={self._current_send_mode()}, "
             f"master={social_chat_core.master_session_id}, "
             f"working={social_chat_core.working_session_id}"
         )
+
+    def _current_send_mode(self) -> str:
+        if self._permissions is None or self._permission_scope != (
+            self._social_chat_core.master_session_id, self._social_chat_core.working_session_id
+        ):
+            raise RuntimeError("Social Chat 输入未绑定当前事件链及目标会话")
+        return self._permissions.get_send_mode(*self._permission_scope)
 
     # ----------------- 对外接口 -----------------
     @async_handle_errors()
@@ -212,7 +223,7 @@ class SocialChatInputManager:
         task_block = f"【本次聊天任务】\n{self._task_purpose}"
 
         # 4) 发送模式
-        mode_block = _build_mode_block(self._send_mode)
+        mode_block = _build_mode_block(self._current_send_mode())
 
         # 5) amy_effect（表现侧出口：仅 NE/DA 两行激素描述 + 原因（仅非最终评价类想法），
         #    不含 SC 行——pfca 决策侧情绪体系与本模块隔离，见 docs/api/amy.md）
@@ -244,8 +255,10 @@ class SocialChatInputManager:
         persona_header = self._build_persona_header()
         if persona_header:
             user_input = f"{persona_header}\n{user_input}"
+            from brain.hc.maintenance import MaintenanceService
+            await MaintenanceService().record_usage("persona", ["common", self._social_chat_core.persona_name], "selected")
 
-        # 6) 记事本手册：长期经验底色（全部已落库条目，usage 不参与路由），
+        # 6) 记事本手册：长期经验底色（全部已落库条目，条目的 category 不参与路由），
         #    章节式裸文本；拉取失败直接上抛崩溃阻断（按 user_rules），细节经 query_note 工具溯源
         from brain.hc.shortlight import get_shortlight_notepad
         manual = await get_shortlight_notepad().render_manual()

@@ -216,12 +216,8 @@ class ProactiveSession(HeavySession):
                 tasks.append({
                     "task_id": rec.get("task_id"),
                     "title": rec.get("title"),
-                    "brief": rec.get("brief"),
-                    "conclusion": rec.get("conclusion"),
-                    "stage": rec.get("stage"),
-                    "notes": rec.get("notes"),
+                    "context": rec.get("context"),
                     "next_occurrence": rec.get("next_occurrence"),
-                    "deadline": rec.get("deadline"),
                 })
         return tasks
 

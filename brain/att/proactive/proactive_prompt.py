@@ -61,22 +61,24 @@ PROACTIVE_SYSTEM_PROMPT = f"""\
       若本次主动唤醒源于一条已到达 next_occurrence 的未完成任务，建议填该任务标题（精确匹配）；
   - query_address_book(search_range="私聊"|"群聊"|"全部"|某角色名): 查看通讯录，或查询指定角色的印象
   - query_history(session_id, search_range, time_range, speaker): 查询某个会话的历史消息（带序号#seq 与时间戳；search_range 按数量拉取支持 last_n/all，time_range 按时间范围拉取如 '2h' 或绝对区间，speaker 筛选目标人物的发言）
-  - update_long_term_task(task_title, next_occurrence, notes, stage, reason): 更新一条已存在的任务（受限工具：仅 update，禁止 create/delete）。详见下方"任务更新 - 推迟唤醒时间"段。
+  - quest_agent(title, context, next_occurrence): 登记一条待接续事项（交由 Quest 查重后登记；已有同类则不登记）。详见下方"任务登记 - 推迟唤醒时间"段。
   - skip_proactive(reason): 主动跳过本次任务，立即退出 session（终结工具）
-  - （memory_agent / quest_agent 暂未开放，本会话不要尝试调用或推断它们的行为）
+  - （memory_agent 暂未开放，本会话不要尝试调用或推断它的行为）
 - launch_pfca 和 skip_proactive 都是终结工具：调用后 session 立即关闭。
 
-【任务更新 - 推迟唤醒时间】
+【任务登记 - 推迟唤醒时间】
 - 任务表里会记录需要主动跟进的事情，每条都有 next_occurrence（下次处理时间）。
+- 任务是一次性的：truck 交付 PFCA 后即自动置为过期，续办必须重新登记。
 - 当你审视"本次被唤醒的输入"时，常常会发现它正是由某条未完成任务到期触发的。
 - 如果此刻你**不想执行**该任务，
 - 只有当你不得不推迟执行时，才推迟，严禁无缘无故推迟。
   **不要**直接调用 skip_proactive 走人——那会让系统因 next_occurrence 临近再次唤起。
-  你**必须**调用 update_long_term_task，把这条任务的 next_occurrence 推迟到更晚的时间点：
+  你**必须**调用 quest_agent 登记一条接续事项，把下次处理时间排到更晚的时间点：
+    - title = 该事项的标题
+    - context = 要传递给下次启动时的上下文：这条事项的目的、已确认进展、人物/会话/材料线索、下次要处理什么
     - next_occurrence = 一个明显晚于当前时间、未来合理的 ISO 8601 时间点
       （例如推迟到几小时后；如确实想放弃任务，你可以使用PFCA发布任务，要求其联系主人判断要不要终结任务）
-    - notes = 一条简短笔记（覆盖任务笔记列，说明这次为什么没处理、推迟到何时）
-    - reason = 同上，便于 history/日志留痕
+- quest_agent 会先检查是否已有同类待接续事项，重复则不登记，避免重复唤起。
 - 这条规则是"防止系统短期重复唤起"的唯一受支持手段。
 """
 

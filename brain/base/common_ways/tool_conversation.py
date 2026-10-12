@@ -15,7 +15,7 @@ conversation 与 social_chat 各自的 ToolManager 只做目标注入与专有�
 """
 
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from utils.logger import get_logger
 from adapt import OutboundTarget, OutboundPayload, SessionScope
@@ -31,6 +31,7 @@ TYPING_SPEED_CHARS_PER_MINUTE = 150
 TYPING_DELAY_PER_CHAR = 60.0 / TYPING_SPEED_CHARS_PER_MINUTE
 # 单条打字延迟上限（首条不延时；后续条延时封顶此值）
 MAX_TYPING_DELAY = 2.0  # 秒
+SEND_MESSAGE_RULE = "每个 LLM 执行轮次只能调用一次文字发送工具；message 用换行分段，一次最多发送 3 条，超出部分不会发送。"
 # 图片发送的固定打字延迟
 IMAGE_TYPING_DELAY = 1.0  # 秒
 
@@ -52,9 +53,9 @@ class ToolConversation(ToolHandlers):
             "function": {
                 "name": "send_message",
                 "description": (
-                    "发送纯文字消息。一次只能调用一次该工具，不能一次性同时调用多次该工具。"
+                    "发送纯文字消息。" + SEND_MESSAGE_RULE +
                     "就在 message 里用换行分隔：一次调用会拆成多条独立消息，按真人节奏逐条发出。"
-                    "长篇的观点论证也可以整段粘贴。但禁止连续发送长篇观点论证，需要有语气词间隔缓冲节奏。"
+                    "长篇的观点论证也可以整段粘贴，发完后避免连续追加长篇。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -107,6 +108,7 @@ class ToolConversation(ToolHandlers):
         session_id: str,
         message: str,
         typing_delay_per_char: float = TYPING_DELAY_PER_CHAR,
+        on_sent: Optional[Callable[[str], None]] = None,
     ) -> str:
         """发送纯文字消息：message 内换行拆成多条独立消息，按真人节奏逐条发出。
 
@@ -129,13 +131,38 @@ class ToolConversation(ToolHandlers):
         if not lines:
             raise ValueError("message 为空，禁止发送空消息")
 
-        out_segments = [text_segment(ln) for ln in lines]
         scope, target_id = cls._resolve_target(session_id)
+        from memory.message_repository import get_message_store
+        pressure = await get_message_store().get_speech_pressure(session_id)
+        count = pressure["characters"]
+        limited = not pressure["user_replied"] and count >= 150
+        max_parts = (1 if count >= 300 else 2) if limited else 3
+        omitted = lines[max_parts:]
+        out_segments = [text_segment(ln) for ln in lines[:max_parts]]
         await cls.send_segments_with_typing(
             scope, target_id, out_segments,
             typing_delay_per_char=typing_delay_per_char,
         )
-        return cls._render_send_result(len(out_segments))
+        if on_sent is not None:
+            on_sent("\n".join(lines[:max_parts]))
+        result = cls._render_send_result(len(out_segments))
+        # 发送本次长篇后立即告知下一轮约束；正常发送不添加提示。
+        pressure = await get_message_store().get_speech_pressure(session_id)
+        if not pressure["user_replied"] and pressure["characters"] >= 150:
+            count = pressure["characters"]
+            next_parts, soft_chars = (1, 60) if count >= 300 else (2, 120)
+            result += (
+                f"\n【发言量提醒】最近60秒已发送{count}个非空白字符。"
+                f"若下一轮没有用户新回复，最多发送{next_parts}条，"
+                f"总长度尽量不超过{soft_chars}字；没有必要的新内容就停止发送。"
+            )
+        if omitted:
+            result += (
+                f"\n【警告】本次最多允许{max_parts}条，超出的{len(omitted)}条未发送。"
+                "不得在本轮再次调用发送工具补发。未发送内容：\n"
+                + "\n".join(f"{i}. {line}" for i, line in enumerate(omitted, max_parts + 1))
+            )
+        return result
 
     @classmethod
     async def send_image(

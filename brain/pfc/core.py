@@ -103,10 +103,12 @@ async def run_pfc_cycle(
                 )
             finally:
                 # 本协调器新开的事件链在腿结束后收尾（未真正结束路径缓存丢弃）
-                if chain_owned_by_cycle and focus_state.is_event_chain_active():
-                    focus_state.end_event_chain()
-                if chain_token is not None:
-                    reset_chain_context(chain_token)
+                try:
+                    if chain_owned_by_cycle and focus_state.is_event_chain_active():
+                        focus_state.end_event_chain()
+                finally:
+                    if chain_token is not None:
+                        reset_chain_context(chain_token)
             session_ctx = None  # 接力腿无原始会话上下文
         elif state == "reflection":
             result = await get_reflection_instance().start(

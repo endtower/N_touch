@@ -73,7 +73,7 @@ def _serialize_thoughts(thoughts: List[Any]) -> List[Dict[str, Any]]:
 def _category_of(act: str) -> str:
     try:
         from brain.amy.constants import ACTEffects, FinalEvaluationAct
-        if act in FinalEvaluationAct.names():
+        if FinalEvaluationAct.contains(act):
             return "final"
         c = ACTEffects.category_of(act)
         return c or "unknown"
@@ -164,8 +164,9 @@ async def handle_get_amy_state(request: web.Request) -> web.Response:
         # 4. thought_cache 统计
         ts = ei.thought_cache.timestamp
 
-        # 5. 存在感（feedback_state 数值 + 决策侧/人格注入的归因 prompt + 未偿欠账明细）
+        # 5. 旧单轴 presence 字段兼容；新双轴在 decision_feedback 返回
         from brain.amy.prompt_engine import build_presence_attribution
+        from brain.amy.decision_feelings import AXIS_NAMES
         presence_value = ei.feedback_state.read_value()
         debts = ei.debt_ledger.list_debts()
         presence = {
@@ -190,7 +191,13 @@ async def handle_get_amy_state(request: web.Request) -> web.Response:
                 "dopamine": round(snapshot.dopamine, 2),
             },
             "amy_description": amy_desc,
-            "presence": presence,
+            "presence": presence,  # 兼容旧页面
+            "decision_feedback": {
+                **ei.feedback_state.snapshot(),
+                "competence_name": AXIS_NAMES["competence"],
+                "recognition_name": AXIS_NAMES["recognition"],
+                "prompt": await ei.get_decision_description(),
+            },
             "thoughts": {
                 "all_active_count": len(all_active),
                 "all_active": all_active,
@@ -245,13 +252,9 @@ async def handle_create_amy_thought(request: web.Request) -> web.Response:
 async def handle_apply_amy_final_evaluation(request: web.Request) -> web.Response:
     """POST /amy/final-evaluation  登记一次最终评价（调试/测试用）。
 
-    body: {final_evaluation, title}
-    - final_evaluation：FinalEvaluationAct 词表名
-    - title：本次事件简易标题（≤15 字）
-
-    直接走 `apply_final_evaluation`：按格子步进结算反馈维度，并把想法入池
-    （desc=`因为 {title} 任务中，导致的{上升/降低}`，时长 4 小时）。
-    失败（未初始化 / 词表外 / title 空）返回 400，不吞异常。
+    body: {final_evaluation, title, task_result?, task_reason?, evaluation_reason?}
+    直接走 apply_final_evaluation 结算两轴并把最终评价想法入池。
+    旧调用省略任务结果按中性；成功/失败缺任务原因、非法标签、空标题返回 400。
     """
     ei = await _try_get_ei()
     if ei is None:
@@ -263,7 +266,13 @@ async def handle_apply_amy_final_evaluation(request: web.Request) -> web.Respons
     final_evaluation = (data.get("final_evaluation") or "").strip()
     title = (data.get("title") or "").strip()
     try:
-        await ei.apply_final_evaluation(final_evaluation, title)
+        from brain.amy.constants import TaskResultAct
+        await ei.apply_final_evaluation(
+            final_evaluation, title,
+            task_result=data.get("task_result", TaskResultAct.NEUTRAL),
+            task_reason=data.get("task_reason", ""),
+            evaluation_reason=data.get("evaluation_reason", ""),
+        )
     except ValueError as e:
         return web.json_response({"error": str(e)}, status=400)
     return web.json_response({"applied": True})

@@ -579,6 +579,26 @@ class MessageRepository:
         return sessions
 
     @async_handle_errors(error_types=(StorageError, ValidationError), log_level=logging.ERROR)
+    async def get_speech_pressure(self, session_id: str) -> Dict[str, Any]:
+        """60秒实际输出字符数，以及最后一次输出后是否有用户消息（按seq）。"""
+        conn = await self._ensure_connection()
+        self._validate_session_params(session_id)
+        async with conn.execute(
+            "SELECT user_id, content_text FROM messages WHERE session_id=? AND timestamp>?",
+            (session_id, time.time() - 60),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        characters = sum(
+            sum(not ch.isspace() for ch in (row["content_text"] or ""))
+            for row in rows if row["user_id"] == "system"
+        )
+        async with conn.execute(
+            "SELECT user_id FROM messages WHERE session_id=? ORDER BY seq DESC LIMIT 1",
+            (session_id,),
+        ) as cursor:
+            last = await cursor.fetchone()
+        return {"characters": characters, "user_replied": bool(last and last["user_id"] != "system")}
+
     async def get_latest_session_messages(self, session_id: str, n: int = 10) -> Dict[str, Any]:
         """获取目标会话的最后n条信息，按时间顺序排列。
 

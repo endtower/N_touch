@@ -213,6 +213,7 @@ class BequestOperations:
         query_text: str,
         top_k: int = 5,
         category: str = "speech",
+        record_usage: bool = False,
     ) -> List[Tuple[str, float]]:
         """根据查询文本进行向量相似度搜索，返回最相似的 (bequest_id, 相似度) 列表。
 
@@ -245,7 +246,11 @@ class BequestOperations:
                 results.append((r["bequest_id"], sim))
 
         results.sort(key=lambda x: x[1], reverse=True)
-        return [(bequest_id, sim) for bequest_id, sim in results[:top_k]]
+        selected = [(bequest_id, sim) for bequest_id, sim in results[:top_k]]
+        if record_usage:
+            from brain.hc.maintenance import MaintenanceService
+            await MaintenanceService().record_usage("experience", [item[0] for item in selected], "vector_returned")
+        return selected
 
     async def backfill_missing_vectors(self) -> int:
         """为所有缺失向量的经验补算 title_vector（一键回填存量数据）。
