@@ -11,7 +11,7 @@ system_core.py
 
     注册顺序 = 启动顺序：  memory_db → message_store → default_initializer
                            → amy → attention → message_handler → channels
-    stop_all 逆序执行：    channels（先切断外部事件流入）→ message_handler
+    stop_all 逆序执行：    channels（关闭 Web 和接入代理；不停止接入进程）→ message_handler
                            → attention → amy → default_initializer
                            → message_store → memory_db（存储最后关闭）
 
@@ -34,12 +34,11 @@ from brain.amy import get_emotional_interface, reset_emotional_interface
 
 # 导入 adapt 平台适配层
 from adapt import get_channel_manager, reset_channel_manager
-from adapt.onebot import OneBotChannel, OneBotChannelConfig
+from adapt.ingress_client import IngressChannel
 from adapt.web import WebChannel, WebChannelConfig
 # adapt 配置文件（OneBot / WeChat / Web）
 from config.adapt_settings import (
     is_onebot_enabled,
-    get_onebot_config,
     is_web_enabled,
     get_web_config,
 )
@@ -78,6 +77,11 @@ class SystemCore:
         if self._registry.started:
             logger.warning("SystemCore已经处于运行状态")
             return
+
+        # 启动配置由常驻管理页保存；调度器启动前统一应用，保存本身不会唤醒 core。
+        from config.truck_settings import get_all_truck_configs
+        from truck_settings_store import apply_startup_settings
+        apply_startup_settings(get_all_truck_configs())
 
         # —— 按依赖顺序注册（stop 按注册逆序执行）——
         # memory_db / message_store 注册真正的 start：先完成连接+建表+迁移，
@@ -151,15 +155,13 @@ class SystemCore:
         self.amy_core = None
 
     async def _start_channels(self) -> None:
-        """注册并启动 adapt channels（NapCat 反向 WS 服务端 / Web 前端）。
+        """注册 Web 和独立消息接入代理；OneBot 监听由 ingress 持有。
 
         channels 最后启动：先切断一切就绪后再接受外部事件流入。
         """
         mgr = await get_channel_manager()
         if is_onebot_enabled():
-            await mgr.add(OneBotChannel(
-                OneBotChannelConfig.from_platform_config(get_onebot_config())
-            ))
+            await mgr.add(IngressChannel())
         else:
             logger.info("OneBot 平台未启用，跳过注册")
 

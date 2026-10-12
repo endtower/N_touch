@@ -7,8 +7,8 @@ manager_service.py，127.0.0.1:49990）发命令。服务未运行时给出明�
 
 用法：
     python manager.py status
-    python manager.py start|stop|restart <core|snowluma>
-    python manager.py logs <core|core_out|snowluma|service> [lines]
+    python manager.py start|stop|restart <ingress|core|snowluma>
+    python manager.py logs <core|core_out|ingress|snowluma|service> [lines]
     python manager.py config-get | config-set KEY=VALUE ...
     python manager.py service-start     # 拉起常驻管理服务（冻结包内）
     python manager.py shutdown          # 停止全部目标并退出服务
@@ -123,7 +123,7 @@ def main() -> int:
         return 0
     if cmd in ("start", "stop", "restart"):
         if not rest:
-            print(f"用法: {cmd} <core|snowluma>")
+            print(f"用法: {cmd} <ingress|core|snowluma>")
             return 2
         code, body = _call("POST", f"/v1/targets/{rest[0]}/{cmd}")
         return _print_result(body)

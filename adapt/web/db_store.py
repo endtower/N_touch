@@ -12,6 +12,7 @@ DBStore：Web 层数据源，直接复用主系统 MessageRepository（SQLite ch
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Dict, List, Optional
 
@@ -42,12 +43,49 @@ class DBStore:
     # 列举
     # ------------------------------------------------------------------
 
+    async def _display_names(self) -> Dict[str, str]:
+        """按完整会话联系方式取首个别名，避免用消息中的临时身份名命名。"""
+        from brain.hc.database.core import get_memory_db
+
+        names: Dict[str, str] = {}
+        try:
+            conn = await get_memory_db()._ensure_connection()
+            for scope, table in (("private", "characters"), ("group", "groups")):
+                cur = await conn.execute(
+                    f"SELECT name, aliases, contacts FROM {table} ORDER BY uuid"
+                )
+                for row in await cur.fetchall():
+                    try:
+                        aliases = json.loads(row["aliases"] or "[]")
+                        contacts = json.loads(row["contacts"] or "[]")
+                    except (TypeError, ValueError):
+                        logger.warning("会话显示名读取失败：%s 的别名或联系方式无效", table)
+                        continue
+                    if not isinstance(aliases, list) or not isinstance(contacts, list):
+                        continue
+                    first_alias = aliases[0] if aliases else None
+                    name = (
+                        (first_alias.strip() if isinstance(first_alias, str) else "")
+                        or row["name"]
+                    )
+                    if not name:
+                        continue
+                    for contact in contacts:
+                        sid = contact.get("session_id") if isinstance(contact, dict) else None
+                        if isinstance(sid, str) and sid.startswith(f"{scope}_"):
+                            names.setdefault(sid, name)
+        except Exception:
+            # 记忆库不可用时仍允许打开聊天记录；回退到持久化名。
+            logger.warning("无法读取会话别名，暂用聊天记录中的名称", exc_info=True)
+        return names
+
     async def list_sessions(self) -> List[WebSession]:
         rows = await self._repo.list_sessions()
+        names = await self._display_names() if rows else {}
         out: List[WebSession] = []
         for r in rows:
             scope, bare_id = _split_session_id(r["session_id"])
-            name = r.get("session_name") or bare_id
+            name = names.get(r["session_id"]) or r.get("session_name") or bare_id
             out.append(WebSession(
                 session_id=bare_id,
                 scope=scope,
@@ -109,6 +147,7 @@ class DBStore:
         session_id = f"{scope}_{bare_id}"
         name = session_name or user_name or f"{scope}_{bare_id}"
         await self._repo.create_session(session_id, name)
+        name = (await self._display_names()).get(session_id) or name
         return WebSession(
             session_id=bare_id, scope=scope, user_id=bare_id,
             user_name=name, session_name=name, role=role,

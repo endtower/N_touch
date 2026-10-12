@@ -37,7 +37,7 @@ sys.path.insert(0, str(app_root()))
 from aiohttp import web                                     # noqa: E402
 from manager_core import SupervisorService, log_root        # noqa: E402
 
-SERVICE_VERSION = "0.3.2-manual"
+SERVICE_VERSION = "0.5.0-ingress"
 API_PORT = 49990
 _TOKEN_FILE = data_root() / "manager" / "service_token.txt"
 
@@ -76,7 +76,7 @@ def _denied() -> web.Response:
 def _target(request: web.Request):
     name = request.match_info.get("target", "")
     ctrl = _service.controller(name)
-    return ctrl, (None if ctrl else f"未知目标 {name}（可选 core | snowluma）")
+    return ctrl, (None if ctrl else f"未知目标 {name}（可选 ingress | core | snowluma）")
 
 
 # ============================================================
@@ -99,9 +99,28 @@ async def handle_info(request: web.Request) -> web.Response:
 async def handle_targets(request: web.Request) -> web.Response:
     if not _authorized(request):
         return _denied()
+    targets = [vars(s) for s in _service.snapshots()]
+    for target in targets:
+        if target["name"] == "ingress" and target["ready"]:
+            from aiohttp import ClientSession, ClientTimeout
+            try:
+                base = _service.controller("ingress").spec.health_url.rsplit("/", 1)[0]
+                async with ClientSession(timeout=ClientTimeout(total=1)) as client:
+                    async with client.get(base + "/v1/status", headers={"X-Manager-Token": TOKEN}) as response:
+                        if response.status == 200:
+                            detail = await response.json()
+                            target["ready"] = bool(detail.get("ready"))
+                            target["onebot_connected"] = detail.get("onebot_connected")
+                            target["pending"] = detail.get("pending", {})
+                            if detail.get("last_error"):
+                                target["last_error"] = detail["last_error"]
+            except Exception:
+                target["onebot_connected"] = None
+                target["ready"] = False
     return web.json_response({
-        "targets": [vars(s) for s in _service.snapshots()],
+        "targets": targets,
         "config_errors": _service.config_errors,
+        "service_started_at": _started_at,
     })
 
 
@@ -147,6 +166,8 @@ def _log_path(name: str) -> Path | None:
         return log_root() / f"app_{today}.log"
     if name == "core_out":
         return log_root() / "manager" / "core.out.log"
+    if name == "ingress":
+        return log_root() / "manager" / "ingress.out.log"
     if name == "snowluma":
         return log_root() / "manager" / "snowluma.out.log"
     if name == "service":
@@ -163,6 +184,7 @@ _CONFIG_ALLOW = {
     "ONEBOT_WS_PORT": int,
     "ONEBOT_WS_PATH": str,
     "ONEBOT_ACCESS_TOKEN": str,
+    "INGRESS_API_PORT": int,
 }
 
 
@@ -239,7 +261,7 @@ async def handle_config_put(request: web.Request) -> web.Response:
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     tmp.replace(env_path)
     return web.json_response({"saved": True, "file": str(env_path),
-                              "note": "已保存，待应用——重启 Core 后生效"})
+                              "note": "已保存，待应用——接入配置重启消息接入服务生效；Web 配置重启 Core 生效"})
 
 
 async def handle_shutdown(request: web.Request) -> web.Response:
@@ -264,6 +286,8 @@ def build_app() -> web.Application:
     app.router.add_get("/v1/config/core", handle_config_get)
     app.router.add_put("/v1/config/core", handle_config_put)
     app.router.add_post("/v1/shutdown", handle_shutdown)
+    from manager_console import register_console
+    register_console(app, _service, TOKEN, config_handlers=(handle_config_get, handle_config_put))
     return app
 
 

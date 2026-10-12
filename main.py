@@ -25,7 +25,7 @@ from fastapi import FastAPI
 from typing import Dict, Any, AsyncIterator
 from dotenv import load_dotenv
 
-from paths import app_root, ensure_cwd
+from paths import app_root, data_root, log_root, ensure_cwd
 
 # 项目根：源码运行 = 仓库根；冻结运行 = exe 所在目录（.env.dev 与用户数据都在这）
 project_root = app_root()
@@ -33,12 +33,13 @@ ensure_cwd()
 sys.path.insert(0, str(project_root))
 
 # 配置外置入口（.env.dev 不存在时静默跳过；见 config/ 下的读取方）
-load_dotenv(project_root / ".env.dev")
+_env_file = data_root() / ".env.dev"
+load_dotenv(_env_file if _env_file.is_file() else project_root / ".env.dev")
 
 # 冻结（--noconsole）模式下 stdout/stderr 是无效句柄，重定向到文件保住启动输出
 # 注意必须是文本模式：logging/uvicorn 写的是 str，二进制句柄会 TypeError
 if getattr(sys, "frozen", False):
-    _log_dir = project_root / "logs"
+    _log_dir = log_root()
     _log_dir.mkdir(parents=True, exist_ok=True)
     sys.stdout = open(_log_dir / "core_stdout.log", "a", encoding="utf-8", errors="replace", buffering=1)
     sys.stderr = sys.stdout

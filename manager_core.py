@@ -21,6 +21,7 @@ from core.supervisor import (
     ProcSpec,
     build_specs,
     core_cmd,
+    ingress_cmd,
     spawn,
     stop_tree,
 )
@@ -50,18 +51,25 @@ def build_specs_safe() -> tuple[dict[str, ProcSpec], list[str]]:
         pass
     from core.supervisor import SNOWLUMA_DIR, LOG_DIR
     specs = {
+        "ingress": ProcSpec(
+            name="ingress", cmd=ingress_cmd(), cwd=app_root(),
+            out_log=LOG_DIR / "ingress.out.log", ports=[5003, onebot_port],
+            health_url="http://127.0.0.1:5003/health", order=0,
+            desc="消息接入（降级端口）",
+        ),
         "core": ProcSpec(
             name="core", cmd=core_cmd(), cwd=app_root(),
             out_log=LOG_DIR / "core.out.log",
-            ports=[web_port, onebot_port],
+            ports=[web_port],
             health_url=f"http://127.0.0.1:{web_port}/health",
-            order=0, desc="Abyss Core（降级端口）",
+            order=2, desc="Abyss Core（降级端口）", dependencies=("ingress",),
         ),
         "snowluma": ProcSpec(
             name="snowluma", cmd=["cmd", "/c", "launcher.bat"], cwd=SNOWLUMA_DIR,
             out_log=LOG_DIR / "snowluma.out.log",
             ports=[5099, 3001], order=1,
             desc="SnowLuma（降级端口）",
+            dependencies=("ingress",),
         ),
     }
     return specs, errors
@@ -213,6 +221,17 @@ class TargetController:
             self.last_error = "端口被外部程序占用（不是本服务启动的实例），不自动接管"
             return {"ok": False, "error_code": "conflict", "state": self.state,
                     "message": self.last_error}
+        for name in self.spec.dependencies:
+            dependency = self.service.controller(name)
+            if dependency is None:
+                return {"ok": False, "error_code": "missing_dependency", "message": f"缺少服务 {name}"}
+            result = dependency.submit("start")
+            if not result.get("ok") or not dependency.ready:
+                self.state = "failed"
+                self.last_error = f"{name} 未就绪: {result.get('message', '')}"
+                return {"ok": False, "error_code": "dependency_failed", "message": self.last_error}
+        if epoch != self.epoch or self.desired != "running":
+            return {"ok": False, "error_code": "superseded", "message": "启动已取消"}
         self.state = "starting"
         self.last_error = ""
         try:
@@ -272,12 +291,13 @@ class TargetController:
             return {"ok": True, "error_code": "not_running", "state": "stopped",
                     "message": "目标未在运行"}
         # 优雅优先：core 走内部直达关闭入口（只让 uvicorn 自己退出，无回调循环）
-        if self.spec.name == "core" and _health_ok(self.spec.health_url):
+        if self.spec.name in ("core", "ingress") and _health_ok(self.spec.health_url):
             try:
                 base = self.spec.health_url.rsplit("/", 1)[0]
                 token = (data_root() / "manager" / "service_token.txt").read_text(
                     encoding="utf-8").strip()
-                req = urllib.request.Request(base + "/system/core/shutdown-internal",
+                shutdown_path = "/v1/shutdown" if self.spec.name == "ingress" else "/system/core/shutdown-internal"
+                req = urllib.request.Request(base + shutdown_path,
                                              method="POST", headers={"X-Manager-Token": token})
                 with urllib.request.urlopen(req, timeout=3):
                     pass

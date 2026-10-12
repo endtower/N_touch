@@ -39,13 +39,22 @@ def resource_root() -> Path:
 def data_root() -> Path:
     """可写用户数据根：数据库 / 日志 / 身份 / 人格 / 媒体等一切运行期可变数据。
 
-    便携模式默认 = exe 目录（源码运行 = 仓库根，行为与历史完全一致）；
-    ABYSS_DATA_DIR 环境变量可显式覆盖（安装器 / 多实例场景）。
+    优先使用 ABYSS_DATA_DIR，再使用程序目录的 abyss-data-dir.txt；
+    未指定时便携模式默认 = exe 目录（源码运行 = 仓库根）。
     所有可变数据必须经此解析，禁止写入打包资源目录。
     """
     env = os.getenv("ABYSS_DATA_DIR", "").strip()
     if env:
         return Path(env).resolve()
+    descriptor = app_root() / "abyss-data-dir.txt"
+    if descriptor.is_file():
+        configured = descriptor.read_text(encoding="utf-8-sig").strip()
+        if not configured:
+            raise ValueError("abyss-data-dir.txt 未指定数据目录")
+        root = (app_root() / configured).resolve()
+        if not root.is_dir():
+            raise FileNotFoundError(f"指定的数据目录不存在: {root}")
+        return root
     return app_root()
 
 

@@ -88,6 +88,7 @@ class OneBotChannel:
 
         # 接收：消息处理器（外部注入，入站消息直达 message_handler）
         self._message_processor: Optional[Any] = None   # 避免 import 循环
+        self._raw_message_sink = None
 
         # 原始事件录制器（可选）
         self._recorder: Optional[RawEventRecorder] = None
@@ -124,6 +125,10 @@ class OneBotChannel:
     def bind_message_processor(self, message_processor: Any) -> None:
         """由 ChannelManager 在 start 前注入消息处理器。"""
         self._message_processor = message_processor
+
+    def bind_raw_message_sink(self, sink) -> None:
+        """独立接入服务使用：先持久化原始消息，再异步解析/下载媒体。"""
+        self._raw_message_sink = sink
 
     # --------------------------------------------------------
     # 状态查询（供调用方在 send 之前检查）
@@ -325,6 +330,9 @@ class OneBotChannel:
 
         # message / message_sent
         if data.get("post_type") in (C.OB_POST_MESSAGE, C.OB_POST_MESSAGE_SENT):
+            if self._raw_message_sink is not None:
+                await self._raw_message_sink(data)
+                return
             ev = parse_onebot_event(data)
             # 媒体下载（图片 / 表情包 → 本地）
             if ev is not None and self._media_downloader is not None:

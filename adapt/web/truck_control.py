@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Truck 运行时控制
+"""Truck 启动配置与运行时控制。
 
-提供 truck 启用/禁用的运行时切换能力:
-- 直接修改 truck_settings.py 中 config 实例的 ENABLED 属性 (内存生效, 不持久化)
-- 通过 WS 广播变更
-- 后端重启后所有覆盖自动重置为 truck_settings.py 中的默认值
+管理服务统一保存启动配置；运行时切换通过 station 应用并返回真实状态。
+旧 WS 切换只影响当前进程，下次启动仍使用已保存的启动配置。
 """
 
 from typing import Dict, Any, List
@@ -15,44 +13,12 @@ logger = setup_logging(__name__, log_level="INFO")
 
 
 # truck 描述表 (给前端展示)
-_TRUCK_META: Dict[str, Dict[str, Any]] = {
-    "private_truck": {
-        "label": "私聊卡车",
-        "description": "周期扫描私聊会话, 拉取新消息",
-        "category": "消息获取",
-    },
-    "ongoing_truck": {
-        "label": "进行中任务监控",
-        "description": "监控 LLM 当前正在处理的任务进度",
-        "category": "监控",
-    },
-    "special_attention_truck": {
-        "label": "特别关注用户",
-        "description": "高优先级用户会话的特殊轮询",
-        "category": "消息获取",
-    },
-    "scheduled_proactive_truck": {
-        "label": "定时主动任务",
-        "description": "按固定周期唤醒 proactive，做定时 check-in / 自检等主动任务",
-        "category": "主动任务",
-    },
-    "reflection_char_truck": {
-        "label": "反思触发·字符",
-        "description": "未处理笔记字符数达到 500 时触发一次反思",
-        "category": "反思",
-    },
-    "reflection_time_truck": {
-        "label": "反思触发·定时",
-        "description": "距上次反思满 3 小时自动触发一次反思",
-        "category": "反思",
-    },
-    "task_truck": {
-        "label": "任务到期触发",
-        "description": "任务到达预计的再次处理时间时，直接启动 PFCA 处理该任务",
-        "category": "任务",
-    },
-}
+from truck_settings_store import TRUCKS, read_settings, snapshot
 
+_TRUCK_META = {
+    tid: {"label": meta[0], "description": meta[1], "category": meta[2]}
+    for tid, meta in TRUCKS.items()
+}
 
 def _apply_to_config(truck_id: str, enabled: bool) -> None:
     """把单个 truck 的启用状态直接写到 truck_settings.py 的 config 实例上 (内存生效, 不持久化)"""
@@ -61,6 +27,7 @@ def _apply_to_config(truck_id: str, enabled: bool) -> None:
             private_truck_config, ongoing_truck_config,
             special_attention_truck_config, scheduled_proactive_truck_config,
             reflection_char_truck_config, reflection_time_truck_config,
+            reflection_efficacy_truck_config, reflection_belonging_truck_config,
             task_truck_config,
         )
         mapping = {
@@ -70,6 +37,8 @@ def _apply_to_config(truck_id: str, enabled: bool) -> None:
             "scheduled_proactive_truck": scheduled_proactive_truck_config,
             "reflection_char_truck": reflection_char_truck_config,
             "reflection_time_truck": reflection_time_truck_config,
+            "reflection_efficacy_truck": reflection_efficacy_truck_config,
+            "reflection_belonging_truck": reflection_belonging_truck_config,
             "task_truck": task_truck_config,
         }
         cfg = mapping.get(truck_id)
@@ -80,9 +49,7 @@ def _apply_to_config(truck_id: str, enabled: bool) -> None:
 
 
 def init_from_disk() -> None:
-    """启动时调用: 不再从磁盘加载覆盖 (配置已是临时的), 仅保留为兼容接口."""
-    # 旧版本会从 web_trucks.json 加载覆盖到内存 config + station.
-    # 新版本不再持久化, 后端重启时 truck_settings.py 的默认值即生效.
+    """兼容旧调用；启动配置已由 SystemCore 在 station 启动前应用。"""
     return
 
 
@@ -107,10 +74,10 @@ def get_state_snapshot() -> List[Dict[str, Any]]:
     except Exception:
         pass
 
+    settings = read_settings()
     result = []
     for tid, meta in _TRUCK_META.items():
         cfg = configs.get(tid)
-        cfg_enabled = bool(getattr(cfg, "ENABLED", False)) if cfg else False
         # 真实运行状态: 如果 station 报告 running/paused, 视为启用
         real = real_states.get(tid, "unknown")
         if real in ("running", "paused"):
@@ -118,14 +85,15 @@ def get_state_snapshot() -> List[Dict[str, Any]]:
         elif real == "stopped":
             actually_enabled = False
         else:
-            # station 没启动 / 未知, fallback 到 config 值
-            actually_enabled = cfg_enabled
+            actually_enabled = False
         result.append({
             "truck_id": tid,
             "label": meta["label"],
             "description": meta["description"],
             "category": meta["category"],
             "enabled": actually_enabled,
+            "configured_enabled": settings["enabled"][tid],
+            "runtime_state": real,
             "cycle_time": (
                 getattr(cfg, "CYCLE_TIME", None)
                 or getattr(cfg, "CHECK_CYCLE_TIME", None)
@@ -137,7 +105,7 @@ def get_state_snapshot() -> List[Dict[str, Any]]:
 def set_truck_enabled(truck_id: str, enabled: bool) -> Dict[str, Any]:
     """设置 truck 启用状态, 返回更新后的快照
 
-    注意: 此覆盖仅在当前进程内有效, 后端重启后会重置为 truck_settings.py 的默认值.
+    注意: 此覆盖仅在当前进程内有效，后端重启后使用已保存的启动配置。
 
     Args:
         truck_id: truck 标识
@@ -165,3 +133,60 @@ def set_truck_enabled(truck_id: str, enabled: bool) -> Dict[str, Any]:
     snapshot = next((t for t in get_state_snapshot() if t["truck_id"] == truck_id), None)
     logger.info(f"truck {truck_id} 已{'启用' if enabled else '停用'}")
     return {"ok": True, "snapshot": snapshot, "all": get_state_snapshot()}
+
+
+async def handle_console_status(request):
+    from aiohttp import web
+    return web.json_response({"manager_available": False, "core_ready": True})
+
+
+async def handle_console_trucks(request):
+    from aiohttp import web
+    from .system_api import _authorized, _denied
+    if not _authorized(request):
+        return _denied()
+    if request.method == "PUT":
+        # 配置写入由常驻管理服务单独持有，避免 Core/GUI 并发覆盖同一文件。
+        import aiohttp
+        from .system_api import _SERVICE_BASE, _manager_token
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.put(_SERVICE_BASE + "/console/trucks",
+                                       headers={"X-Manager-Token": _manager_token()},
+                                       json=await request.json()) as response:
+                    return web.Response(status=response.status, body=await response.read(),
+                                        content_type="application/json")
+        except aiohttp.ClientError:
+            return web.json_response({"error": "请先启动管理服务，再保存启动配置"}, status=503)
+    data = snapshot({t["truck_id"]: t["runtime_state"] for t in get_state_snapshot()})
+    data["core_ready"] = True
+    return web.json_response(data)
+
+
+async def handle_console_truck_action(request):
+    from aiohttp import web
+    from .system_api import _authorized, _denied
+    from brain.att.station import set_truck_enabled as station_set
+    from config.truck_settings import get_all_truck_configs
+    from paths import data_root
+    # 管理服务的内部转发也必须鉴权，兼容直接打开 Core 页面时的 Web 鉴权。
+    try:
+        token = (data_root() / "manager" / "service_token.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        token = ""
+    if not (token and request.headers.get("X-Manager-Token") == token) and not _authorized(request):
+        return _denied()
+    desired = read_settings()["enabled"] if request.match_info["action"] == "apply" else {key: False for key in TRUCKS}
+    failed = []
+    for tid, enabled in desired.items():
+        try:
+            if not station_set(tid, enabled):
+                failed.append(tid)
+            else:
+                get_all_truck_configs()[tid].ENABLED = enabled
+        except Exception:
+            logger.exception("切换 Truck %s 失败", tid)
+            failed.append(tid)
+    return web.json_response({"ok": not failed, "failed": failed,
+                              "error": f"未能切换: {', '.join(failed)}" if failed else None},
+                             status=409 if failed else 200)

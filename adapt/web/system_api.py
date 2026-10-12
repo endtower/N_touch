@@ -198,17 +198,21 @@ async def handle_system_status(request: web.Request) -> web.Response:
     snowluma = {"running": None, "pid": None,
                 "note": "管理服务未运行，状态未知"}
     core_from_service = {}
+    ingress = {"running": None, "ready": False, "onebot_connected": None}
     if svc_status == 200:
         for t in svc_body.get("targets", []):
             if t["name"] == "snowluma":
+                webui_port = t["ports"][0] if t.get("ports") else None
                 snowluma = {"running": t["state"] in ("running", "starting"),
                             "pid": t["pid"], "state": t["state"],
                             "ports": t["ports"],
-                            "webui_url": "http://127.0.0.1:5099"}
+                            "webui_url": f"http://127.0.0.1:{webui_port}/" if webui_port else ""}
             if t["name"] == "core":
                 core_from_service = {"state": t["state"], "desired": t["desired"],
                                      "managed": t["managed"],
                                      "last_error": t["last_error"]}
+            if t["name"] == "ingress":
+                ingress = {**t, "running": t["state"] == "running"}
     return web.json_response({
         "core": {
             "running": True,
@@ -222,6 +226,7 @@ async def handle_system_status(request: web.Request) -> web.Response:
             "last_error": core_from_service.get("last_error", ""),
         },
         "snowluma": snowluma,
+        "ingress": ingress,
         "service": {"reachable": svc_status == 200,
                     "config_errors": svc_body.get("config_errors", []) if svc_status == 200 else []},
         "hint": "Core 冷启动（进程已死）请用 AbyssLauncher / manager.py",

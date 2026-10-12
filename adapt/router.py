@@ -31,7 +31,6 @@ import time
 from typing import Dict, List, Optional
 
 from utils import setup_logging, NetworkError, async_handle_errors
-from config.role_settings import role_config
 
 from .protocol import (
     Channel,
@@ -141,7 +140,9 @@ class OutboundRouter:
                 return message_id
 
         # 落库 (两模式通用, OneBot v11 段格式)
-        await self._persist_outbound(target, segments, message_id)
+        # 独立接入服务已在发送回执后落库；模拟发送仍由本地记录。
+        if safety_config.SIMULATED_SEND or not getattr(ch, "persists_outbound", False):
+            await self._persist_outbound(target, segments, message_id)
         return message_id
 
     async def _send_via_web(
@@ -169,6 +170,7 @@ class OutboundRouter:
         message_id: str,
     ) -> None:
         """落库 (写入 chat_history 文件), OneBot v11 段格式与 NapCat 入站完全一致."""
+        from config.role_settings import role_config
         session_id = f"{target.scope.value}_{target.target_id}"
         content_text = "".join(seg.to_text() for seg in segments)
         content_array = [seg.as_dict() for seg in segments]

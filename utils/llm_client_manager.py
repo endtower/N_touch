@@ -99,10 +99,11 @@ def agent_scope(agent: Optional[str]):
         _CURRENT_AGENT.reset(token)
 
 
-# 运行期产物归拢到 memory/（经 paths.app_root()，冻结运行时也在 exe 目录下）
-from paths import app_root as _app_root
-TOKEN_STATS_FILE = _app_root() / "memory" / "token_stats.json"
-TOKEN_TRACE_FILE = _app_root() / "memory" / "token_trace.json"
+# 运行期产物归拢到 memory/（经 paths.data_root()，与 memory.db 等用户数据同根：
+# 源码运行 = 仓库根；冻结运行 = abyss-data-dir.txt 指定的数据目录，而非 exe 目录）
+from paths import data_root as _data_root
+TOKEN_STATS_FILE = _data_root() / "memory" / "token_stats.json"
+TOKEN_TRACE_FILE = _data_root() / "memory" / "token_trace.json"
 
 # 每百万 token 单价（人民币）。key 为归一化后的模型名（去掉 `deepseek/` 等前缀）。
 TOKEN_PRICING = {
@@ -307,6 +308,7 @@ def load_stats() -> Dict[str, Any]:
 def _write_stats(data: Dict[str, Any]) -> None:
     """原子落盘：先写临时文件再 os.replace，避免写入中断损坏统计文件。"""
     data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    TOKEN_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = TOKEN_STATS_FILE.with_name(TOKEN_STATS_FILE.name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)

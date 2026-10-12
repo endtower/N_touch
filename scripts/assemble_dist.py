@@ -50,21 +50,24 @@ def copy_tree(src: Path, dst: Path) -> None:
 
 
 def main() -> int:
-    if not (ROOT / "dist" / "core" / "core.exe").exists():
-        print("请先运行两次 PyInstaller 构建（core / manager）：")
-        print('  python -m PyInstaller --noconfirm --name core --noconsole '
-              '--contents-directory core_internal --add-data "web_frontend/dist;web_frontend/dist" '
-              '--paths . main.py')
-        print('  python -m PyInstaller --noconfirm --name manager --noconsole '
-              '--contents-directory manager_internal --paths . tray.py')
+    names = ("core", "manager", "ingress")
+    if any(not (ROOT / "dist" / name / f"{name}.exe").is_file()
+           or not (ROOT / "dist" / name / f"{name}_internal").is_dir() for name in names):
+        print("请先构建三个后台入口（用户仍只打开一个 WPF 启动器）：")
+        for name in names:
+            print(f"  python -m PyInstaller --noconfirm {name}.spec")
         return 1
     if STAGING.exists():
+        if not STAGING.resolve().is_relative_to((ROOT / "dist" / "staging").resolve()):
+            raise ValueError("staging 路径越界，拒绝删除")
+        if any((STAGING / name).exists() for name in ("memory", "logs", "manager")):
+            raise ValueError("staging 内存在运行数据，拒绝清空；请先保存或改用新目录")
         print(f"清空旧 staging: {STAGING}")
         shutil.rmtree(STAGING)
     STAGING.mkdir(parents=True)
 
     print("1) 复制 exe 与运行时目录...")
-    for name in ("core", "manager"):
+    for name in names:
         shutil.copy2(ROOT / "dist" / name / f"{name}.exe", STAGING / f"{name}.exe")
         shutil.copytree(ROOT / "dist" / name / f"{name}_internal", STAGING / f"{name}_internal")
 
@@ -88,7 +91,7 @@ def main() -> int:
     size_mb = sum(f.stat().st_size for f in STAGING.rglob("*") if f.is_file()) // 1048576
     print(f"\n完成: {STAGING}  (~{size_mb} MB)")
     print("安装: 将 staging 内容复制到运行目录（保留该目录下已有 memory/ logs/ 等用户数据）")
-    print("使用: 双击 manager.exe → 托盘自动拉起 Core → http://127.0.0.1:5002")
+    print("使用: 通过 AbyssLauncher.exe 管理 Core、消息接入与 SnowLuma")
     return 0
 
 

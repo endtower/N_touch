@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['tray.py'],
+    ['manager_service.py'],
     pathex=['.'],
     binaries=[],
-    datas=[],
+    datas=[('web_frontend/dist', 'web_frontend/dist')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -32,6 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='assets/icon.ico',
     contents_directory='manager_internal',
 )
 coll = COLLECT(

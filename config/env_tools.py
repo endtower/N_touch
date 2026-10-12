@@ -23,17 +23,7 @@ _ENV_LOADED = False
 
 # 配置覆盖键：常驻服务 spawn 子进程时会从继承环境剔除这些键，
 # 让子进程的 load_dotenv 从 .env.dev 读到最新值（避免旧环境遮蔽新配置）
-CONFIG_OVERRIDE_KEYS = (
-    "WEB_ENABLED", "WEB_WS_HOST", "WEB_WS_PORT", "WEB_WS_PATH", "WEB_ACCESS_TOKEN",
-    "ONEBOT_ENABLED", "ONEBOT_WS_HOST", "ONEBOT_WS_PORT", "ONEBOT_WS_PATH",
-    "ONEBOT_ACCESS_TOKEN",
-    "MAIN_HOST", "MAIN_PORT",
-    "OPENCODE_API_KEY", "OPENCODE_BASE_URL", "FLASH_API_KEY", "FLASH_BASE_URL",
-    "CONVERSATION_API_KEY", "CONVERSATION_BASE_URL",
-    "PERSONA_API_KEY", "PERSONA_BASE_URL",
-    "LLM_FLASH", "LLM_CONVERSATION", "LLM_PERSONA", "LLM_PRO", "LLM_VISION",
-    "LLM_EMBEDDING",
-)
+from config_keys import CONFIG_OVERRIDE_KEYS
 
 
 def _env_candidates() -> list[Path]:

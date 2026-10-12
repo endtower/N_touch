@@ -174,3 +174,18 @@ launcher/webview/
 # 本地构建工具链与运行凭据（第二轮复核：983MB SDK 与令牌误入库）
 .tools/
 manager/service_token.txt
+manager/trucks.json
+
+# 本机附件、验收产物与独立设计实验（不属于应用源码）
+/.codex-remote-attachments/
+/tmp/
+/output/
+/saved-animations/
+/launcher/ui.json
+/ecg-morph.html
+/ecg-pulse.html
+/neon-signal-animation.html
+/red-path-animation.html
+/red-path-horizontal.html
+/red-path.html
+/symbol-language-studies.html
