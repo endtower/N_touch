@@ -23,7 +23,8 @@ API 文档：docs/api/amy.md —— 修改本包对外接口后必须同步更�
 
 from brain.amy.constants import (
     # ACT 表
-    ExternalInteractionAct, EvaluationAct, SelfActionAct, SystemBuiltInAct,
+    ExternalInteractionAct, EvaluationAct, SelfActionAct, PfcaRegulationAct,
+    SystemBuiltInAct,
     FinalEvaluationAct, TaskResultAct, ACTEffects,
     Thought, RelationEvent, EventBase, BuildThoughtInput, MoodSnapshot,
     ALL_ACT_ENTRIES, ACT_EFFECTS_BY_CATEGORY, ACT_EFFECTS,
@@ -36,7 +37,8 @@ from brain.amy.event_log import EventLog
 
 __all__ = [
     # ACT 表（词表类 + 合并视图）
-    "ExternalInteractionAct", "EvaluationAct", "SelfActionAct", "SystemBuiltInAct",
+    "ExternalInteractionAct", "EvaluationAct", "SelfActionAct",
+    "PfcaRegulationAct", "SystemBuiltInAct",
     "FinalEvaluationAct", "TaskResultAct", "ACTEffects",
     "ALL_ACT_ENTRIES", "ACT_EFFECTS_BY_CATEGORY", "ACT_EFFECTS",
     # 状态与数据结构

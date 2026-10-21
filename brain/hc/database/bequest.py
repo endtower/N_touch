@@ -248,72 +248,86 @@ class BequestOperations:
         results.sort(key=lambda x: x[1], reverse=True)
         selected = [(bequest_id, sim) for bequest_id, sim in results[:top_k]]
         if record_usage:
-            from brain.hc.maintenance import MaintenanceService
-            await MaintenanceService().record_usage("experience", [item[0] for item in selected], "vector_returned")
+            await self.record_retrievals([item[0] for item in selected])
         return selected
+
+    async def record_retrievals(self, ids):
+        """每次实际检索命中的条目各计一次，不将注入再算一次检索。"""
+        conn = await self.db._ensure_connection()
+        await conn.executemany("UPDATE bequests SET retrieval_count=retrieval_count+1 WHERE bequest_id=?", [(i,) for i in set(ids)])
+        await conn.commit()
 
     async def backfill_missing_vectors(self) -> int:
         """为所有缺失向量的经验补算 title_vector（一键回填存量数据）。
 
-        仅处理 is_vectorized=0 且 title 非空的行，逐条生成并立即提交；
-        嵌入调用失败直接上抛崩溃阻断（按 user_rules），已处理行不回滚，重跑可续。
-        返回本次补算条数。
+        仅处理 is_vectorized=0 且 title 非空的行，批量生成向量（内部按 API
+        上限分块）后统一提交；嵌入调用失败直接上抛崩溃阻断（按 user_rules），
+        整批不落库，重跑可续。返回本次补算条数。
         """
         conn = await self.db._ensure_connection()
         cur = await conn.execute(
             "SELECT bequest_id, title FROM bequests WHERE is_vectorized=0 AND title != ''"
         )
         rows = await cur.fetchall()
+        if not rows:
+            return 0
 
         vector_store = get_vector_store()
-        count = 0
-        for r in rows:
-            vector = await vector_store.generate_vector(r["title"], target="bequest")
-            if not vector:
-                raise RuntimeError(
-                    "向量嵌入功能未启用（ENABLE_VECTOR_EMBEDDING=False），无法回填"
-                )
+        vectors = await vector_store.generate_vectors([r["title"] for r in rows], target="bequest")
+        if vectors is None:
+            raise RuntimeError(
+                "向量嵌入功能未启用（ENABLE_VECTOR_EMBEDDING=False），无法回填"
+            )
+        if len(vectors) != len(rows):
+            raise RuntimeError("向量回填结果条数与待补算条数不一致，状态异常")
+        for r, vector in zip(rows, vectors):
             await conn.execute(
                 "UPDATE bequests SET title_vector=?, is_vectorized=1 WHERE bequest_id=?",
                 (serialize_vector(vector), r["bequest_id"]),
             )
-            await conn.commit()
-            count += 1
             logger.info(f"[向量回填] {r['bequest_id']} {r['title']!r} 维度={len(vector)}")
-        return count
+        await conn.commit()
+        return len(rows)
 
     async def regenerate_all_vectors(self) -> int:
         """清空并重建全部经验的 title_vector（嵌入模型切换/维度变更后一键重建）。
 
-        逐条重算并原子覆写：旧向量保留到新向量成功生成为止（避免整体清空后
-        API 失败导致全库裸奔）；title 为空的行直接置空向量。
-        嵌入调用失败直接上抛崩溃阻断（按 user_rules），已处理行不回滚，重跑可续。
-        返回重建条数（含置空的空标题行）。
+        批量生成非空标题的向量（内部按 API 上限分块）后统一覆写：旧向量保留到
+        本次生成成功为止（避免整体清空后 API 失败导致全库裸奔）；title 为空的行
+        直接置空向量。嵌入调用失败直接上抛崩溃阻断（按 user_rules），整批不落库，
+        重跑可续。返回重建条数（含置空的空标题行）。
         """
         conn = await self.db._ensure_connection()
         cur = await conn.execute("SELECT bequest_id, title FROM bequests")
         rows = await cur.fetchall()
+        if not rows:
+            return 0
 
         vector_store = get_vector_store()
-        count = 0
-        for r in rows:
-            vector = (
-                await vector_store.generate_vector(r["title"], target="bequest")
-                if r["title"] else None
+        indexed_titles = [(i, r["title"]) for i, r in enumerate(rows) if r["title"]]
+        vector_by_index: Dict[int, List[float]] = {}
+        if indexed_titles:
+            vectors = await vector_store.generate_vectors(
+                [title for _, title in indexed_titles], target="bequest"
             )
-            if r["title"] and not vector:
+            if vectors is None:
                 raise RuntimeError(
                     "向量嵌入功能未启用（ENABLE_VECTOR_EMBEDDING=False），无法重建"
                 )
+            if len(vectors) != len(indexed_titles):
+                raise RuntimeError("向量重建结果条数与待重算条数不一致，状态异常")
+            vector_by_index = dict(zip((i for i, _ in indexed_titles), vectors))
+
+        for i, r in enumerate(rows):
+            vector = vector_by_index.get(i)
             await conn.execute(
                 "UPDATE bequests SET title_vector=?, is_vectorized=? WHERE bequest_id=?",
                 (serialize_vector(vector), 1 if vector else 0, r["bequest_id"]),
             )
-            await conn.commit()
-            count += 1
             dim = len(vector) if vector else 0
             logger.info(f"[向量重建] {r['bequest_id']} {r['title']!r} 维度={dim}")
-        return count
+        await conn.commit()
+        return len(rows)
 
     async def get_bequest_by_id(self, bequest_id: str) -> Optional[Dict]:
         """获取单个经验的原始数据字典。"""

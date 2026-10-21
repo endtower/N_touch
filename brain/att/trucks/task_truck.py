@@ -3,6 +3,7 @@
 到期时启动 PFCA，交付该事项的标题与上下文（上下文即传递下次启动时要用的信息）。
 任务一次性：truck 交付 PFCA 后即自动将任务标记为 expired，续办由 PFCA 经 quest_agent 重新登记。
 到期只依据 next_occurrence，不再持有 deadline 与 TTL 重触发兜底。
+持续任务（kind=ongoing）没有时间点、永不到期，不在此处处理，由 PRE 规则层巡检。
 卡车开关保持原配置，由用户在控制面板启用。
 """
 
@@ -43,7 +44,7 @@ class TaskTruck(BaseTruck):
     async def _main_loop(self):
         """主循环 - 周期检查到期任务，有则 remind_station。
 
-        启动第一瞬间先检测一次（对齐 ongoing/private truck 的「先检测后等待」），
+        启动第一瞬间先检测一次（对齐 private truck 的「先检测后等待」），
         再进入周期轮询，避免启用后白等满一个周期才首次检查。
         """
         from config.truck_settings import task_truck_config
@@ -82,13 +83,14 @@ class TaskTruck(BaseTruck):
         return _parse_iso(rec.get("next_occurrence") or "")
 
     async def _find_due_tasks(self) -> List[Dict]:
-        """找所有已到期的 active 任务（next_occurrence 已到或已过）。
+        """找所有已到期的 active 一次性任务（next_occurrence 已到或已过）。
 
+        持续任务（kind=ongoing）没有时间点、永不到期，由 PRE 规则层巡检，此处不处理。
         拉取失败直接上抛崩溃阻断（按 user_rules，不 try-ex 静默跳过）。"""
-        from brain.hc.database.task import TaskOperations
+        from brain.hc.database.task import TASK_KIND_ONETIME, TaskOperations
 
         task_ops = TaskOperations()
-        task_ids = await task_ops.get_active_tasks(limit=50)
+        task_ids = await task_ops.get_active_tasks(limit=50, kind=TASK_KIND_ONETIME)
         if not task_ids:
             return []
 
@@ -96,7 +98,7 @@ class TaskTruck(BaseTruck):
         due: List[Dict] = []
         for task_id in task_ids:
             rec = await task_ops.get_task_by_id(task_id)
-            if not rec:
+            if not rec or rec.get("status") != "active":
                 continue
             due_time = self._resolve_due_time(rec)
             if due_time is None or current_time < due_time:
@@ -113,7 +115,11 @@ class TaskTruck(BaseTruck):
             f"事项「{title}」已到处理时间。\n"
             f"上下文：{context}\n"
             "请核实相关会话与当前情况，再决定行动。"
-            "如需继续，经 quest_agent 重新登记新的接续事项；本事项交付后即告结束。"
+            "没人回应不等于无事可做：不得以「没等到回复」为由静默结束，"
+            "至少要做一件对外可见的推进——提醒相关的人、在相关群聊露面说句话或发起话题、"
+            "换个对象或渠道去问；只有目的已达成或对方明确终止才可收尾。"
+            "如需继续，经 quest_agent 重新登记新的接续事项（上下文里写明到点无人回应时的兜底动作）；"
+            "本事项交付后即告结束。"
         )
 
     async def get_truck_messages(self) -> Optional[Dict]:
@@ -124,13 +130,22 @@ class TaskTruck(BaseTruck):
             dict: {"formatted_message": ..., "raw_sessions": None}
             None: 无到期任务
         """
-        tasks = self._triggered_tasks
+        # Cached notifications may predate a Quest reschedule. Re-read before delivery.
         self._triggered_tasks = []
+        tasks = await self._find_due_tasks()
         if not tasks:
-            # 兜底：未被 _main_loop 预置时现场查一次
-            tasks = await self._find_due_tasks()
-            if not tasks:
-                return None
+            return None
+
+        from brain.hc.database.task import TaskOperations
+        task_ops = TaskOperations()
+        claimed = []
+        for task in tasks:
+            if await task_ops.expire_task(task["task_id"], expected_updated_at=task.get("updated_at"),
+                                          expected_next_occurrence=task["next_occurrence"]):
+                claimed.append(task)
+        tasks = claimed
+        if not tasks:
+            return None
 
         if len(tasks) == 1:
             formatted_message = (
@@ -143,14 +158,6 @@ class TaskTruck(BaseTruck):
             formatted_message = (
                 f"{len(tasks)}个任务已到达处理时间：\n{blocks}"
             )
-
-        # 任务一次性：交付 PFCA 后即自动标记过期，续办由 PFCA 经 quest_agent 重新登记。
-        from brain.hc.database.task import TaskOperations
-        task_ops = TaskOperations()
-        for t in tasks:
-            tid = t.get("task_id")
-            if tid:
-                await task_ops.expire_task(tid)
 
         logger.info(
             f"TaskTruck 返回到期任务消息（{len(tasks)} 个，已置过期），"

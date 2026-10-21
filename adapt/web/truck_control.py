@@ -24,22 +24,22 @@ def _apply_to_config(truck_id: str, enabled: bool) -> None:
     """把单个 truck 的启用状态直接写到 truck_settings.py 的 config 实例上 (内存生效, 不持久化)"""
     try:
         from config.truck_settings import (
-            private_truck_config, ongoing_truck_config,
-            special_attention_truck_config, scheduled_proactive_truck_config,
+            private_truck_config,
+            at_mention_truck_config,
             reflection_char_truck_config, reflection_time_truck_config,
             reflection_efficacy_truck_config, reflection_belonging_truck_config,
             task_truck_config,
+            pre_truck_config,
         )
         mapping = {
             "private_truck": private_truck_config,
-            "ongoing_truck": ongoing_truck_config,
-            "special_attention_truck": special_attention_truck_config,
-            "scheduled_proactive_truck": scheduled_proactive_truck_config,
+            "at_mention_truck": at_mention_truck_config,
             "reflection_char_truck": reflection_char_truck_config,
             "reflection_time_truck": reflection_time_truck_config,
             "reflection_efficacy_truck": reflection_efficacy_truck_config,
             "reflection_belonging_truck": reflection_belonging_truck_config,
             "task_truck": task_truck_config,
+            "pre_truck": pre_truck_config,
         }
         cfg = mapping.get(truck_id)
         if cfg is not None:

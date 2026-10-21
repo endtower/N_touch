@@ -151,7 +151,7 @@ class OneBotChannel:
             return
         self._app = web.Application()
         self._app.router.add_get(self.config.path, self._handle_connection)
-        self._runner = web.AppRunner(self._app)
+        self._runner = web.AppRunner(self._app, access_log=None)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.config.host, self.config.port)
         await self._site.start()

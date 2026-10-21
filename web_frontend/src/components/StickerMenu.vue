@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -214,7 +215,7 @@ async function onDelete(s: Sticker) {
     </div>
   </el-popover>
 
-  <el-dialog v-model="editVisible" title="编辑表情包" width="420px">
+  <AppDialog v-model="editVisible" title="编辑表情包" width="420px">
     <el-form label-width="72px">
       <el-form-item label="标题">
         <el-input v-model="form.sticker_title" placeholder="表情包标题" />
@@ -230,7 +231,7 @@ async function onDelete(s: Sticker) {
       <el-button @click="editVisible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="saveEdit">保存</el-button>
     </template>
-  </el-dialog>
+  </AppDialog>
 </template>
 
 <style scoped>

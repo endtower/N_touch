@@ -19,6 +19,7 @@ Raises:
 from paths import data_root
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,26 @@ SYSTEM_ALLOWED_SUBDIRS = ("images", "stickers", "vision_results")
 # - images / stickers：LLM 调用 save_image / save_sticker 主动归档的产物，平铺在对应子目录下
 LLM_SAVE_ALLOWED_SUBDIRS = ("images", "stickers")
 
+# ===================== 文件名字符白名单（保存侧 / 发送侧同源） =====================
+# 单一事实来源：保存侧 normalize_filename_component() 与发送侧 FILENAME_PATTERN
+# 都从下面的常量派生，保证「清洗后能落盘的名字」一定「发送时能通过白名单」。
+#
+# 允许的字符集合：
+#   1. 英文字母 / 数字
+#   2. 下划线 / 连字符 / 点 / 花括号（GUID 形如 {XXXX-....}）
+#   3. 半角「基础符号」：Windows 合法 且 非空格的常见标点
+#   4. 中日韩统一表意文字（\u4e00-\u9fff）
+#
+# 明确排除（Windows 文件名非法字符 + glob 通配符，禁止放行）：
+#   \ / : * ? " < > |   以及空格
+_ALLOWED_ASCII_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "_-.{}"                # 基础：下划线 / 连字符 / 点 / 花括号（GUID）
+    "!,;'()~@#$%^&+="      # 半角基础符号（安全集：Windows 合法 且 非 glob 通配符、非空格）
+)
+
 # 文件名格式：hash / GUID / 带前缀 hash / 中文标题（vision_results / llm_save 用）
 # 真实例子：
 #   30FBB5FBD24B8D4B2660C3E3C0515F76.gif
@@ -39,9 +60,71 @@ LLM_SAVE_ALLOWED_SUBDIRS = ("images", "stickers")
 #   02-0299cab98ab51c2efb02c09156b9a5a6.jpg
 #   橘白相间猫咪面部特写.jpg
 #   模糊的动物面部特写.png
-FILENAME_PATTERN = re.compile(
-    r"^[a-zA-Z0-9_\-\.\{\}\u4e00-\u9fff]{1,128}\.[a-zA-Z0-9]{1,5}$"
+#   算了,我还是摆了.jpg   ← 全角标点已在保存侧折成半角
+_FILENAME_CHARS_CLASS = "".join(
+    sorted(re.escape(ch) for ch in _ALLOWED_ASCII_CHARS)
 )
+FILENAME_PATTERN = re.compile(
+    rf"^[{_FILENAME_CHARS_CLASS}\u4e00-\u9fff]{{1,128}}\.[a-zA-Z0-9]{{1,5}}$"
+)
+
+# ===================== 中文标点 → 半角 归一化表 =====================
+# NFKC 已能把「兼容形式」的全角字符折半角（如 ，！；：（） ），此处补齐
+# NFKC 不会处理的汉字系标点（。、·…“”「」《》等）。
+_CJK_PUNCT_MAP = {
+    "。": ".", "、": ",", "·": ".", "・": ".", "…": ".", "‥": ".",
+    "—": "-", "–": "-", "―": "-", "ー": "-",
+    "～": "~", "〜": "~",
+    "「": '"', "」": '"', "『": '"', "』": '"', "“": '"', "”": '"',
+    "‘": "'", "’": "'",
+    "《": "<", "》": ">", "〈": "<", "〉": ">",
+    "【": "[", "】": "]", "〔": "(", "〕": ")",
+}
+
+
+def normalize_filename_component(text: str, max_len: int = 50) -> str:
+    """把任意标题/文本归一化为「可安全落盘 且 能通过 FILENAME_PATTERN」的文件名主干。
+
+    保存侧（VisionAgent / sticker_api）与发送侧（FILENAME_PATTERN）同源：
+    本函数的输出字符集严格 ⊆ FILENAME_PATTERN 允许集，因此「存得下」必然「发得出」。
+
+    规则：
+    1. NFKC 兼容折叠：全角字母 / 数字 / 标点 → 半角（，！；：（） 等）
+    2. 汉字系标点补齐折叠（。、·…“”「」《》，NFKC 不处理的部分）
+    3. 白名单外字符（空格、Windows 非法字符、glob 通配符等）→ 下划线 _
+    4. 去首尾点 / 下划线，长度截断；清洗后为空 → "untitled"
+
+    Args:
+        text: 原始标题
+        max_len: 主干最大长度（不含扩展名）
+
+    Returns:
+        归一化后的文件名主干（不含扩展名）
+    """
+    if not isinstance(text, str) or not text.strip():
+        return "untitled"
+
+    # 1. NFKC 兼容折叠（全角 → 半角）
+    folded = unicodedata.normalize("NFKC", text)
+    # 2. 汉字系标点补齐
+    folded = "".join(_CJK_PUNCT_MAP.get(ch, ch) for ch in folded)
+
+    # 3. 白名单外一律降级为下划线
+    cleaned = "".join(
+        ch if (ch in _ALLOWED_ASCII_CHARS or "\u4e00" <= ch <= "\u9fff") else "_"
+        for ch in folded
+    )
+
+    # 4. 去首尾点 / 下划线（首尾点会导致隐藏文件 + resolve 拒绝）
+    cleaned = cleaned.strip("._")
+
+    if not cleaned:
+        return "untitled"
+
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].strip("._")
+
+    return cleaned or "untitled"
 
 
 def _get_media_root() -> Path:
@@ -82,14 +165,22 @@ def _search_in_root(
     for subdir in allowed_subdirs:
         if nested_by_date:
             # 系统侧：<root>/<subdir>/<YYYY-MM-DD>/<filename>
-            for match in media_root.glob(f"{subdir}/*/{filename}"):
-                resolved = match.resolve()
+            # 用目录遍历 + 精确名比对，绝不把 filename 拼进 glob，
+            # 避免 filename 里的通配符（* ? [）被解释成模式造成越权命中。
+            subdir_path = media_root / subdir
+            if not subdir_path.is_dir():
+                continue
+            for day_dir in sorted(subdir_path.iterdir()):
+                if not day_dir.is_dir():
+                    continue
+                candidate = day_dir / filename
+                if not candidate.is_file():
+                    continue
+                resolved = candidate.resolve()
                 try:
                     resolved.relative_to(media_root)
                 except ValueError:
                     raise PermissionError(f"path outside media whitelist: {resolved}")
-                if not resolved.is_file():
-                    continue
                 return str(resolved)
         else:
             # LLM 侧：<root>/<subdir>/<filename>  （平铺）

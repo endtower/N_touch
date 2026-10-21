@@ -28,7 +28,6 @@
 （add_recognized_image）仍由调用方自行处理，不放入通用方法。
 """
 
-import asyncio
 import hashlib
 import json
 from datetime import datetime
@@ -322,7 +321,7 @@ class ToolVision(ToolHandlers):
                 pending.append((filename, text, fingerprint))
 
         if pending:
-            vectors = await asyncio.gather(*(cls._embed_text(t) for _, t, _ in pending))
+            vectors = await cls._embed_texts([t for _, t, _ in pending])
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for (filename, _text, fingerprint), vector in zip(pending, vectors):
                 if not vector:
@@ -350,7 +349,12 @@ class ToolVision(ToolHandlers):
 
     @classmethod
     async def _embed_text(cls, text: str) -> Optional[List[float]]:
-        """生成文本向量（直接走嵌入服务，不受 ONLY_BEQUEST_VECTORIZATION 目标过滤限制）。"""
+        """生成单条文本向量（直接走嵌入服务，不受 ONLY_BEQUEST_VECTORIZATION 目标过滤限制）。"""
+        return (await cls._embed_texts([text]))[0]
+
+    @classmethod
+    async def _embed_texts(cls, texts: List[str]) -> List[List[float]]:
+        """批量生成文本向量（内部按嵌入 API 上限自动分块）。"""
         from config.settings import vector_config
         from brain.hc.database.embedding_service import (
             init_embedding_service,
@@ -363,7 +367,7 @@ class ToolVision(ToolHandlers):
             model=vector_config.MODEL_NAME,
         )
         svc = get_embedding_service()
-        return await svc.generate_embedding(text)
+        return await svc.generate_embeddings(list(texts))
 
     @classmethod
     async def _vector_search_stickers(cls, query: str) -> str:
@@ -393,7 +397,7 @@ class ToolVision(ToolHandlers):
 
         query_vec = await cls._embed_text(query)
         if stale:
-            fresh = await asyncio.gather(*(cls._embed_text(texts[i]) for i in stale))
+            fresh = await cls._embed_texts([texts[i] for i in stale])
             for i, vec in zip(stale, fresh):
                 vecs[i] = vec
 

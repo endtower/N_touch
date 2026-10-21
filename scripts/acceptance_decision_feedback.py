@@ -75,10 +75,18 @@ class FeedbackAcceptance(unittest.IsolatedAsyncioTestCase):
                          [20, 10, -10, -20, -5])
         self.assertEqual(FinalEvaluationAct.feedback_delta("未得到他人评价与反馈"), -5)
         self.assertTrue(FinalEvaluationAct.contains("被他人评价欠佳/不认可"))
-        self.assertEqual(TaskResultAct.deltas, {"成功": 20, "失败": -20, "纯闲聊或结果不明": 0})
+        self.assertEqual(TaskResultAct.deltas, {"对方明确说自己有用/产生了实际价值/明确使对方收益": 10,
+                                               "可能产生收益": 0, "结果不满": -5,
+                                               "任务延期": -10, "产生负面收益": -20, "帮倒忙": -30})
+        for old_label in ("成功", "失败", "纯闲聊或结果不明", "产生实际效益", "未产生实际效益",
+                          "对主人产生了实际效益", "对自己带来了帮助、收获或体验改善", "结果未明"):
+            with self.assertRaises(ValueError):
+                TaskResultAct.validate(old_label)
         schema = next(tool["function"]["parameters"] for tool in PFCA_tool_manager.get_tools()
                       if tool["function"]["name"] == "terminate")
         self.assertIn("task_result", schema["required"])
+        self.assertNotIn("task_reason", schema["properties"])
+        self.assertEqual(schema["properties"]["task_result"]["enum"], TaskResultAct.names())
         self.assertEqual(schema["properties"]["final_evaluation"]["enum"], FinalEvaluationAct.names())
 
     async def test_nonfinite_data_is_rejected_without_overwrite(self):
@@ -88,49 +96,57 @@ class FeedbackAcceptance(unittest.IsolatedAsyncioTestCase):
             FeedbackState(self.directory)
         self.assertEqual(document.read_text(encoding="utf-8"), '{"value": NaN}')
 
-    async def test_web_state_and_failure_validation(self):
-        import adapt.web.amy_api as api
-        ei = EmotionalInterface(self.directory)
-        with patch.object(api, "_try_get_ei", AsyncMock(return_value=ei)):
-            response = await api.handle_get_amy_state(None)
-            self.assertEqual(response.status, 200)
-            payload = json.loads(response.body)
-            self.assertIn("presence", payload)
-            self.assertEqual(payload["decision_feedback"]["competence_value"], 50)
-            request = SimpleNamespace(json=AsyncMock(return_value={
-                "title": "失败测试", "final_evaluation": "明确坏评价", "task_result": "失败",
-            }))
-            rejected = await api.handle_apply_amy_final_evaluation(request)
-            self.assertEqual(rejected.status, 400)
-            self.assertEqual(ei.feedback_state.snapshot()["history"], [])
-            request.json.return_value["task_reason"] = "可能缺少经验，证据不足"
-            applied = await api.handle_apply_amy_final_evaluation(request)
-            self.assertEqual(applied.status, 200)
-            self.assertEqual((ei.feedback_state.snapshot()["competence_value"], ei.feedback_state.read_value()), (30, 30))
 
-    async def test_real_interface_isolates_expression_and_keeps_causes(self):
-        ei = EmotionalInterface(self.directory)
-        language_before = await ei.get_language_description()
-        await ei.apply_final_evaluation("含蓄好评价", "邀请未成", "失败", "策略时机可能不合适", "对方感谢关心，但拒绝邀请")
-        self.assertEqual((ei.feedback_state.snapshot()["competence_value"], ei.feedback_state.read_value()), (30, 60))
-        prompt = await ei.get_decision_description()
-        self.assertIn("效能感", prompt)
-        self.assertIn("归属感", prompt)
-        self.assertIn("邀请未成", prompt)
-        self.assertEqual(await ei.get_reflection_description(), prompt)
-        self.assertEqual(await ei.get_language_description(), language_before)
-        self.assertTrue(any(FinalEvaluationAct.contains(event.get("act", ""))
-                            for event in await ei.get_unread_events("reflection")))
-        before = ei.feedback_state.snapshot()
-        with self.assertRaises(ValueError):
-            await ei.apply_final_evaluation("明确坏评价", "测试", "失败")
-        self.assertEqual(ei.feedback_state.snapshot(), before)
 
-    async def test_neutral_result_still_settles_social_feedback(self):
+    async def test_omitted_benefit_defaults_to_zero_and_keeps_competence(self):
         ei = EmotionalInterface(self.directory)
         await ei.apply_final_evaluation("无评价", "普通闲聊")
         self.assertEqual((ei.feedback_state.snapshot()["competence_value"], ei.feedback_state.read_value()), (50, 45))
         self.assertEqual(len(ei.feedback_state.snapshot()["history"]), 1)
+        self.assertEqual(ei.feedback_state.snapshot()["task_results"][-1]["result"], TaskResultAct.DEFAULT)
+
+
+    async def test_all_six_outcomes_settle_independently_and_reload(self):
+        for result, delta in TaskResultAct.deltas.items():
+            with self.subTest(result=result):
+                await reset_emotional_interface()
+                ei = EmotionalInterface(Path(tempfile.mkdtemp(dir=_sandbox.name)))
+                await ei.apply_final_evaluation("无评价", "六档验收", result, failure_reason="已观察到的具体原因")
+                state = FeedbackState(ei.feedback_state.persistence_file.parent).snapshot()
+                self.assertEqual((state["competence_value"], state["value"]), (50 + delta, 45))
+                self.assertEqual(state["task_results"][0]["result"], result)
+                if delta:
+                    self.assertEqual(state["history"][0]["delta"], delta)
+                else:
+                    # 0 档只记评价结果，不产生变动词条
+                    self.assertEqual([e["axis"] for e in state["history"]], ["recognition"])
+
+
+    async def test_later_benefit_does_not_retract_prior_unknown_or_clear_score_with_thought(self):
+        ei = EmotionalInterface(self.directory)
+        await ei.apply_final_evaluation("无评价", "同一事项", TaskResultAct.DISSATISFIED, failure_reason="结果不满")
+        await ei.apply_final_evaluation("无评价", "同一事项", TaskResultAct.BENEFIT)
+        state = ei.feedback_state.snapshot()
+        self.assertEqual(state["competence_value"], 55)
+        self.assertEqual([r["result"] for r in state["task_results"]], [TaskResultAct.DISSATISFIED, TaskResultAct.BENEFIT])
+        ei.thought_cache.remove_thoughts_by_act("无评价")
+        self.assertEqual(ei.feedback_state.snapshot(), state)
+        for i in range(6):
+            ei.feedback_state.settle(f"后续{i}", [("competence", TaskResultAct.DISSATISFIED, -5, "结果不满")], task_result=TaskResultAct.DISSATISFIED)
+        self.assertEqual(ei.feedback_state.snapshot()["competence_value"], 25)
+        self.assertEqual(len(ei.feedback_state.snapshot()["history"]), 7)
+
+    async def test_legacy_benefit_history_is_retained_without_reclassification(self):
+        original = {"value": 60, "competence_value": 70, "history": [
+            {"axis": "competence", "title": "旧收益", "label": "产生实际效益", "delta": 20,
+             "before": 50, "after": 70, "reason": "旧依据", "time": 1}]}
+        (self.directory / "feedback_state.json").write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+        state = FeedbackState(self.directory)
+        state.save_to_file()
+        loaded = FeedbackState(self.directory).snapshot()
+        self.assertEqual((loaded["competence_value"], loaded["value"]), (70, 60))
+        self.assertEqual(loaded["history"], original["history"])
+        self.assertEqual(loaded["task_results"][0]["result"], "产生实际效益")
 
     async def test_snapshot_roundtrip_and_old_preset(self):
         state = FeedbackState(self.directory)
@@ -148,43 +164,6 @@ class FeedbackAcceptance(unittest.IsolatedAsyncioTestCase):
         await legacy.restore(self.directory / "legacy")
         self.assertEqual(FeedbackState(self.directory / "legacy").snapshot()["competence_value"], 50)
 
-    async def test_terminate_preview_then_single_settlement(self):
-        import brain.hc.database.task as task_module
-        import brain.hc.temporary_memory as memory_module
-        import brain.hc.shortlight as notes_module
-        import brain.pfc.pfca.pfca_core as core_module
-        ei = EmotionalInterface(self.directory)
-        focus = SimpleNamespace(_data={})
-        tasks = SimpleNamespace(get_active_tasks=AsyncMock(return_value=[]))
-        memory = SimpleNamespace(add=Mock())
-        notes = SimpleNamespace(finalize_chain=AsyncMock())
-        core = SimpleNamespace(stop=AsyncMock())
-        tool = PFCA_tool_manager()
-        arguments = dict(summary="尝试邀请未成功，对方仍感谢。时机可能不合适。", title="邀请测试",
-                         final_evaluation="含蓄好评价", task_result="失败",
-                         task_reason="可能是邀请时机不合适，尚未确认", evaluation_reason="对方感谢但拒绝邀请")
-        with patch("brain.hc.global_session_state.get_global_session_state", return_value=focus), \
-             patch.object(task_module, "TaskOperations", return_value=tasks), \
-             patch.object(memory_module, "get_temporary_memory", return_value=memory), \
-             patch.object(notes_module, "get_shortlight_notepad", return_value=notes), \
-             patch.object(core_module, "get_pfca_instance", return_value=core), \
-             patch("brain.amy.emotional_interface.get_emotional_interface", AsyncMock(return_value=ei)):
-            invalid = dict(arguments, task_reason="")
-            with self.assertRaises(ValueError):
-                await tool.terminate(**invalid)
-            self.assertEqual(focus._data, {})
-            preview = await tool.terminate(**arguments)
-            self.assertIn("效能感：50/100 → 30/100", preview)
-            self.assertIn("归属感：50/100 → 60/100", preview)
-            self.assertEqual(ei.feedback_state.snapshot()["history"], [])
-            memory.add.assert_not_called()
-            await tool.terminate(**arguments)
-            self.assertEqual((ei.feedback_state.snapshot()["competence_value"], ei.feedback_state.read_value()), (30, 60))
-            self.assertEqual(len(ei.feedback_state.snapshot()["history"]), 2)
-            memory.add.assert_called_once()
-            notes.finalize_chain.assert_awaited_once()
-            core.stop.assert_awaited_once()
-            self.assertNotIn("pfc_handoff", focus._data)
 
 
 if __name__ == "__main__":

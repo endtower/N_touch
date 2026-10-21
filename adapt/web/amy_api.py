@@ -85,7 +85,7 @@ def _serialize_acts() -> Dict[str, List[Dict[str, Any]]]:
     """导出全部 ACT (按分类)。"""
     from brain.amy.constants import (
         ExternalInteractionAct, EvaluationAct,
-        SelfActionAct, SystemBuiltInAct, FinalEvaluationAct,
+        SelfActionAct, PfcaRegulationAct, SystemBuiltInAct, FinalEvaluationAct,
     )
     def _to_list(cls) -> List[Dict[str, Any]]:
         return [
@@ -97,6 +97,7 @@ def _serialize_acts() -> Dict[str, List[Dict[str, Any]]]:
                 "stack_coefficient": item.get("stack_coefficient", 0),
                 "duration": item.get("duration", 0),
                 "system_id": item.get("system_id"),
+                "evaluation_partition": ("failure" if cls.is_failure(item["name"]) else "success") if cls is EvaluationAct else None,
             }
             for item in cls.entries()
         ]
@@ -107,6 +108,7 @@ def _serialize_acts() -> Dict[str, List[Dict[str, Any]]]:
         "external": _to_list(ExternalInteractionAct),
         "evaluation": _to_list(EvaluationAct),
         "self_action": _to_list(SelfActionAct),
+        "pfca_regulation": _to_list(PfcaRegulationAct),
         "system": _to_list(SystemBuiltInAct),
         "final": _to_final_list(),
     }
@@ -252,9 +254,9 @@ async def handle_create_amy_thought(request: web.Request) -> web.Response:
 async def handle_apply_amy_final_evaluation(request: web.Request) -> web.Response:
     """POST /amy/final-evaluation  登记一次最终评价（调试/测试用）。
 
-    body: {final_evaluation, title, task_result?, task_reason?, evaluation_reason?}
+    body: {final_evaluation, title, task_result?, failure_reason?}
     直接走 apply_final_evaluation 结算两轴并把最终评价想法入池。
-    旧调用省略任务结果按中性；成功/失败缺任务原因、非法标签、空标题返回 400。
+    省略效益评价按「可能产生收益」0 结算；旧标签、空标题或负面评价缺 failure_reason 返回 400。
     """
     ei = await _try_get_ei()
     if ei is None:
@@ -269,9 +271,8 @@ async def handle_apply_amy_final_evaluation(request: web.Request) -> web.Respons
         from brain.amy.constants import TaskResultAct
         await ei.apply_final_evaluation(
             final_evaluation, title,
-            task_result=data.get("task_result", TaskResultAct.NEUTRAL),
-            task_reason=data.get("task_reason", ""),
-            evaluation_reason=data.get("evaluation_reason", ""),
+            task_result=data.get("task_result", TaskResultAct.DEFAULT),
+            failure_reason=data.get("failure_reason", ""),
         )
     except ValueError as e:
         return web.json_response({"error": str(e)}, status=400)

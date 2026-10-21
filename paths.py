@@ -29,11 +29,28 @@ def resource_root() -> Path:
     """只读打包资源根（随分发的静态资源）。
 
     冻结运行 = PyInstaller 解包目录（core_internal）；源码运行 = 仓库根。
-    用于定位"随包收集、运行期不写"的资源（如前端 dist、旧版兼容 env）。
+    用于定位"随包收集、运行期不写"的资源（如 component_versions.json、旧版兼容 env）。
     """
     if is_frozen():
         return Path(getattr(sys, "_MEIPASS", app_root()))
     return app_root()
+
+
+def web_dist() -> Path:
+    """前端活资源目录（web_frontend/dist）。
+
+    前端始终是活资源、不随 exe 打包（2026-10-15）：源码运行 = 仓库根；
+    冻结运行 = 数据根（`dist/Abyss/abyss-data-dir.txt` 指向项目根）。
+    因此 `npm run build` 后刷新页面即生效，无需重打包、无需复制。
+    """
+    managed = app_root() / "components" / "core" / "source" / "web_frontend" / "dist"
+    if managed.is_dir():
+        return managed
+    # 源码组件中的 Core 与冻结管理服务必须使用同一份随版本发布的前端。
+    local = app_root() / "web_frontend" / "dist"
+    if (app_root().parent / "release.json").is_file() and local.is_dir():
+        return local
+    return data_root() / "web_frontend" / "dist"
 
 
 def data_root() -> Path:

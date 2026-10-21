@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { computed, ref, watch } from 'vue'
 import { DataAnalysis, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -126,13 +127,12 @@ function shortTime(iso?: string | null): string {
 </script>
 
 <template>
-  <el-dialog
+  <AppDialog size="panel"
     :model-value="props.visible"
-    width="90vw"
     :close-on-click-modal="false"
     align-center
-    :show-close="false"
     class="tk-dialog"
+    title="Token 用量统计"
     @update:model-value="(v: boolean) => emit('update:visible', v)"
   >
     <template #header>
@@ -280,19 +280,15 @@ function shortTime(iso?: string | null): string {
         </div>
       </section>
     </div>
-  </el-dialog>
+  </AppDialog>
 </template>
 
 <style scoped>
-.tk-dialog :deep(.el-dialog__body) { padding: 0; }
-.tk-dialog :deep(.el-dialog__header) { padding: 0; margin: 0; }
 
 .tk-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--border-1);
   background: var(--bg-surface);
 }
 .tk-title {
@@ -325,8 +321,8 @@ function shortTime(iso?: string | null): string {
 }
 
 .tk-body {
-  height: 80vh;
-  min-height: 600px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 16px 20px 28px 20px;
   background: var(--bg-app);
@@ -528,4 +524,6 @@ function shortTime(iso?: string | null): string {
   font-family: var(--font-mono);
   white-space: nowrap;
 }
+/* Keep header controls clear of the shared close button. */
+.tk-header, .tk-title, .tk-actions { flex-wrap: wrap; min-width: 0; gap: 8px; }
 </style>

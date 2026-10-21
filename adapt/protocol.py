@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Optional, Protocol, runtime_checkable
+from .bridge.contract import SendReceipt
 
 
 # ============================================================
@@ -198,9 +199,8 @@ class NormalizedEvent:
     @property
     def conversation_id(self) -> str:
         """不含 scope 前缀的纯会话 ID（"private_xxx".split("_",1)[1]）。"""
-        if "_" in self.session_id:
-            return self.session_id.split("_", 1)[1]
-        return self.session_id
+        from .session_identity import parse_session_id
+        return parse_session_id(self.session_id).identity
 
     def to_system_message_dict(self) -> Dict[str, Any]:
         """转成 memory.message_handler.process_message 期望的格式。
@@ -229,6 +229,10 @@ class NormalizedEvent:
                 "session_id": self.session_id,
                 "session_name": self.session_name,
                 "remark": "",
+                "platform": self.platform.value,
+                "connection_id": "onebot" if self.platform == Platform.QQ else self.platform.value,
+                "remote_session_id": self.session_id,
+                "generation": "",
             },
             "message_list": [
                 {
@@ -252,6 +256,7 @@ class OutboundTarget:
     """出站目标。"""
     scope: SessionScope
     target_id: str          # 群号 / 用户号 / 微信号
+    session_id: Optional[str] = None  # 主程序会话身份；桥接时与远端会话不同
 
     def to_action_param(self) -> Dict[str, Any]:
         """转成 OneBot 风格 params（其它平台各自实现自己的转换）。"""
@@ -289,7 +294,7 @@ class Channel(Protocol):
 
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
-    async def send(self, target: OutboundTarget, payload: OutboundPayload) -> str: ...
+    async def send(self, target: OutboundTarget, payload: OutboundPayload) -> str | SendReceipt: ...
 
     def subscribe(self) -> AsyncIterator[NormalizedEvent]:
         """可选：供需要"原始平台事件流"的订阅者使用。

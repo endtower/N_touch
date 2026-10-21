@@ -49,7 +49,7 @@ def build_specs_safe() -> tuple[dict[str, ProcSpec], list[str]]:
         web_port, onebot_port = core_ports()
     except Exception:
         pass
-    from core.supervisor import SNOWLUMA_DIR, LOG_DIR
+    from core.supervisor import snowluma_root, LOG_DIR
     specs = {
         "ingress": ProcSpec(
             name="ingress", cmd=ingress_cmd(), cwd=app_root(),
@@ -65,7 +65,7 @@ def build_specs_safe() -> tuple[dict[str, ProcSpec], list[str]]:
             order=2, desc="Abyss Core（降级端口）", dependencies=("ingress",),
         ),
         "snowluma": ProcSpec(
-            name="snowluma", cmd=["cmd", "/c", "launcher.bat"], cwd=SNOWLUMA_DIR,
+            name="snowluma", cmd=[str(snowluma_root() / "node.exe"), str(snowluma_root() / "index.mjs")], cwd=snowluma_root(),
             out_log=LOG_DIR / "snowluma.out.log",
             ports=[5099, 3001], order=1,
             desc="SnowLuma（降级端口）",
@@ -133,12 +133,15 @@ class TargetController:
 
     # ---------- 对外命令：epoch 分配与入队原子化（复核 R3）----------
 
-    def submit(self, kind: str) -> dict:
+    def submit(self, kind: str, update_internal: bool = False) -> dict:
         if kind not in ("start", "stop", "restart"):
             return {"ok": False, "error_code": "bad_command", "message": f"未知命令 {kind}"}
         done = threading.Event()
         result: dict = {}
         with self.service.epoch_lock:
+            guard = getattr(self.service, "update_guard", None)
+            if not update_internal and guard and guard(self.spec.name):
+                return {"ok": False, "error_code": "updating", "message": "组件正在更新，请完成或恢复更新后再操作"}
             # 相同 start/stop 不撤销进行中的相同操作。
             if kind != self._last_command or kind == "restart":
                 self.epoch += 1
@@ -146,8 +149,11 @@ class TargetController:
             epoch = self.epoch
             desired = {"start": "running", "stop": "stopped", "restart": "running"}[kind]
             self.desired = desired
-            self.queue.put((kind, epoch, done, result))
-        done.wait(timeout=HEALTH_WAIT_SEC + GRACEFUL_STOP_TIMEOUT + 20)
+            self.queue.put((kind, epoch, done, result, update_internal))
+        health_wait = self.spec.startup_timeout or HEALTH_WAIT_SEC
+        dependency_wait = sum((self.service.controller(name).spec.startup_timeout or HEALTH_WAIT_SEC)
+                              for name in self.spec.dependencies if self.service.controller(name) is not None)
+        done.wait(timeout=health_wait + dependency_wait + GRACEFUL_STOP_TIMEOUT + 20)
         if not result:
             return {"ok": False, "error_code": "timeout",
                     "message": "命令排队超时（目标正被其他操作占用），稍后重试"}
@@ -173,21 +179,21 @@ class TargetController:
             except queue.Empty:
                 pass
             if item is not None:
-                kind, epoch, done, result = item
+                kind, epoch, done, result, update_internal = item
                 try:
                     if epoch != self.epoch:
                         result.update({"ok": False, "error_code": "superseded",
                                        "state": self.state,
                                        "message": "命令已过时（有更新的操作生效）"})
                     elif kind == "start":
-                        result.update(self._cmd_start(epoch))
+                        result.update(self._cmd_start(epoch, update_internal))
                     elif kind == "stop":
                         result.update(self._cmd_stop(epoch))
                     elif kind == "restart":
                         r1 = self._cmd_stop(epoch)
                         result.update(r1)
                         if r1.get("ok") or r1.get("error_code") == "not_running":
-                            result.update(self._cmd_start(epoch))
+                            result.update(self._cmd_start(epoch, update_internal))
                 except Exception as e:
                     result.update({"ok": False, "error_code": "internal",
                                    "message": f"{type(e).__name__}: {e}"})
@@ -207,7 +213,10 @@ class TargetController:
         except Exception:
             pass
 
-    def _cmd_start(self, epoch: int) -> dict:
+    def _cmd_start(self, epoch: int, update_internal: bool = False) -> dict:
+        guard = getattr(self.service, "update_guard", None)
+        if not update_internal and guard and guard(self.spec.name):
+            return {"ok": False, "error_code": "updating", "message": "组件正在更新，启动已取消"}
         if epoch != self.epoch or self.desired != "running":
             return {"ok": False, "error_code": "superseded",
                     "state": self.state, "message": "启动已取消（有更新的操作生效）"}
@@ -225,7 +234,7 @@ class TargetController:
             dependency = self.service.controller(name)
             if dependency is None:
                 return {"ok": False, "error_code": "missing_dependency", "message": f"缺少服务 {name}"}
-            result = dependency.submit("start")
+            result = dependency.submit("start", update_internal)
             if not result.get("ok") or not dependency.ready:
                 self.state = "failed"
                 self.last_error = f"{name} 未就绪: {result.get('message', '')}"
@@ -245,7 +254,8 @@ class TargetController:
         self.started_at = time.time()
         self.managed = True
         # 健康等待可取消：每轮核对命令版本（复核 R3——不把 stop 困在等待里）
-        deadline = time.time() + HEALTH_WAIT_SEC
+        health_wait = self.spec.startup_timeout or HEALTH_WAIT_SEC
+        deadline = time.time() + health_wait
         while time.time() < deadline:
             if proc.poll() is not None:
                 self.state = "failed"
@@ -269,7 +279,7 @@ class TargetController:
             time.sleep(0.4)
         self.state = "failed"
         self.ready = False
-        self.last_error = f"{HEALTH_WAIT_SEC}s 内未就绪（进程保持追踪，可停止后重试）"
+        self.last_error = f"{health_wait:g}s 内未就绪（进程保持追踪，可停止后重试）"
         return {"ok": False, "error_code": "not_ready", "state": self.state,
                 "pid": proc.pid, "message": self.last_error}
 
@@ -361,6 +371,7 @@ class TargetController:
 class SupervisorService:
     def __init__(self) -> None:
         self.epoch_lock = threading.Lock()
+        self.update_guard = None
         self.specs, self.config_errors = build_specs_safe()
         self.controllers = {n: TargetController(s, self) for n, s in self.specs.items()}
 

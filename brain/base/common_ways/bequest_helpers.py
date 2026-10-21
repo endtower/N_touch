@@ -106,6 +106,4 @@ async def activate_bequests_for_input(
         })
         if len(matched) >= max_activate:
             break
-    from brain.hc.maintenance import MaintenanceService
-    await MaintenanceService().record_usage("experience", [item["id"] for item in matched], "injected")
     return matched

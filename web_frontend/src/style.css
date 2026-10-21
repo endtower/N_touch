@@ -406,16 +406,15 @@ button {
   border-radius: 50%;
 }
 
+/* Core 未启动: 标题字变红, 圆点保持原色 —— 用指示灯本身标记运行状态 */
+.app-header h1.core-off {
+  color: var(--danger);
+}
+
 .header-sub {
   font-size: 12px;
   color: var(--text-3);
   font-weight: 400;
-}
-
-.header-divider {
-  width: 1px;
-  height: 16px;
-  background: var(--border-1);
 }
 
 /* Sidebar 品牌 */

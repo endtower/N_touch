@@ -21,6 +21,10 @@ logger = get_logger(__name__, "INFO")
 class EmbeddingService:
     """向量嵌入服务类（纯异步）"""
 
+    # 火山方舟 /embeddings 单次 input 上限（实测超过 10 条返回 400
+    # InvalidParameter: max 10）；批量调用按该值分块，块内一次请求。
+    MAX_BATCH_SIZE = 10
+
     def __init__(self, api_key: str, api_base: str, model: str = "doubao-embedding-vision"):
         """初始化向量嵌入服务
 
@@ -37,31 +41,46 @@ class EmbeddingService:
             "Authorization": f"Bearer {self.api_key}"
         }
 
-    async def generate_embedding(self, text: str) -> List[float]:
-        """调用嵌入模型API生成文本向量（异步，不阻塞事件循环）
+    async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """批量生成文本向量（异步，按 MAX_BATCH_SIZE 分块，块内单次请求）。
 
         Args:
-            text: 需要嵌入的文本
+            texts: 需要嵌入的文本列表（非空）
 
         Returns:
-            文本的向量表示
+            与输入顺序一一对应的向量列表
 
         Raises:
+            ValueError: 输入为空或含非字符串/空串
             NetworkError: API调用失败（崩溃阻断语义，由上层决定终止流程）
         """
-        if not text or not isinstance(text, str):
-            raise ValueError("输入文本不能为空且必须是字符串")
+        if not isinstance(texts, list) or not texts:
+            raise ValueError("输入文本列表不能为空")
+        for text in texts:
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("输入文本必须是非空字符串")
 
+        vectors: List[List[float]] = []
+        for start in range(0, len(texts), self.MAX_BATCH_SIZE):
+            vectors.extend(await self._embed_chunk(texts[start:start + self.MAX_BATCH_SIZE]))
+        return vectors
+
+    async def generate_embedding(self, text: str) -> List[float]:
+        """调用嵌入模型API生成单条文本向量（内部走批量接口）。"""
+        return (await self.generate_embeddings([text]))[0]
+
+    async def _embed_chunk(self, texts: List[str]) -> List[List[float]]:
+        """对一块（≤ MAX_BATCH_SIZE 条）文本发一次 /embeddings 请求。"""
         start_time = time.time()
 
         payload = {
-            "input": text,
+            "input": texts,
             "model": self.model
         }
 
         # 每次调用独立短连接（嵌入调用频度低、单条秒级，握手开销可忽略，
         # 且避免单例 ClientSession 的事件循环亲和性问题）
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{self.api_base}/embeddings",
                 headers=self.headers,
@@ -69,7 +88,7 @@ class EmbeddingService:
             )
 
         elapsed = time.time() - start_time
-        logger.debug(f"文本嵌入API调用完成，耗时: {elapsed:.3f}秒")
+        logger.debug(f"文本嵌入API调用完成，条数: {len(texts)}，耗时: {elapsed:.3f}秒")
 
         if response.status_code != 200:
             raise NetworkError(
@@ -78,12 +97,25 @@ class EmbeddingService:
             )
 
         result = response.json()
-        embedding = result.get("data", [{}])[0].get("embedding")
+        data = result.get("data") or []
+        if len(data) != len(texts):
+            raise NetworkError(
+                f"API返回的嵌入结果条数不符（请求 {len(texts)} 条，返回 {len(data)} 条）",
+                details={"model": self.model, "response_keys": list(result.keys())},
+            )
 
-        if not embedding:
+        # OpenAI 兼容接口按 index 标注顺序；按 index 排序后再与输入对齐
+        ordered = sorted(data, key=lambda item: item.get("index", 0))
+        embeddings = [item.get("embedding") for item in ordered]
+        if any(not embedding for embedding in embeddings):
             raise NetworkError(
                 "API返回的嵌入结果为空",
                 details={"model": self.model, "response_keys": list(result.keys())},
+            )
+        if len({len(embedding) for embedding in embeddings}) != 1:
+            raise NetworkError(
+                "同一批嵌入结果维度不一致",
+                details={"model": self.model, "dims": [len(e) for e in embeddings]},
             )
 
         # token 用量统计（观测旁路）：火山 /embeddings 可能不返回 usage，缺失则跳过
@@ -95,8 +127,11 @@ class EmbeddingService:
             usage=result.get("usage"),
         )
 
-        logger.debug(f"文本嵌入生成成功，向量维度: {len(embedding)}，总耗时: {elapsed:.3f}秒")
-        return embedding
+        logger.debug(
+            f"文本嵌入生成成功，条数: {len(embeddings)}，"
+            f"向量维度: {len(embeddings[0])}，总耗时: {elapsed:.3f}秒"
+        )
+        return embeddings
 
 # 全局嵌入服务实例
 _embedding_service: Optional[EmbeddingService] = None

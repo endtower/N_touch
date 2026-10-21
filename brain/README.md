@@ -9,9 +9,10 @@
 
 ## 目录结构
 
-- **att/**：注意力层。AttentionStation 是唯一仲裁者，配 **7 类 truck** 感知器
-  （private_truck / ongoing_truck / special_attention_truck / scheduled_proactive_truck /
-  reflection_char_truck / reflection_time_truck / task_truck；注册不代表默认启用）与
+- **att/**：注意力层。AttentionStation 是唯一仲裁者，配 **8 类 truck** 感知器
+  （private_truck / at_mention_truck / pre_truck /
+  reflection_char_truck / reflection_time_truck / reflection_efficacy_truck /
+  reflection_belonging_truck / task_truck；注册不代表默认启用）与
   proactive 后台主动任务循环。见 [../docs/api/attention.md](../docs/api/attention.md)。
 - **pfc/**：决策层。PFCA（`pfc/pfca/`）是唯一调度者，把任务分发给对话代理；
   另有反思子系统（`pfc/reflection/`）。见 [../docs/api/pfca.md](../docs/api/pfca.md)。

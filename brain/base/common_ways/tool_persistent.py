@@ -146,10 +146,14 @@ class ToolPersistent:
         return str(result)
 
     @classmethod
-    async def quest_agent(cls, title: str, context: str, next_occurrence: str) -> str:
+    async def quest_agent(cls, title: str, context: str, next_occurrence: str = "",
+                          kind: str = "onetime") -> str:
         """转交一条待接续事项给 Quest 查重登记。"""
         agent = cls._get_quest_agent()
-        result = await agent.run(title=title, context=context, next_occurrence=next_occurrence)
+        result = await agent.run(
+            title=title, context=context,
+            next_occurrence=next_occurrence, kind=kind,
+        )
         if isinstance(result, dict) and result.get('formatted_output'):
             return result['formatted_output']
         return str(result) if result else "Quest 无操作回执"

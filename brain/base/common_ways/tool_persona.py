@@ -32,6 +32,20 @@ from utils.logger import get_logger
 
 logger = get_logger('ToolPersona', "INFO")
 
+# 基本说话风格里禁止出现的压制性表述（2026-10-21）：
+# 这些写法会把「哄人」与「按指定身份说话」变成需要报上限、需要推掉的事，
+# 实测直接导致夜间安抚与角色扮演全线失效。命中即拒绝写入，走 LLM 自纠通道。
+# 只收录实测出现过的整句特征，避免误伤「当众评我不接」这类正当条目。
+_COMMON_STYLE_BANNED_PHRASES = (
+    "上限只报一次",
+    "不哄第二",
+    "变不了",
+    "早报过",
+    "嗓子不归我",
+    "多的没有",
+    "只说一次就停",
+)
+
 
 class ToolPersona:
     """内心人格通用工具：内荐 schema + 人格定义修改。"""
@@ -79,9 +93,8 @@ class ToolPersona:
             "function": {
                 "name": "update_common_persona",
                 "description": (
-                    "一般为禁止、避免等负反馈的约束，或是替代性用语等。"
-                    "「说人话」式的普适性说话要求——让说话自然的那几条底线"
-                    "，硬预算 300 字，超出会被拒绝；"
+                    "基本说话风格：写正向、可执行的做法（该怎么说、什么时候给什么），"
+                    "不要堆成一片禁止清单。硬预算 300 字，超出会被拒绝；"
                     "写之前先 query_common_persona 看现状，想加新内容先掂量删掉哪条旧的。"
                 ),
                 "parameters": {
@@ -92,7 +105,7 @@ class ToolPersona:
                             "description": (
                                 "新的基本说话风格全文（覆盖式替换旧的，"
                                 "≤300 字，超出将被拒绝）。"
-                                "每条都应是可观察的说话行为约束，"
+                                "每条都应是可观察的说话行为，写清做什么而不是只写别做什么；"
                                 "不要写「保持自然」这类抽象品质词。"
                             ),
                         },
@@ -165,6 +178,28 @@ class ToolPersona:
                 f"超出基本说话风格预算：当前 {len(kernel_prompt)} 字，"
                 f"上限 {COMMON_STYLE_BUDGET} 字。请精简后再提交——"
                 "每条保留可观察的说话行为约束，删掉抽象描述与一次性格外教训。"
+            )
+        # 底线护栏（2026-10-21）：哄人与按指定身份/口径说话是主人明确要求的
+        # 两项能力，曾被反思连续覆盖成「上限只报一次」「变不了」「不接」式条款，
+        # 导致夜间哄人与扮演全线失效。此处硬拦，走 LLM 自纠通道。
+        missing = [
+            label for label, key in (("哄人", "哄"), ("按指定身份或口径说话", "扮演"))
+            if key not in kernel_prompt
+        ]
+        if missing:
+            raise ValueError(
+                f"基本说话风格缺少必备条目：{'、'.join(missing)}。"
+                "哄人与按主人指定身份/口径说话必须各保留一条正向做法，"
+                "请补回后再提交（可精简其他条目腾出字数）。"
+            )
+        banned = next(
+            (p for p in _COMMON_STYLE_BANNED_PHRASES if p in kernel_prompt), None
+        )
+        if banned:
+            raise ValueError(
+                f"基本说话风格含有压制性表述「{banned}」：这类写法会把哄人与扮演"
+                "变成需要报上限、需要推掉的事。请改写成正向做法"
+                "（该怎么说、什么时候给什么）后再提交。"
             )
         updated = await set_persona_kernel_prompt(COMMON_PERSONA_NAME, kernel_prompt)
         return {

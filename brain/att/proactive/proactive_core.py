@@ -76,20 +76,23 @@ class ProactiveCore:
                 break
 
             logger.info(f"ProactiveCore 收到一个主动任务草稿: intent={task_draft.get('intent', '?')}")
-            # 延迟 import 避免循环依赖
-            from .proactive_session import ProactiveSession
-            # 本任务跑在独立任务上，station 的链 contextvar 不会自动传播；
-            # task_draft 显式携带 chain_id，在此重新 set，session 内所有
-            # 上下文写入才能归属正确的任务链。
-            from utils.chain_context import set_chain_context, reset_chain_context
-            chain_id = task_draft.get("chain_id")
-            chain_token = set_chain_context(chain_id) if chain_id else None
-            session = ProactiveSession(task_draft)
-            self.current_session = session
+            session = None
+            chain_token = None
             try:
+                # 导入和构造也会失败，必须纳入同一个完成通知边界。
+                from .proactive_session import ProactiveSession
+                from utils.chain_context import set_chain_context, reset_chain_context
+                chain_id = task_draft.get("chain_id")
+                chain_token = set_chain_context(chain_id) if chain_id else None
+                session = ProactiveSession(task_draft)
+                self.current_session = session
                 await session.start()
+            except asyncio.CancelledError:
+                task_draft["_error"] = RuntimeError("ProactiveCore 会话被取消")
+                raise
             except Exception as e:
-                logger.warning(f"ProactiveSession 执行异常: {e}")
+                task_draft["_error"] = e
+                logger.exception("ProactiveSession 初始化或执行失败")
             finally:
                 if chain_token is not None:
                     reset_chain_context(chain_token)
@@ -115,15 +118,27 @@ class ProactiveCore:
         立刻 truck.start()，避免 proactive_session 还没跑完 truck 就被恢复
         —— 恢复后下一轮 select 同一事件会再次触发。
         """
-        if not self.is_running:
-            logger.debug("ProactiveCore 未运行，丢弃主动任务草稿")
-            return
+        worker = self._main_task
+        if not self.is_running or worker is None or worker.done():
+            raise RuntimeError("ProactiveCore 主循环未运行，无法处理主动任务")
         # 给 task 加一个完成事件, main_loop 处理完会 set 它
         completion = asyncio.Event()
         task_draft["_completion_event"] = completion
         await self.task_queue.put(task_draft)
-        # 阻塞直到 main_loop 消费并跑完本次 session
-        await completion.wait()
+        # 同时观察消费者存活；任务在出队前被取消也不能永久挂住 station。
+        waiter = asyncio.create_task(completion.wait())
+        try:
+            await asyncio.wait((worker, waiter), return_when=asyncio.FIRST_COMPLETED)
+            if not completion.is_set():
+                if not worker.cancelled():
+                    worker.result()
+                raise RuntimeError("ProactiveCore 主循环已停止，主动任务未完成")
+            error = task_draft.get("_error")
+            if error is not None:
+                raise RuntimeError("ProactiveCore 处理主动任务失败") from error
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
         logger.info(f"已投递主动任务草稿, 当前队列长度: {self.task_queue.qsize()}")
 
     def is_busy(self) -> bool:

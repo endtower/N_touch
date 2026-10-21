@@ -45,21 +45,22 @@ class ReflectionTriggerAcceptance(unittest.IsolatedAsyncioTestCase):
 
     async def test_strict_boundary_and_independent_axes(self):
         config = self.efficacy._get_config()
-        self.assertEqual(config.LOW_THRESHOLD, 20)
+        self.assertEqual(config.LOW_THRESHOLD, 0)
         self.feedback.settle("测试边界", [("competence", "失败", -30, "测试")])
         self.assertEqual(await self.efficacy._check_trigger(config), "")
-        self.feedback.settle("进入低值", [("competence", "失败", -1, "测试")])
-        self.assertIn("效能感 19/100", await self.efficacy._check_trigger(config))
+        self.feedback.settle("进入低值", [("competence", "失败", -20, "测试")])
+        self.assertIn("效能感 0/100", await self.efficacy._check_trigger(config))
         self.assertEqual(await self.belonging._check_trigger(self.belonging._get_config()), "")
         await self.efficacy.get_truck_messages()
         self.models.assert_awaited_once()
-        self.feedback.settle("差评", [("recognition", "明确坏评价", -31, "测试")])
-        self.assertIn("归属感 19/100", await self.belonging._check_trigger(self.belonging._get_config()))
+        self.feedback.settle("差评", [("recognition", "明确坏评价", -50, "测试")])
+        self.assertIn("归属感 0/100", await self.belonging._check_trigger(self.belonging._get_config()))
 
     async def test_low_value_remains_eligible_after_reflection(self):
-        self.feedback.settle("失败", [("competence", "失败", -40, "测试")])
+        self.feedback.settle("失败", [("competence", "失败", -50, "测试")])
         before = self.feedback.snapshot()
         await self.efficacy.get_truck_messages()
+        self.efficacy._last_high_check = 0.0
         self.assertTrue(await self.efficacy._check_trigger(self.efficacy._get_config()))
         await self.efficacy.get_truck_messages()
         self.assertEqual(self.models.await_count, 2)
@@ -67,7 +68,7 @@ class ReflectionTriggerAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.directory / "reflection_efficacy_truck.json").exists())
 
     async def test_recovered_value_skips_queued_request(self):
-        self.feedback.settle("失败", [("competence", "失败", -40, "测试")])
+        self.feedback.settle("失败", [("competence", "失败", -50, "测试")])
         self.assertTrue(await self.efficacy._check_trigger(self.efficacy._get_config()))
         self.feedback.settle("已成功", [("competence", "成功", 20, "测试")])
         await self.efficacy.get_truck_messages()
@@ -75,8 +76,8 @@ class ReflectionTriggerAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.directory / "reflection_efficacy_truck.json").exists())
 
     async def test_disabled_request_skips(self):
-        self.feedback.settle("失败", [("competence", "失败", -40, "测试")])
-        config = SimpleNamespace(ENABLED=False, LOW_THRESHOLD=20)
+        self.feedback.settle("失败", [("competence", "失败", -50, "测试")])
+        config = SimpleNamespace(ENABLED=False, LOW_THRESHOLD=0)
         with patch.object(self.efficacy, "_get_config", return_value=config):
             await self.efficacy.get_truck_messages()
         self.models.assert_not_awaited()
@@ -109,8 +110,8 @@ class ReflectionTriggerAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.belonging.state, "stopped")
 
     async def test_busy_pause_blocks_check_until_resume(self):
-        self.feedback.settle("失败", [("competence", "失败", -40, "测试")])
-        config = SimpleNamespace(ENABLED=True, LOW_THRESHOLD=20, CHECK_CYCLE_TIME=0.01)
+        self.feedback.settle("失败", [("competence", "失败", -50, "测试")])
+        config = SimpleNamespace(ENABLED=True, LOW_THRESHOLD=0, CHECK_CYCLE_TIME=0.01)
         notification = AsyncMock()
         with patch.object(self.efficacy, "_get_config", return_value=config), \
              patch.object(self.efficacy, "_check_trigger", wraps=self.efficacy._check_trigger) as check, \

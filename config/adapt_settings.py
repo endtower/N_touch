@@ -58,13 +58,12 @@ class OneBotConfig:
 
 
 # ==================================================
-# 微信平台配置（占位，暂未实现）
+# 微信平台配置（经通用 HTTP 桥接，默认关闭）
 # ==================================================
 class WeChatConfig:
-    """微信平台配置 - 适配 Gewechat / ComWechat / iPad Hook 等"""
+    """兼容配置入口；实际连接验证与收发由 adapt.bridge 完成。"""
 
-    ENABLED = False  # 暂未启用
-    # 后续会加：GEWECHAT_URL / APP_ID / CALLBACK_HOST / CALLBACK_PORT / ...
+    ENABLED = env_bool("BRIDGE_ENABLED", False)
 
 
 # ==================================================

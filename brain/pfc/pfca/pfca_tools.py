@@ -18,7 +18,7 @@ import time
 import asyncio
 from functools import partial
 from typing import Dict, Any, List
-from brain.amy.constants import FinalEvaluationAct, TaskResultAct, clamp, FEEDBACK_MAX
+from brain.amy.constants import FinalEvaluationAct, TaskResultAct, PfcaRegulationAct, clamp, FEEDBACK_MAX
 from brain.amy.feedback_state import get_feedback_state
 from brain.amy.decision_feelings import AXIS_NAMES
 from utils.logger import get_logger
@@ -26,7 +26,6 @@ from utils.error_handling import async_handle_errors
 from brain.base import ToolManager, ToolHC, ToolSocial, ToolTask, ToolPersona, ToolJinnang
 from brain.hc.shortlight import SCOPE_NORMAL
 from brain.hc.global_session_state import get_global_session_state
-from brain.base.common_ways.tool_maintenance import ToolMaintenance
 
 
 # 获取日志记录器
@@ -109,6 +108,35 @@ class PFCA_tool_manager(ToolManager):
                     }
                 }
             },
+            # 情绪调节（PFCA 专属）：主动平复/调整自身情绪，写入 AMY thought。
+            # enum 收口于 PfcaRegulationAct（不对 conversation / social_chat 开放）。
+            {
+                "type": "function",
+                "function": {
+                    "name": "regulate_emotion",
+                    "description": (
+                        "主动调节自己的情绪，写入情绪想法池；调用后会返回你此刻的心情描述。"
+                        "情绪挡在前面时用它，可下调也可上调："
+                        "烦躁、戒备、兴奋上头、抵触某人，用降温档把自己拉回理性；"
+                        "提不起劲、不想动、语气发闷，用提气档把自己拽起来。"
+                        "每次只调一档，可重复调用叠加；情绪已合适时不必调用。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "act": {
+                                "type": "string",
+                                "description": (
+                                    "调节方式，必须从以下列表中选择之一："
+                                    f"{'、'.join(PfcaRegulationAct.names())}。"
+                                ),
+                                "enum": PfcaRegulationAct.names(),
+                            }
+                        },
+                        "required": ["act"],
+                    },
+                },
+            },
             ToolSocial.get_query_history_tool_schema(),
             {
                 "type": "function",
@@ -163,19 +191,19 @@ class PFCA_tool_manager(ToolManager):
                             },
                             "task_result": {
                                 "type": "string", "enum": TaskResultAct.names(),
-                                "description": "按实际承接的目标判断，不能仅凭 Quest/Reflection/闲聊来源判断。成功 +20；失败 -20；纯闲聊或结果不明不结算效能感。邀请尚未回应等结果未明不能算失败。"
+                                "description": (
+                                    "本轮行动的实际效益，必须按证据选档，不能按自己投入多少或话题是否顺利来选："
+                                    "+10 仅限对方明确说自己有用、或已产生可指认的实际价值、或明确使对方收益；"
+                                    "对方没有明确表达就不算 +10，只能选 0。"
+                                    "0＝可能产生收益但未确认；-5＝结果让对方不满；-10＝任务被延期或推迟；"
+                                    "-20＝产生负面收益；-30＝帮倒忙。"
+                                    "把话说得体面、聊得顺利、自己长了见识、任务清单被推进，都不构成 +10 的依据。"
+                                )
                             },
-                            "task_reason": {
-                                "type": "string",
-                                "description": "成功或失败时必填：任务结果的原因与依据。成功说明做对了什么；失败说明可能原因，如子 agent 表现、自身策略失误、经验缺失或外部条件。说明依据与不确定性，不能把猜测写成事实。总结中也需保留主要原因。纯闲聊或结果不明可省略。"
-                            },
-                            "evaluation_reason": {
-                                "type": "string",
-                                "description": "评价依据：已承接目标、可观察结果，以及主人或其他人的反馈。社交评价依赖外部回应，不能把自己的期待当成别人评价。"
-                            },
+                            "failure_reason": {"type": "string", "description": "结束评价属于 AMY 的负面分区时填写本次表现差原因。自动本地缓存；下次申请维护时归入该申请并清空待维护缓存。可能产生收益(0)与无评价本身不属于表现失败。"},
                             "final_evaluation": {
                                 "type": "string", "enum": FinalEvaluationAct.names(),
-                                "description": "总体社交评价：明确好 +20，含蓄好 +10，含蓄坏 -10，明确坏 -20，无评价 -5。与任务成功失败独立；仅第二次确认退出时结算。"
+                                "description": "总体社交评价：明确好 +20，含蓄好 +10，含蓄坏 -10，明确坏 -20，无评价 -5。与实际效益评价独立；仅第二次确认退出时结算。"
                             },
                             "enter_reflection": {
                                 "type": "boolean",
@@ -193,7 +221,7 @@ class PFCA_tool_manager(ToolManager):
                                 )
                             }
                         },
-                        "required": ["summary", "title", "task_result", "final_evaluation", "evaluation_reason"]
+                        "required": ["summary", "title", "task_result", "final_evaluation"]
                     }
                 }
             },
@@ -201,7 +229,6 @@ class PFCA_tool_manager(ToolManager):
             ToolHC.get_query_note_tool_schema(),
             ToolHC.get_record_note_tool_schema(),
             ToolJinnang.get_query_jinnang_tool_schema(),
-            ToolMaintenance.get_query_maintenance_tool_schema(),
             # 通用级任务工具（2026-09-18 接入：查询任务状态；
             # 裁决级 create_task 仍私有于 QuestAgent，不对 PFCA 开放）
             *ToolTask.get_task_tool_schemas(),
@@ -223,11 +250,12 @@ class PFCA_tool_manager(ToolManager):
             "terminate": self.terminate,
             "query_address_book": ToolSocial.query_address_book,
             "inner_persona_agent": self.summon_personas,
+            # 情绪调节（PFCA 专属 act 表）
+            "regulate_emotion": self.regulate_emotion,
             "query_note": self.query_note,
             "list_notes": self.list_notes,
             "record_to_notepad": self.record_to_notepad,
             "query_jinnang": ToolJinnang.query_jinnang,
-            "query_maintenance": ToolMaintenance.query_maintenance,
             # 通用级任务工具（直接引用 ToolTask 类方法，风格同 query_history 引用 ToolSocial）
             "query_task_status": ToolTask.query_task_status,
             # quest_agent 联系通道（直接引用 ToolTask 类方法）
@@ -313,10 +341,10 @@ class PFCA_tool_manager(ToolManager):
         调用方可通过 session_id 指定目标会话；不指定则默认为主人的私聊会话（private_<MASTER_ID>）。
 
         保护模式（SafetyConfig.CONVERSATION_PROTECTION_MODE）：
-        - 开启时仅允许对主人私聊会话（private_<MASTER_ID>）以及
-          SafetyConfig.CONVERSATION_ALLOWED_SESSIONS 白名单内的会话发起对话；
-          对其他非主人用户（群聊 / 他人私聊）一律阻止，返回 blocked 结果并提醒
-          LLM 改用 social_chat_agent。
+        - 开启时仅允许对以下会话发起对话：主人私聊会话（private_<MASTER_ID>）、
+          SafetyConfig.CONVERSATION_ALLOWED_SESSIONS 白名单内的会话、以及在记忆里
+          勾选了「允许 conversation」（allow_conversation）的角色/群组所关联的会话；
+          其他会话一律阻止，返回 blocked 结果并提醒 LLM 改用 social_chat_agent。
 
         涉及附件时，PFCA 把附件清单（[图片:xxx] / [文件:xxx] 等）写进 purpose 或 extra_info 里。
 
@@ -336,29 +364,31 @@ class PFCA_tool_manager(ToolManager):
         """
         from config.role_settings import RoleConfig
         from config.settings import SafetyConfig
+        from brain.hc.database.core import get_memory_db
         from brain.hc.global_session_state import get_global_session_state
         from brain.chat.conversation.conversation_core import get_conversation_core
 
         session_id = (session_id or "").strip() or f"private_{RoleConfig.MASTER_ID}"
         persona_name = self._resolve_persona_name(persona_name)
 
-        # 保护模式：仅允许对主人私聊会话 + 白名单会话对话，非主人用户一律阻止并提醒
-        # 改用 social_chat_agent（对外社交走受监管的社交通道）。
-        # 白名单见 SafetyConfig.CONVERSATION_ALLOWED_SESSIONS（除主人外仍允许的会话 id）。
+        # 保护模式：仅允许对主人私聊会话 + 白名单会话 + 记忆中勾选放行的实体会话对话，
+        # 非放行会话一律阻止并提醒改用 social_chat_agent（对外社交走受监管的社交通道）。
+        # 放行开关在「记忆 → 社交实体」详情卡里勾选，按实体写入记忆库。
         if SafetyConfig.CONVERSATION_PROTECTION_MODE:
             master_private = f"private_{RoleConfig.MASTER_ID}"
             allowed = {master_private} | set(SafetyConfig.CONVERSATION_ALLOWED_SESSIONS)
-            if session_id not in allowed:
+            if session_id not in allowed and not await get_memory_db().conversation_allowed(session_id):
                 logger.warning(
-                    f"conversation_agent 保护模式已阻止对非主人/白名单会话发起对话: {session_id}"
+                    f"conversation_agent 保护模式已阻止对未放行会话发起对话: {session_id}"
                 )
                 return {
                     "blocked": True,
-                    "reason": "保护模式已开启：conversation_agent 仅允许与主人私聊会话及白名单会话对话。",
+                    "reason": "保护模式已开启：conversation_agent 仅允许与主人私聊会话及已放行的会话对话。",
                     "session_id": session_id,
                     "message": (
-                        f"已阻止 conversation_agent 向非主人会话 {session_id} 发起对话。"
-                        "对其他人/群聊的沟通请改用 social_chat_agent。"
+                        f"已阻止 conversation_agent 向未放行的会话 {session_id} 发起对话。"
+                        "如需放行，请在记忆里给对应角色/群组勾选「允许 conversation」；"
+                        "对其他人/群聊的日常沟通请改用 social_chat_agent。"
                     ),
                 }
 
@@ -558,10 +588,36 @@ class PFCA_tool_manager(ToolManager):
         )
         return f"已记录至记事本（{note_id}）。"
 
+    async def regulate_emotion(self, act: str) -> str:
+        """情绪调节（PFCA 专属）：把一条 PfcaRegulationAct 想法写入 AMY thought 池。
+
+        调完回写当前 DA 数值与表现侧 DA 描述原文，让 PFCA 看得到自己调到了哪一档
+        （仅此工具单向暴露 DA；NE 与最终评价类原因仍不进入决策侧）。
+        act 非法属工具入参错误：抛 ValueError 交 LLM 自纠。
+        """
+        if act not in PfcaRegulationAct.names():
+            raise ValueError(
+                f"未知情绪调节方式：{act}；请选择{'、'.join(PfcaRegulationAct.names())}"
+            )
+
+        from brain.amy.emotional_interface import get_emotional_interface
+        from brain.amy.prompt_engine import get_dopamine_desc
+        ei = await get_emotional_interface()
+        success, msg, _prompt = await ei.build_thought(act=act, desc=act)
+        if not success:
+            raise RuntimeError(f"情绪调节写入失败：{msg}")
+
+        snapshot = await ei.get_mood_snapshot()
+        logger.info(f"PFCA 情绪调节：{act}（DA={snapshot.dopamine:.0f}）")
+        return (
+            f"已调节情绪：{act}。\n"
+            f"当前心情 DA {snapshot.dopamine:.0f}/100："
+            f"{get_dopamine_desc(snapshot.dopamine)}"
+        )
+
     async def terminate(self, summary: str, title: str = "", check: bool = False, final_evaluation: str = "",
                         enter_reflection: bool = False, reflection_purpose: str = "",
-                        task_result: str = TaskResultAct.NEUTRAL, task_reason: str = "",
-                        evaluation_reason: str = "") -> str:
+                        task_result: str = TaskResultAct.DEFAULT, failure_reason: str = "") -> str:
         """
         结束当前全部的任务链。
 
@@ -578,9 +634,8 @@ class PFCA_tool_manager(ToolManager):
             check: 已废弃，不再使用
             final_evaluation: 本次 PFCA 会话的最终评价（词表名，来自 FinalEvaluationAct）；
                 仅第二次调用（确认退出）时生效；留空按「无评价」登记（旧调用兼容）
-            task_result: 成功 / 失败 / 纯闲聊或结果不明；默认中性用于旧调用兼容
-            task_reason: 成功或失败时必填，任务结果的原因与依据（证据与不确定性）
-            evaluation_reason: 已承接目标、结果与外部反馈依据
+            task_result: 六档实际效益评价；省略时按「可能产生收益」0 结算
+            failure_reason: 负面结束评价时填写，缓存到下次维护申请；数值变动说明采用 title
             enter_reflection: 是否在本会话结束后进入反思状态（接力 Reflection 会话）；
                 仅第二次调用（确认退出）时生效
             reflection_purpose: 进入反思的目的（作为反思会话首条输入）；
@@ -601,9 +656,7 @@ class PFCA_tool_manager(ToolManager):
             if not (reflection_purpose or "").strip():
                 raise ValueError("enter_reflection=true 时必须提供 reflection_purpose")
 
-        TaskResultAct.validate(task_result, task_reason)
-        if not isinstance(evaluation_reason, str):
-            raise ValueError("评价依据必须是文本")
+        TaskResultAct.validate(task_result)
         if not title.strip():
             raise ValueError("收尾必须提供事件标题 title")
         final_evaluation = (final_evaluation or "").strip()
@@ -612,6 +665,10 @@ class PFCA_tool_manager(ToolManager):
         if not FinalEvaluationAct.contains(final_evaluation):
             raise ValueError(f"未知社交评价：{final_evaluation}")
         final_evaluation = FinalEvaluationAct.normalize(final_evaluation)
+
+        from brain.amy.failure_reasons import validate_failure_reason
+        failure_act = task_result if TaskResultAct.is_failure(task_result) else final_evaluation
+        validate_failure_reason(failure_act, failure_reason)
 
         terminate_confirmed = focus_state._data.get("terminate_confirmed", False)
 
@@ -628,8 +685,7 @@ class PFCA_tool_manager(ToolManager):
                 "title": title,
                 "final_evaluation": final_evaluation,
                 "task_result": task_result,
-                "task_reason": task_reason,
-                "evaluation_reason": evaluation_reason,
+                "failure_reason": failure_reason,
             }
 
             # ===== 结束预览（确认退出前的预告） =====
@@ -658,9 +714,7 @@ class PFCA_tool_manager(ToolManager):
             preview = ["你需要二次确认才能真正结束。", "", "本次行动结束后："]
             if tasks_text:
                 preview += ["有以下任务仍未完成，将择时再次处理", tasks_text]
-            preview += ["", competence_line, presence_line, f"评价依据：{evaluation_reason or '详见本轮总结'}"]
-            if task_reason.strip():
-                preview.append(f"任务原因：{task_reason}")
+            preview += ["", competence_line, presence_line, f"事件：{title}"]
             if reason_line:
                 preview.append(reason_line)
             preview += [
@@ -685,12 +739,12 @@ class PFCA_tool_manager(ToolManager):
         get_temporary_memory().add(summary)
         logger.info("已将 terminate 总结写入短期记忆（最后一次调用）")
 
-        # 本次参数已经校验；确认退出后登记任务结果与外部评价。
+        # 本次参数已经校验；确认退出后登记实际效益与外部评价。
         # 关键闭环步骤，禁止 try-except 吞异常；获取失败直接上抛崩溃阻断。
         # 事件标题及原因进入可追溯变动历史。
         from brain.amy.emotional_interface import get_emotional_interface
         ei = await get_emotional_interface()
-        await ei.apply_final_evaluation(final_evaluation, title, task_result, task_reason, evaluation_reason)
+        await ei.apply_final_evaluation(final_evaluation, title, task_result, failure_reason=failure_reason)
 
         # 灵光一现记事本落库（真正结束）：以本次事件标题命名，将本事件链期间
         # conversation 记录的素材、触发原因、PFCA 总结与最终评价一并持久化到 shortlight/notes/。

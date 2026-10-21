@@ -34,7 +34,8 @@ from brain.amy import get_emotional_interface, reset_emotional_interface
 
 # 导入 adapt 平台适配层
 from adapt import get_channel_manager, reset_channel_manager
-from adapt.ingress_client import IngressChannel
+from adapt.ingress_client import IngressChannel, BridgeIngressChannel
+from adapt.bridge.config import load_bridge_config
 from adapt.web import WebChannel, WebChannelConfig
 # adapt 配置文件（OneBot / WeChat / Web）
 from config.adapt_settings import (
@@ -164,6 +165,10 @@ class SystemCore:
             await mgr.add(IngressChannel())
         else:
             logger.info("OneBot 平台未启用，跳过注册")
+
+        bridge_config = load_bridge_config()
+        if bridge_config.enabled:
+            await mgr.add(BridgeIngressChannel(bridge_config))
 
         # Web 通道（浏览器前端），跟 OneBot 可以并存；NapCat 没起时也能独立用
         if is_web_enabled():

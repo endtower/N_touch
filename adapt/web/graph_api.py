@@ -13,8 +13,9 @@ adapt.web.graph_api
 
 内部已全部切到 tasks 表（brain.hc.database.task.TaskOperations）。
 
-任务字段：title / context / next_occurrence，status 仅 active / expired
-（任务一次性：到期交付后自动置 expired，续办靠重新登记）。
+任务字段：title / context / next_occurrence / kind，status 仅 active / expired。
+kind 区分 onetime（到期交付后自动置 expired，续办靠重新登记）与
+ongoing（持续任务，无固定时间点、永不到期，由 PRE 契机巡检作为背景）。
 
 所有方法都是 async，基于 SQLite 记忆数据库（brain.hc.database）。
 
@@ -48,12 +49,13 @@ def _safe_int(s: Optional[str], default: int) -> int:
 # ============================================================
 
 _TASK_FIELDS = (
-    "task_id", "title", "context", "status",
+    "task_id", "title", "context", "status", "kind",
     "next_occurrence",
     "start_time", "end_time", "updated_at",
 )
 
 _TASK_STATUS_ALLOW = {TASK_STATUS_ACTIVE, TASK_STATUS_EXPIRED}
+_TASK_KIND_ALLOW = {"onetime", "ongoing"}
 
 
 async def handle_list_tasks(request: web.Request) -> web.Response:
@@ -160,7 +162,7 @@ async def handle_set_task_status(request: web.Request) -> web.Response:
         return web.json_response({"error": f"更新失败: {e}"}, status=500)
 
 
-_TASK_EDITABLE = {"title", "context", "status", "next_occurrence", "start_time"}
+_TASK_EDITABLE = {"title", "context", "status", "kind", "next_occurrence", "start_time"}
 
 _TASK_TIME_FIELDS = {"start_time", "next_occurrence"}
 
@@ -215,6 +217,12 @@ async def handle_update_task(request: web.Request) -> web.Response:
     if kwargs.get("status") and kwargs["status"] not in _TASK_STATUS_ALLOW:
         return web.json_response(
             {"error": f"status ∈ {sorted(_TASK_STATUS_ALLOW)}"},
+            status=400,
+        )
+
+    if kwargs.get("kind") and kwargs["kind"] not in _TASK_KIND_ALLOW:
+        return web.json_response(
+            {"error": f"kind ∈ {sorted(_TASK_KIND_ALLOW)}"},
             status=400,
         )
 
@@ -278,6 +286,15 @@ async def handle_create_task(request: web.Request) -> web.Response:
         next_occurrence = data.get("next_occurrence")
         start_time_user = data.get("start_time")
 
+        kind = (data.get("kind") or "onetime").strip().lower()
+        if kind not in _TASK_KIND_ALLOW:
+            return web.json_response(
+                {"error": f"kind ∈ {sorted(_TASK_KIND_ALLOW)}"},
+                status=400,
+            )
+        if kind == "ongoing":
+            next_occurrence = ""
+
         for f in ("next_occurrence", "start_time"):
             v = data.get(f)
             if v is None:
@@ -292,6 +309,7 @@ async def handle_create_task(request: web.Request) -> web.Response:
             context=context,
             next_occurrence=next_occurrence,
             status=status,
+            kind=kind,
         )
 
         if start_time_user not in (None, ""):

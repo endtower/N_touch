@@ -149,8 +149,6 @@ class ConversationInputManager:
         # 读取该人格提示词（基本人格 + kernel_prompt，基本人格在前）作为语言与行为基准；
         # 人格不存在在 get_persona 直接抛 KeyError 崩溃阻断（user_rules）。
         persona_header = self._build_persona_header()
-        from brain.hc.maintenance import MaintenanceService
-        await MaintenanceService().record_usage("persona", ["common", core.persona_name], "selected")
 
         # 按实际消息拼接顺序组装：人格 -> 聊天记录 -> 会话环境 -> 任务 -> 情绪
         _parts = [f"{message_str}"]

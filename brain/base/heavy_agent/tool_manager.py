@@ -98,7 +98,7 @@ class ToolManager(ABC):
             工具执行结果；参数错误时返回 role=tool 的错误消息 dict。
         """
         try:
-            logger.info(f"处理工具请求：工具名称={tool_name}，参数={kwargs}")
+            logger.debug(f"处理工具请求：工具名称={tool_name}，参数={kwargs}")
             return await func(**kwargs)
         except (TypeError, ValueError, KeyError) as e:
             # 参数错误：可恢复，回 LLM 自纠

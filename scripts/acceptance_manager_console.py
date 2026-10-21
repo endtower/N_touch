@@ -44,8 +44,6 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         dist = self.root / "web_frontend/dist"
         dist.mkdir(parents=True)
         (dist / "index.html").write_text("console-fixture", encoding="utf-8")
-        self.resource = patch("manager_console.resource_root", return_value=self.root)
-        self.resource.start()
         self.controllers = {name: Controller(name) for name in ("core", "snowluma")}
         self.service = SimpleNamespace(controller=self.controllers.get)
         app = web.Application()
@@ -59,7 +57,6 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close()
         if self.upstream:
             await self.upstream.close()
-        self.resource.stop()
         self.env.stop()
         self.tmp.cleanup()
 

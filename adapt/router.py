@@ -39,6 +39,7 @@ from .protocol import (
     OutboundTarget,
     Platform,
 )
+from .bridge.contract import SendReceipt
 
 
 logger = setup_logging("adapt.router")
@@ -91,7 +92,7 @@ class OutboundRouter:
         platform: str | Platform,
         target: OutboundTarget,
         payload: OutboundPayload,
-    ) -> str:
+    ) -> str | SendReceipt:
         """发送一条消息，返回平台消息 ID。
 
         管线（精简版）:
@@ -136,6 +137,9 @@ class OutboundRouter:
                 f"({len(segments)} segments)"
             )
             message_id = await ch.send(target, payload)
+            if isinstance(message_id, SendReceipt):
+                # A queued/actioned bridge receipt is not a message and must not be inserted as one.
+                return message_id
             if not message_id:
                 return message_id
 
@@ -171,7 +175,7 @@ class OutboundRouter:
     ) -> None:
         """落库 (写入 chat_history 文件), OneBot v11 段格式与 NapCat 入站完全一致."""
         from config.role_settings import role_config
-        session_id = f"{target.scope.value}_{target.target_id}"
+        session_id = target.session_id or f"{target.scope.value}_{target.target_id}"
         content_text = "".join(seg.to_text() for seg in segments)
         content_array = [seg.as_dict() for seg in segments]
 
@@ -203,6 +207,18 @@ class OutboundRouter:
     ) -> str:
         """便利方法：发送纯文本。"""
         return await self.send(platform, target, OutboundPayload.text(text))
+
+    async def send_to_session(self, session_id: str, payload: OutboundPayload) -> str | SendReceipt:
+        """Route only through a persisted source identity; never infer WeChat from an ID prefix."""
+        from memory.message_repository import get_message_store
+        from .protocol import SessionScope
+        route = await get_message_store().session_route(session_id)
+        if route is None:
+            raise ValueError("该会话没有可验证的平台来源，拒绝发送")
+        scope, _, identity = route["remote_session_id"].partition("_")
+        if scope not in ("private", "group") or not identity:
+            raise ValueError("目标会话类型未知，拒绝发送")
+        return await self.send(route["platform"], OutboundTarget(SessionScope(scope), identity, session_id), payload)
 
 
 # ============================================================

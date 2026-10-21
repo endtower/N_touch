@@ -19,6 +19,17 @@ public partial class App : Application
         DispatcherUnhandledException += (_, args) => LogFatal(args.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, args) => LogFatal(args.ExceptionObject as Exception);
 
+        try
+        {
+            Bootstrap.EnsureInstalled();
+            if (Bootstrap.LaunchInstalled(e.Args)) { Shutdown(0); return; }
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show("首次安装未完成：" + error.Message, "Abyss", MessageBoxButton.OK, MessageBoxImage.Error);
+            Shutdown(1); return;
+        }
+
         // 单实例 + 唤醒（V01）：命名 EventWaitHandle 兼任互斥与唤醒信号。
         // 重复双击：已有实例收到信号后把窗口带回前台。
         //

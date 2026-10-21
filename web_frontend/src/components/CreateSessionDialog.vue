@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { ref, watch, computed } from 'vue'
 
 const props = defineProps<{ visible: boolean }>()
@@ -77,7 +78,7 @@ function onConfirm() {
 </script>
 
 <template>
-  <el-dialog
+  <AppDialog
     :model-value="visible"
     @update:model-value="emit('update:visible', $event)"
     title="新建会话"
@@ -177,7 +178,7 @@ function onConfirm() {
         创建
       </el-button>
     </template>
-  </el-dialog>
+  </AppDialog>
 </template>
 
 <style scoped>

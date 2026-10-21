@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Van, Refresh, VideoPlay, VideoPause } from '@element-plus/icons-vue'
@@ -73,10 +74,9 @@ function close() { emit('update:visible', false) }
 </script>
 
 <template>
-  <el-dialog
+  <AppDialog size="panel"
     :model-value="props.visible"
     title="Truck 配置与运行"
-    width="820"
     class="truck-dialog"
     :close-on-click-modal="false"
     align-center
@@ -154,7 +154,7 @@ function close() { emit('update:visible', false) }
       </div>
       <div class="truck-tip">
         “效能感反思”和“归属感反思”各自同时控制低值与高值触发，没有单独的高值开关。
-        低于20时进行补偿性反思；达到100时，效能感用于申请专题维护，归属感用于安排关系建设。
+        降为0时进行补偿性反思；达到100时，效能感用于申请专题维护，归属感用于安排关系建设。
         两种触发都等待系统空闲；高值还需满足维护或已有任务的限制。
         关系建设任务到期自动执行，需要另行启用“任务到期触发”。
       </div>
@@ -165,7 +165,7 @@ function close() { emit('update:visible', false) }
       <el-button type="primary" :disabled="!coreReady || saving" @click="runtimeAction('apply')">应用到当前运行</el-button>
       <el-button @click="close">关闭</el-button>
     </template>
-  </el-dialog>
+  </AppDialog>
 </template>
 
 <style scoped>
@@ -204,10 +204,10 @@ function close() { emit('update:visible', false) }
 }
 
 .truck-body {
-  /* 留出弹窗 header / footer 的高度，避免整个弹窗超出视口 */
-  max-height: calc(88vh - 150px);
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding-right: 4px;
+  padding: 20px;
 }
 
 .truck-categories {
@@ -383,4 +383,6 @@ function close() { emit('update:visible', false) }
   font-family: var(--font-mono);
   color: var(--accent);
 }
+/* Keep header controls clear of the shared close button. */
+.truck-dialog-header, .truck-dialog-meta { flex-wrap: wrap; min-width: 0; gap: 8px; }
 </style>

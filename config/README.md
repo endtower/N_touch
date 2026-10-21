@@ -17,12 +17,12 @@
 
 | 等级 | 默认模型 | 接入点 |
 |---|---|---|
-| flash | `deepseek/deepseek-v4.1-flash` | commandcode 中转 DeepSeek V4.1 Flash（`FLASH_API_KEY` / `FLASH_BASE_URL`，空则回退 opencode） |
-| vision | `deepseek/deepseek-v4.1-flash` | 同上（deepseek/deepseek-v4.1-flash 原生支持图像理解） |
-| conversation | `deepseek/deepseek-v4.1-flash` | commandcode 中转（2026-09-23 临时切回，`CONVERSATION_*` 置空即回退主接入点） |
-| persona | `deepseek/deepseek-v4.1-flash` | commandcode 中转（2026-09-23 临时切回，`PERSONA_*` 置空即回退主接入点） |
+| flash | `DeepSeek-V4.1-Flash` | 火山方舟（北京）套餐接入点 `/api/plan/v3`（`FLASH_API_KEY` / `FLASH_BASE_URL`，空则回退 opencode） |
+| vision | `DeepSeek-V4.1-Flash` | 同上（DeepSeek-V4.1-Flash 原生支持图像理解） |
+| conversation | `DeepSeek-V4.1-Flash` | 同上（`CONVERSATION_*` 置空即回退主接入点） |
+| persona | `DeepSeek-V4.1-Flash` | 同上（`PERSONA_*` 置空即回退主接入点） |
 | pro | 未设置 | 未设置时禁止降级调用（直接报错阻断） |
-| embedding | `doubao-embedding-vision` | 火山方舟 API（见 `settings.py` 的 `VectorConfig`） |
+| embedding | `doubao-embedding-vision` | 火山方舟 API（见 `settings.py` 的 `VectorConfig`，`VECTOR_BASE_URL` 同为 `/api/plan/v3`） |
 
 ## 主要功能
 
@@ -32,7 +32,8 @@
 
 ## 配置管理
 
-- API Key 等敏感信息统一硬编码在配置文件中，不走环境变量（2026-09-10 拍板：这是既定正确做法）
+- API Key 保存在用户数据目录的 `.env.dev`，通过启动器或 Web 系统设置编辑；源码与公开组件包不包含个人密钥。
+- 首次启动的账号、名称与模型接入由配置向导保存；人格、行为等框架逻辑仍在 Python 源码中维护。
 - 配置参数应当有合理的默认值
 - 定期备份重要配置
 - 注意配置文件的权限控制

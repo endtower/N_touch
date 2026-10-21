@@ -371,6 +371,8 @@ export interface SocialNode {
   familiarities?: SocialContent[]
   contacts?: SocialContact[]
   relationships_with_default?: SocialRelationship[]
+  // Character / Group：允许 conversation_agent 对该实体的会话发起对话
+  allow_conversation?: boolean
   // Character 特有
   affinity_events?: SocialContent[]
   // Group 特有
@@ -411,6 +413,7 @@ export interface MemorySocialUpdateRequest {
   relationship?: string
   member_impression?: string
   self_image?: string
+  allow_conversation?: boolean
   content?: string
 }
 
@@ -433,6 +436,9 @@ export interface MemorySocialDeleteResponse {
 
 export interface ExperienceItem {
   bequest_id: string
+  retrieval_count?: number
+  last_maintained_at?: number | null
+  manual_maintenance_count?: number
   title: string
   summary: string
   category: string            // 'speech'（话术经验）/ 'decision'（决策经验）
@@ -555,7 +561,7 @@ export interface AmyThought {
   create_time: number
   expire_time: number
   remaining_seconds: number
-  category: 'external' | 'evaluation' | 'self_action' | 'system' | 'final' | 'unknown'
+  category: 'external' | 'evaluation' | 'self_action' | 'pfca_regulation' | 'system' | 'final' | 'unknown'
 }
 
 export interface AmyMood {
@@ -642,6 +648,7 @@ export interface AmyState {
     external: AmyActEntry[]
     evaluation: AmyActEntry[]
     self_action: AmyActEntry[]
+    pfca_regulation: AmyActEntry[]
     system: AmyActEntry[]
     final: AmyFinalEvaluationEntry[]
   }

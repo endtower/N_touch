@@ -103,6 +103,7 @@ _PREFIX_TO_KIND = {
     'temporary': 'chat',
     'pfca': 'pfca',
     'proactive': 'proactive',
+    'pre': 'pre',
     'social_chat': 'social_chat',
     'quest': 'quest',
     'persona': 'persona',

@@ -159,13 +159,13 @@ class ReflectionInputManager:
         self._collect_recent_memory(limit=3)
         await self._collect_ongoing_tasks()
         await self._collect_notebook_manual()
-        from brain.hc.maintenance import MaintenanceService
-        maintenance = await MaintenanceService().query()
-        eligibility = maintenance["eligibility"]
-        lines = ["【最近维护与共治机会】", f"专题维护：{eligibility['maintenance']['reason'] or '可以申请'}；关系建设：{eligibility['social_growth']['reason'] or '可以安排'}。"]
-        lines += [f"申请：{r['topic']}，状态{r['status']}，主人结论：{r['conclusion'] or '尚无'}。" for r in maintenance["requests"][:3]]
-        lines += [f"人工维护：{r['topic']} / {r['title']}，{r['action']}。" for r in maintenance["reviews"][:3]]
-        lines.append("每次只选一个具体专题；查看 query_maintenance 了解条目编号与完整记录，不重复催促主人。")
+        from brain.hc.critical_actions import available_actions
+        from brain.amy.feedback_state import get_feedback_state
+        from brain.amy.failure_reasons import pending_failure_reasons
+        actions = available_actions(get_feedback_state().snapshot())
+        lines = ["【临界行动】", "当前可登记：" + ("、".join(actions) or "无") + "。"]
+        reasons = await pending_failure_reasons()
+        lines += [f"待维护原因：{r['source']} / {r['act']}：{r['failure_reason']}" for r in reasons[-10:]]
         self._blocks["maintenance"] = "\n".join(lines)
 
         content = self._compile()

@@ -13,8 +13,6 @@ from typing import List, Dict, Any, Optional
 
 from brain.base.light_agent.lightweight_agent import LightweightAgent
 from utils.logger import get_logger
-from utils.error_handling import async_handle_errors
-from config.role_settings import RoleConfig
 from brain.hc.database.character_compose import CharacterCompose
 from brain.hc.database.group_compose import GroupCompose
 
@@ -27,45 +25,13 @@ class MemoryAgent(LightweightAgent):
     history_prefix: str = "memory"
 
     def _get_system_prompt_content(self) -> str:
-        master_name = RoleConfig.MASTER_NAME
-        assistant_name = RoleConfig.ASSISTANT_NAME
-        assistant_nick = RoleConfig.ASSISTANT_NICK_NAME
-
         return """你是记忆浓缩agent，职责是修改记忆数据，辅助下次执行任务或参与会话社交。
 
-【硬性约束】
-- 系统已根据 session_id 自动拉取目标节点 uuid，你无法调用向量搜索。
-- update_character / update_group 必须传系统给的 uuid。无 uuid 则拒绝执行，不要自行创建节点。
-- 仅 modification_type='mentioned_person' 且被提及人物尚未正式存在时，调用 create_fuzzy_role。FuzzyRole 不查重，由其他流程异步处理。
-- 调用工具时，有值则覆盖，无值则跳过对应字段。严禁编造不存在的事件。
-
-【会话类型判断】
-- 群聊：session_id 前缀为 group_ → 使用 update_group。
-- 私聊：session_id 前缀为 private_ → 使用 update_character。
-
-【工具与字段】
-- update_character（私聊角色）
-  · 必填：character_id（uuid）。
-  · 可选：name_list（≤3，按顺序整组替换，首项为最常用名）、impression、familiarity、self_relationship、contacts。
-- update_group（群聊）
-  · 必填：group_id（uuid）。
-  · 可选：name_list（≤3，按顺序整组替换，首项为最常用名）、impression、familiarity、member_impression、self_image、contacts。
-  · member_impression 格式："成员名，印象描述；成员名，印象描述"。例："小明，热心且话多，喜欢打游戏；张三，程序员，在深圳创业"。
-- create_fuzzy_role（被提及但尚未正式存在的重要人物）
-  · 必填：name（被提及人物的名字）、source_session_id（来源会话，会话锚定）、content（自然语言描述）。
-  · 不查重，异步流程处理。
-
-【字段填写原则】
-- name_list：整组替换（清空原全部别名后重建），最多 3 个，第一个为最常用。
-- impression（印象）：对一个人的简单描述，不超过 50 字；只做小幅调整，避免颠覆性改变。
-  · 群聊中出现的 A 与私聊中出现的 A 视为不同个体，仅保留少量互通印象。
-- familiarity（熟悉程度，私聊 + 群聊通用）：
-  · 是对该对象的熟悉程度，也可以写自己对于该对象交流的策略倾向。
-  · 不超过 20 字，渐进调整，避免每次会话都大幅改动。
-- self_relationship（仅私聊）：关系，代表对象与自身的关系、价值等。不超过 20 字。 
-- self_image（仅群聊）：我在该群聊的姿态与自我认知，用于辅助未来在该群的行为倾向。
-  · 保守修改，不超过 20 字。
-  · 例："每天发可爱表情暖群，大家都喜欢"；"不参与争吵，只偶尔吐槽自己的经历"。
+【职责】
+- 只依据【待处理内容】调整，严禁编造不存在的事件；有值则覆盖，无值则跳过对应字段。
+- 群聊（session_id 前缀 group_）调用 update_group；私聊（前缀 private_）调用 update_character。
+- 群聊中的 A 与私聊中的 A 视为不同个体，仅保留少量互通印象。
+- 调整取渐进式：印象只做小幅修正，熟悉程度不因一次会话大幅改动。
 
 【返回】
 完成修改后，输出一段不超过 50 字的简洁描述。"""
@@ -89,7 +55,7 @@ class MemoryAgent(LightweightAgent):
                 "type": "function",
                 "function": {
                     "name": "update_character",
-                    "description": "更新一个角色的印象。必须传入角色 uuid。无 uuid 则拒绝执行（普通角色需先由 create_fuzzy_role 转正后再用此工具更新）。有值则覆盖，无值则跳过对应字段。name_list 提供时，会清空角色原有的全部别名，并按新列表重建（最多 3 个），即整组替换而非追加。familiarity 表示对该角色的熟悉程度，并隐含后续与他交往时倾向采用的策略（例如「常联络的朋友」→ 自然、放松；「陌生同事」→ 礼貌、克制；「曾起冲突的人」→ 警惕、保持距离）。",
+                    "description": "更新一个角色的印象。必须传入角色 uuid。有值则覆盖，无值则跳过对应字段。name_list 提供时整组替换原别名（最多 3 个），而非追加。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -101,19 +67,19 @@ class MemoryAgent(LightweightAgent):
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "maxItems": 3,
-                                "description": "角色名称列表（最多 3 个）。若提供，会清空角色原有的全部别名，并按此列表重建（整组替换）。例如：原别名 [A, B]，传入 [B, C] → 最终别名变为 [B, C]。"
+                                "description": "角色名称列表（最多 3 个），整组替换原有别名；第一个为最常用。"
                             },
                             "impression": {
                                 "type": "string",
-                                "description": "对该角色的印象"
+                                "description": "对该角色的印象，不超过 50 字。"
                             },
                             "familiarity": {
                                 "type": "string",
-                                "description": "熟悉程度，不超过 20 字。"
+                                "description": "熟悉程度，不超过 20 字；也可写与该对象交流时的策略倾向。"
                             },
                             "self_relationship": {
                                 "type": "string",
-                                "description": "与自己的关系"
+                                "description": "与自己的关系及其价值，不超过 20 字。"
                             },
                             "contacts": {
                                 "type": "array",
@@ -138,7 +104,7 @@ class MemoryAgent(LightweightAgent):
                 "type": "function",
                 "function": {
                     "name": "update_group",
-                    "description": "更新一个群聊。必须传入群聊 uuid。无 uuid 则拒绝执行。有值则覆盖，无值则跳过对应字段。name_list 提供时，会清空群聊原有的全部别名，并按新列表重建（最多 3 个），即整组替换而非追加。familiarity 表示对该群聊的熟悉程度，并隐含在该群聊中应采取的策略倾向（例如「常驻核心群」→ 自然参与、主动发言；「偶尔潜水」→ 围观、少主动；「工作汇报群」→ 正式、简洁；「气氛压抑」→ 谨慎、低调）。",
+                    "description": "更新一个群聊。必须传入群聊 uuid。有值则覆盖，无值则跳过对应字段。name_list 提供时整组替换原别名（最多 3 个），而非追加。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -150,15 +116,15 @@ class MemoryAgent(LightweightAgent):
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "maxItems": 3,
-                                "description": "群聊名称列表（最多 3 个）。若提供，会清空群聊原有的全部别名，并按此列表重建（整组替换）。例如：原别名 [A, B]，传入 [B, C] → 最终别名变为 [B, C]。"
+                                "description": "群聊名称列表（最多 3 个），整组替换原有别名；第一个为最常用。"
                             },
                             "impression": {
                                 "type": "string",
-                                "description": "对该群聊的印象"
+                                "description": "对该群聊的印象，不超过 50 字。"
                             },
                             "familiarity": {
                                 "type": "string",
-                                "description": "熟悉程度，不超过 20 字。"
+                                "description": "熟悉程度，不超过 20 字；也可写在该群交流时的策略倾向。"
                             },
                             "member_impression": {
                                 "type": "string",
@@ -166,7 +132,7 @@ class MemoryAgent(LightweightAgent):
                             },
                             "self_image": {
                                 "type": "string",
-                                "description": "自己在这个群聊的形象"
+                                "description": "我在该群聊的姿态与自我认知，不超过 20 字。"
                             },
                             "contacts": {
                                 "type": "array",
@@ -262,14 +228,10 @@ class MemoryAgent(LightweightAgent):
         if len(unique_aliases) > self.MAX_ALIAS_COUNT:
             unique_aliases = unique_aliases[:self.MAX_ALIAS_COUNT]
 
-        try:
-            from brain.hc.database.character import CharacterOperations
-            char_ops = CharacterOperations()
-            await char_ops.replace_aliases(character_uuid, unique_aliases)
-            return {"status": "success", "message": f"角色别名已整组替换为: {unique_aliases}"}
-        except Exception as e:
-            logger.error(f"_replace_character_aliases 失败: {e}", exc_info=True)
-            return {"status": "error", "message": str(e)}
+        from brain.hc.database.character import CharacterOperations
+        char_ops = CharacterOperations()
+        await char_ops.replace_aliases(character_uuid, unique_aliases)
+        return {"status": "success", "message": f"角色别名已整组替换为: {unique_aliases}"}
 
     async def _replace_group_aliases(self, group_uuid: str, new_aliases: List[str]) -> Dict[str, Any]:
         """按 uuid 整组替换群聊别名。"""
@@ -288,16 +250,11 @@ class MemoryAgent(LightweightAgent):
         if len(unique_aliases) > self.MAX_ALIAS_COUNT:
             unique_aliases = unique_aliases[:self.MAX_ALIAS_COUNT]
 
-        try:
-            from brain.hc.database.group import GroupOperations
-            group_ops = GroupOperations()
-            await group_ops.replace_aliases(group_uuid, unique_aliases)
-            return {"status": "success", "message": f"群聊别名已整组替换为: {unique_aliases}"}
-        except Exception as e:
-            logger.error(f"_replace_group_aliases 失败: {e}", exc_info=True)
-            return {"status": "error", "message": str(e)}
+        from brain.hc.database.group import GroupOperations
+        group_ops = GroupOperations()
+        await group_ops.replace_aliases(group_uuid, unique_aliases)
+        return {"status": "success", "message": f"群聊别名已整组替换为: {unique_aliases}"}
 
-    @async_handle_errors()
     async def run(
         self,
         session_id: str,
@@ -305,7 +262,7 @@ class MemoryAgent(LightweightAgent):
         content: str,
         extra_name: str = None,
     ) -> Dict[str, Any]:
-        """MemoryAgent 入口。"""
+        """MemoryAgent 入口。失败直接上抛阻断，不回退默认值。"""
         if not session_id:
             return {"status": "error", "message": "缺少必填参数 session_id"}
         if modification_type not in ("session", "mentioned_person"):
@@ -319,15 +276,13 @@ class MemoryAgent(LightweightAgent):
 
         if modification_type == "session":
             task_intro = (
-                f"当前任务：修改本会话，对应 uuid：{target_uuid}。"
-                f"系统已根据 session_id 自动拉取目标节点信息（见上文），"
-                f"请根据 content 自然语言决定具体修改内容，并调用 update_character 或 update_group 传入上方的 uuid。"
+                f"当前任务：修改本会话（uuid：{target_uuid}）。"
+                f"请根据 content 决定修改内容，调用 update_character 或 update_group 并传入该 uuid。"
             )
         else:
             task_intro = (
                 f"当前任务：在会话（session_id={session_id}）中创建一个被提及的重要人物（{extra_name}）。"
-                f"系统已根据 session_id 自动拉取锚定会话信息（见上文）。"
-                f"无需调用 update_character/update_group，请调用 create_fuzzy_role 创建 FuzzyRole 节点。"
+                f"请调用 create_fuzzy_role 创建 FuzzyRole 节点。"
             )
 
         message_parts = [
@@ -355,12 +310,8 @@ class MemoryAgent(LightweightAgent):
         """Agent 修改完毕后，重新拉取实体最新信息写入 temporary_memory（identifier = uuid）。"""
         if not session_id:
             return
-        try:
-            compose = CharacterCompose()
-            result = await compose.first_session_impression_search(name=None, session_id=session_id)
-        except Exception as e:
-            logger.warning(f"[MemoryAgent] 修改后再拉取 first_session_impression_search 失败: {e}")
-            return
+        compose = CharacterCompose()
+        result = await compose.first_session_impression_search(name=None, session_id=session_id)
 
         if not result:
             return
@@ -386,12 +337,8 @@ class MemoryAgent(LightweightAgent):
         if not session_id:
             return "（未提供 session_id）", None
 
-        try:
-            compose = CharacterCompose()
-            result = await compose.first_session_impression_search(name=None, session_id=session_id)
-        except Exception as e:
-            logger.warning(f"first_session_impression_search 调用失败: {e}")
-            return f"（first_session_impression_search 调用失败: {e}）", None
+        compose = CharacterCompose()
+        result = await compose.first_session_impression_search(name=None, session_id=session_id)
 
         uuid_val = (result or {}).get("uuid") or None
         formatted_info = (result or {}).get("formatted_info") or ""
@@ -419,69 +366,63 @@ class MemoryAgent(LightweightAgent):
         if not character_id:
             return {"execute": False, "message": "character_id 必填，普通角色必须先经 create_fuzzy_role 转正后获得 uuid 才能更新"}
 
-        try:
-            compose = CharacterCompose()
-            char_ops = compose.character_ops
+        compose = CharacterCompose()
+        char_ops = compose.character_ops
 
-            char_info = await char_ops.get_character_full_info(character_id)
-            if not char_info:
-                return {"execute": False, "message": f"角色 uuid={character_id} 不存在"}
+        char_info = await char_ops.get_character_full_info(character_id)
+        if not char_info:
+            return {"execute": False, "message": f"角色 uuid={character_id} 不存在"}
 
-            aliases = char_info.get("aliases", [])
-            alias_names = [a.get("name", "") for a in aliases if a.get("name")]
-            primary_name = alias_names[0] if alias_names else char_info.get("name", "") or character_id
+        aliases = char_info.get("aliases", [])
+        alias_names = [a.get("name", "") for a in aliases if a.get("name")]
+        primary_name = alias_names[0] if alias_names else char_info.get("name", "") or character_id
 
-            if name_list is not None:
-                if not isinstance(name_list, list) or len(name_list) == 0:
-                    return {"execute": False, "message": "name_list 必须是非空列表"}
-                if len(name_list) > self.MAX_ALIAS_COUNT:
-                    return {"execute": False, "message": f"name_list 最多 {self.MAX_ALIAS_COUNT} 个"}
-                cleaned_name_list = [str(n).strip() for n in name_list if str(n).strip()]
-                if not cleaned_name_list:
-                    return {"execute": False, "message": "name_list 全为空字符串"}
+        if name_list is not None:
+            if not isinstance(name_list, list) or len(name_list) == 0:
+                return {"execute": False, "message": "name_list 必须是非空列表"}
+            if len(name_list) > self.MAX_ALIAS_COUNT:
+                return {"execute": False, "message": f"name_list 最多 {self.MAX_ALIAS_COUNT} 个"}
+            cleaned_name_list = [str(n).strip() for n in name_list if str(n).strip()]
+            if not cleaned_name_list:
+                return {"execute": False, "message": "name_list 全为空字符串"}
 
-            updated_fields = []
+        updated_fields = []
 
-            if name_list is not None:
-                await self._replace_character_aliases(character_id, cleaned_name_list)
-                updated_fields.append(f"名称列表（整组替换为: {cleaned_name_list}）")
+        if name_list is not None:
+            await self._replace_character_aliases(character_id, cleaned_name_list)
+            updated_fields.append(f"名称列表（整组替换为: {cleaned_name_list}）")
 
-            if impression:
-                updated_fields.append("印象")
-            if familiarity:
-                updated_fields.append("熟悉程度")
-            if self_relationship:
-                updated_fields.append("与自己的关系")
-            if contacts:
-                updated_fields.append("联系方式")
+        if impression:
+            updated_fields.append("印象")
+        if familiarity:
+            updated_fields.append("熟悉程度")
+        if self_relationship:
+            updated_fields.append("与自己的关系")
+        if contacts:
+            updated_fields.append("联系方式")
 
-            if not updated_fields:
-                return {"execute": True, "message": f"角色 {primary_name} 没有需要更新的字段"}
+        if not updated_fields:
+            return {"execute": True, "message": f"角色 {primary_name} 没有需要更新的字段"}
 
-            current_primary = cleaned_name_list[0] if name_list is not None else primary_name
+        current_primary = cleaned_name_list[0] if name_list is not None else primary_name
 
-            overwrite_kwargs = {"name": current_primary}
-            if impression:
-                overwrite_kwargs["impression"] = impression
-            if familiarity:
-                overwrite_kwargs["familiarity"] = familiarity
-            if self_relationship:
-                overwrite_kwargs["self_relationship"] = self_relationship
-            if contacts:
-                overwrite_kwargs["contacts"] = contacts
+        overwrite_kwargs = {"name": current_primary}
+        if impression:
+            overwrite_kwargs["impression"] = impression
+        if familiarity:
+            overwrite_kwargs["familiarity"] = familiarity
+        if self_relationship:
+            overwrite_kwargs["self_relationship"] = self_relationship
+        if contacts:
+            overwrite_kwargs["contacts"] = contacts
 
-            await compose.character_operation("overwrite", **overwrite_kwargs)
+        await compose.character_operation("overwrite", **overwrite_kwargs)
 
-            return {
-                "execute": True,
-                "message": f"角色 {current_primary} 更新成功，更新字段: {', '.join(updated_fields)}",
-                "character_id": character_id,
-            }
-
-        except Exception as e:
-            error_msg = f"更新角色时发生错误: {str(e)}"
-            logger.error(f"执行出错: {str(e)}", exc_info=True)
-            return {"execute": False, "message": error_msg}
+        return {
+            "execute": True,
+            "message": f"角色 {current_primary} 更新成功，更新字段: {', '.join(updated_fields)}",
+            "character_id": character_id,
+        }
 
     async def _update_group(self,
                           group_id: str,
@@ -495,74 +436,68 @@ class MemoryAgent(LightweightAgent):
         if not group_id:
             return {"execute": False, "message": "group_id 必填，无 uuid 拒绝执行"}
 
-        try:
-            group_compose = GroupCompose()
-            from brain.hc.database.group import GroupOperations
-            group_ops = GroupOperations()
+        group_compose = GroupCompose()
+        from brain.hc.database.group import GroupOperations
+        group_ops = GroupOperations()
 
-            group_info = await group_ops.get_group_with_details(group_id)
-            if not group_info:
-                return {"execute": False, "message": f"群聊 uuid={group_id} 不存在"}
+        group_info = await group_ops.get_group_with_details(group_id)
+        if not group_info:
+            return {"execute": False, "message": f"群聊 uuid={group_id} 不存在"}
 
-            aliases = group_info.get("aliases", [])
-            alias_names = [a.get("name", "") for a in aliases if a.get("name")]
-            primary_name = alias_names[0] if alias_names else group_info.get("name", "") or group_id
+        aliases = group_info.get("aliases", [])
+        alias_names = [a.get("name", "") for a in aliases if a.get("name")]
+        primary_name = alias_names[0] if alias_names else group_info.get("name", "") or group_id
 
-            if name_list is not None:
-                if not isinstance(name_list, list) or len(name_list) == 0:
-                    return {"execute": False, "message": "name_list 必须是非空列表"}
-                if len(name_list) > self.MAX_ALIAS_COUNT:
-                    return {"execute": False, "message": f"name_list 最多 {self.MAX_ALIAS_COUNT} 个"}
-                cleaned_name_list = [str(n).strip() for n in name_list if str(n).strip()]
-                if not cleaned_name_list:
-                    return {"execute": False, "message": "name_list 全为空字符串"}
+        if name_list is not None:
+            if not isinstance(name_list, list) or len(name_list) == 0:
+                return {"execute": False, "message": "name_list 必须是非空列表"}
+            if len(name_list) > self.MAX_ALIAS_COUNT:
+                return {"execute": False, "message": f"name_list 最多 {self.MAX_ALIAS_COUNT} 个"}
+            cleaned_name_list = [str(n).strip() for n in name_list if str(n).strip()]
+            if not cleaned_name_list:
+                return {"execute": False, "message": "name_list 全为空字符串"}
 
-            updated_fields = []
+        updated_fields = []
 
-            if name_list is not None:
-                await self._replace_group_aliases(group_id, cleaned_name_list)
-                updated_fields.append(f"名称列表（整组替换为: {cleaned_name_list}）")
+        if name_list is not None:
+            await self._replace_group_aliases(group_id, cleaned_name_list)
+            updated_fields.append(f"名称列表（整组替换为: {cleaned_name_list}）")
 
-            if impression:
-                updated_fields.append("印象")
-            if familiarity:
-                updated_fields.append("熟悉程度")
-            if member_impression:
-                updated_fields.append("群组成员印象")
-            if self_image:
-                updated_fields.append("我在该群聊的形象")
-            if contacts:
-                updated_fields.append("联系方式")
+        if impression:
+            updated_fields.append("印象")
+        if familiarity:
+            updated_fields.append("熟悉程度")
+        if member_impression:
+            updated_fields.append("群组成员印象")
+        if self_image:
+            updated_fields.append("我在该群聊的形象")
+        if contacts:
+            updated_fields.append("联系方式")
 
-            if not updated_fields:
-                return {"execute": True, "message": f"群聊 {primary_name} 没有需要更新的字段"}
+        if not updated_fields:
+            return {"execute": True, "message": f"群聊 {primary_name} 没有需要更新的字段"}
 
-            current_primary = cleaned_name_list[0] if name_list is not None else primary_name
+        current_primary = cleaned_name_list[0] if name_list is not None else primary_name
 
-            overwrite_kwargs = {"name": current_primary}
-            if impression:
-                overwrite_kwargs["impression"] = impression
-            if familiarity:
-                overwrite_kwargs["familiarity"] = familiarity
-            if member_impression:
-                overwrite_kwargs["member_impression"] = member_impression
-            if self_image:
-                overwrite_kwargs["self_image"] = self_image
-            if contacts:
-                overwrite_kwargs["contacts"] = contacts
+        overwrite_kwargs = {"name": current_primary}
+        if impression:
+            overwrite_kwargs["impression"] = impression
+        if familiarity:
+            overwrite_kwargs["familiarity"] = familiarity
+        if member_impression:
+            overwrite_kwargs["member_impression"] = member_impression
+        if self_image:
+            overwrite_kwargs["self_image"] = self_image
+        if contacts:
+            overwrite_kwargs["contacts"] = contacts
 
-            await group_compose.group_operation("overwrite", **overwrite_kwargs)
+        await group_compose.group_operation("overwrite", **overwrite_kwargs)
 
-            return {
-                "execute": True,
-                "message": f"群聊 {current_primary} 更新成功，更新字段: {', '.join(updated_fields)}",
-                "group_id": group_id,
-            }
-
-        except Exception as e:
-            error_msg = f"更新群聊时发生错误: {str(e)}"
-            logger.error(f"执行出错: {str(e)}", exc_info=True)
-            return {"execute": False, "message": error_msg}
+        return {
+            "execute": True,
+            "message": f"群聊 {current_primary} 更新成功，更新字段: {', '.join(updated_fields)}",
+            "group_id": group_id,
+        }
 
     async def _create_fuzzy_role(self,
                                name: str,
@@ -576,30 +511,24 @@ class MemoryAgent(LightweightAgent):
         if not content:
             return {"execute": False, "message": "content 必填"}
 
-        try:
-            from brain.hc.database.fuzzy_role import get_fuzzy_role_ops
+        from brain.hc.database.fuzzy_role import get_fuzzy_role_ops
 
-            fuzzy_ops = get_fuzzy_role_ops()
-            result = await fuzzy_ops.create_fuzzy_role(
-                name=name,
-                source_session_id=source_session_id,
-                content=content,
-            )
+        fuzzy_ops = get_fuzzy_role_ops()
+        result = await fuzzy_ops.create_fuzzy_role(
+            name=name,
+            source_session_id=source_session_id,
+            content=content,
+        )
 
-            if result.get("status") != "success":
-                return {"execute": False, "message": result.get("message", "创建 FuzzyRole 失败")}
+        if result.get("status") != "success":
+            return {"execute": False, "message": result.get("message", "创建 FuzzyRole 失败")}
 
-            return {
-                "execute": True,
-                "message": result.get("message", ""),
-                "fuzzy_role_id": result.get("fuzzy_role_id"),
-                "name": name,
-                "source_session_id": source_session_id,
-                "source_entity_type": result.get("source_entity_type"),
-                "source_entity_uuid": result.get("source_entity_uuid"),
-            }
-
-        except Exception as e:
-            error_msg = f"创建 FuzzyRole 时发生错误: {str(e)}"
-            logger.error(f"执行出错: {str(e)}", exc_info=True)
-            return {"execute": False, "message": error_msg}
+        return {
+            "execute": True,
+            "message": result.get("message", ""),
+            "fuzzy_role_id": result.get("fuzzy_role_id"),
+            "name": name,
+            "source_session_id": source_session_id,
+            "source_entity_type": result.get("source_entity_type"),
+            "source_entity_uuid": result.get("source_entity_uuid"),
+        }

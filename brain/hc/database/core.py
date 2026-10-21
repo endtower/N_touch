@@ -96,6 +96,42 @@ class MemoryDatabase:
         """显式就绪钩子（SystemCore start 用）：完成连接 + 建表 + 迁移，先于业务并发。"""
         await self._ensure_connection()
 
+    async def conversation_allowed(self, session_id: str) -> bool:
+        """该会话所属社交实体是否已在记忆里勾选「允许 conversation」。
+
+        角色表先于群组表匹配；会话 id 自带 private_/group_ 前缀，两者不会重名。
+        """
+        if not session_id:
+            return False
+        conn = await self._ensure_connection()
+        for table in ("characters", "groups"):
+            cur = await conn.execute(f"SELECT contacts, allow_conversation FROM {table}")
+            for row in await cur.fetchall():
+                contacts = json.loads(row["contacts"] or "[]")
+                if any(c.get("session_id") == session_id for c in contacts):
+                    return bool(row["allow_conversation"])
+        return False
+
+    async def get_conversation_allowed_session_ids(self) -> set:
+        """一次性返回所有「允许 conversation」实体的 session_id 集合。
+
+        角色表与群组表都扫，只取 allow_conversation=1 的实体，收集其 contacts 里的
+        每个 session_id。供通讯录一次性标注放行会话，避免逐会话调用
+        conversation_allowed() 引发的 O(n²) 全表扫。
+        """
+        conn = await self._ensure_connection()
+        allowed: set = set()
+        for table in ("characters", "groups"):
+            cur = await conn.execute(f"SELECT contacts, allow_conversation FROM {table}")
+            for row in await cur.fetchall():
+                if not row["allow_conversation"]:
+                    continue
+                for c in json.loads(row["contacts"] or "[]"):
+                    sid = c.get("session_id")
+                    if sid:
+                        allowed.add(sid)
+        return allowed
+
     async def _create_tables(self) -> None:
         """建表。"""
         assert self._conn is not None
@@ -110,6 +146,7 @@ class MemoryDatabase:
                 familiarity TEXT DEFAULT '',
                 contacts TEXT DEFAULT '[]',
                 relationship TEXT DEFAULT '',
+                allow_conversation INTEGER DEFAULT 0,
                 affinity_events TEXT DEFAULT '[]',
                 usage_count INTEGER DEFAULT 0,
                 last_used_at TEXT DEFAULT '',
@@ -129,6 +166,7 @@ class MemoryDatabase:
                 member_impression TEXT DEFAULT '',
                 contacts TEXT DEFAULT '[]',
                 self_image TEXT DEFAULT '',
+                allow_conversation INTEGER DEFAULT 0,
                 usage_count INTEGER DEFAULT 0,
                 last_used_at TEXT DEFAULT '',
                 created_at TEXT DEFAULT '',
@@ -144,10 +182,13 @@ class MemoryDatabase:
             -- 2026-10-11 收敛：title（标题）+ context（要传递给下次启动时的上下文）
             -- + next_occurrence（下次唤醒时间）。status 仅 active / expired。
             -- 触发即过期（task_truck 交付 PFCA 后自动置 expired），续办靠新建。
+            -- 2026-10-19 新增 kind：onetime（一次性，到期即过期）/ ongoing（持续任务，
+            -- 无时间点、永不到期，由 PRE 规则层巡检）。
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY,
                 title TEXT DEFAULT '',
                 context TEXT DEFAULT '',
+                kind TEXT DEFAULT 'onetime',
                 status TEXT DEFAULT 'active',
                 next_occurrence TEXT DEFAULT '',
                 start_time TEXT DEFAULT '',
@@ -165,6 +206,9 @@ class MemoryDatabase:
                 summary TEXT DEFAULT '',
                 category TEXT DEFAULT 'speech',
                 persona TEXT DEFAULT '',
+                retrieval_count INTEGER NOT NULL DEFAULT 0,
+                last_maintained_at REAL,
+                manual_maintenance_count INTEGER NOT NULL DEFAULT 0,
                 title_vector BLOB,
                 is_vectorized INTEGER DEFAULT 0,
                 start_time TEXT DEFAULT '',
@@ -190,27 +234,18 @@ class MemoryDatabase:
                 vector BLOB NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS maintenance_reviews (
-                review_id TEXT PRIMARY KEY, kind TEXT NOT NULL, item_id TEXT NOT NULL,
-                title TEXT NOT NULL, revision TEXT NOT NULL, topic TEXT NOT NULL,
-                action TEXT NOT NULL, reviewed_at REAL NOT NULL
+            CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS critical_actions (
+                action_id TEXT PRIMARY KEY, action TEXT NOT NULL, axis TEXT NOT NULL,
+                title TEXT NOT NULL, details_json TEXT NOT NULL, task_ids_json TEXT NOT NULL DEFAULT '[]',
+                issues_json TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL,
+                reset_applied INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL,
+                error TEXT NOT NULL DEFAULT '', archived_at REAL
             );
-            CREATE INDEX IF NOT EXISTS idx_reviews_item ON maintenance_reviews(kind, item_id, reviewed_at);
-            CREATE TABLE IF NOT EXISTS memory_usage_events (
-                kind TEXT NOT NULL, item_id TEXT NOT NULL, event_type TEXT NOT NULL,
-                scope TEXT NOT NULL, revision TEXT NOT NULL, used_at REAL NOT NULL,
-                PRIMARY KEY(kind, item_id, event_type, scope, revision)
-            );
-            CREATE TABLE IF NOT EXISTS maintenance_requests (
-                request_id TEXT PRIMARY KEY, topic TEXT NOT NULL, reason TEXT NOT NULL,
-                items_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-                created_at REAL NOT NULL, updated_at REAL NOT NULL,
-                defer_until REAL NOT NULL DEFAULT 0, conclusion TEXT NOT NULL DEFAULT ''
-            );
-            CREATE TABLE IF NOT EXISTS growth_actions (
-                action_id TEXT PRIMARY KEY, axis TEXT NOT NULL, reference_json TEXT NOT NULL,
-                title TEXT NOT NULL, reason TEXT NOT NULL, created_at REAL NOT NULL,
-                effect_applied INTEGER NOT NULL DEFAULT 0
+            CREATE TABLE IF NOT EXISTS failure_reason_cache (
+                reason_id TEXT PRIMARY KEY, source TEXT NOT NULL, session_id TEXT NOT NULL,
+                title TEXT NOT NULL, act TEXT NOT NULL, failure_reason TEXT NOT NULL,
+                created_at REAL NOT NULL
             );
 
             -- 模糊角色表（独立，唯一单独建表的依附性节点）
@@ -230,24 +265,70 @@ class MemoryDatabase:
         await self._conn.commit()
         await self._migrate_tasks_table()
         await self._migrate_bequests_table()
+        await self._migrate_conversation_flag()
+        await self._migrate_tasks_kind()
+        await self._migrate_critical_actions_archive()
+
+    async def _migrate_critical_actions_archive(self) -> None:
+        """维护申请增加归档时间；不改 state，避免 recover_resets 漏挑待重置记录。"""
+        assert self._conn is not None
+        cur = await self._conn.execute("PRAGMA table_info(critical_actions)")
+        cols = {r["name"] for r in await cur.fetchall()}
+        if "archived_at" not in cols:
+            await self._conn.execute(
+                "ALTER TABLE critical_actions ADD COLUMN archived_at REAL"
+            )
+            await self._conn.commit()
+
+    async def _migrate_tasks_kind(self) -> None:
+        """任务区分一次性 / 持续任务（老数据一律按 onetime 处理）。"""
+        assert self._conn is not None
+        cur = await self._conn.execute("PRAGMA table_info(tasks)")
+        cols = {r["name"] for r in await cur.fetchall()}
+        if "kind" not in cols:
+            await self._conn.execute(
+                "ALTER TABLE tasks ADD COLUMN kind TEXT DEFAULT 'onetime'"
+            )
+            await self._conn.commit()
+
+    async def _migrate_conversation_flag(self) -> None:
+        """社交实体增加 conversation 放行开关（角色/群组各一列，默认关闭）。"""
+        assert self._conn is not None
+        for table in ("characters", "groups"):
+            cur = await self._conn.execute(f"PRAGMA table_info({table})")
+            cols = {r["name"] for r in await cur.fetchall()}
+            if "allow_conversation" not in cols:
+                await self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN allow_conversation INTEGER DEFAULT 0"
+                )
+        await self._conn.commit()
 
     async def _migrate_bequests_table(self) -> None:
-        """经验表结构迁移（2026-10-01：新增 persona 人格绑定标签列）。
-
-        `CREATE TABLE IF NOT EXISTS` 不会改动已存在的旧表，旧库补一列
-        （ALTER TABLE ADD COLUMN，存量行默认 ''＝全局通用）。
-        幂等：已含 persona 列时直接返回（零开销）。迁移失败直接上抛崩溃阻断。
-        """
+        """经验统计独立于情感系统；旧维护记录只用于一次性迁入人工统计。"""
         assert self._conn is not None
         cur = await self._conn.execute("PRAGMA table_info(bequests)")
         cols = {r["name"] for r in await cur.fetchall()}
-        if "persona" in cols:
-            return
-
-        logger.info("bequests 表结构迁移：新增 persona 人格绑定标签列")
-        await self._conn.execute(
-            "ALTER TABLE bequests ADD COLUMN persona TEXT DEFAULT ''"
-        )
+        for name, definition in {
+            "persona": "TEXT DEFAULT ''", "retrieval_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_maintained_at": "REAL", "manual_maintenance_count": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if name not in cols:
+                await self._conn.execute(f"ALTER TABLE bequests ADD COLUMN {name} {definition}")
+        done = await (await self._conn.execute("SELECT 1 FROM schema_migrations WHERE name='experience_statistics_v1'")).fetchone()
+        if not done:
+            tables = {r['name'] for r in await (await self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()}
+            if "memory_usage_events" in tables:
+                await self._conn.execute("""UPDATE bequests SET retrieval_count=(SELECT count(*) FROM memory_usage_events
+                    WHERE kind='experience' AND item_id=bequests.bequest_id AND event_type IN ('vector_returned','returned'))""")
+            if "maintenance_reviews" in tables:
+                await self._conn.execute("""UPDATE bequests SET
+                    manual_maintenance_count=(SELECT count(*) FROM maintenance_reviews WHERE kind='experience' AND item_id=bequests.bequest_id),
+                    last_maintained_at=(SELECT max(reviewed_at) FROM maintenance_reviews WHERE kind='experience' AND item_id=bequests.bequest_id)""")
+            # 旧申请与重置台账封存，运行路径不再读取或补发其中的效果。
+            for name in ("maintenance_reviews", "memory_usage_events", "maintenance_requests", "growth_actions"):
+                if name in tables and "retired_" + name not in tables:
+                    await self._conn.execute(f"ALTER TABLE {name} RENAME TO retired_{name}")
+            await self._conn.execute("INSERT INTO schema_migrations VALUES ('experience_statistics_v1')")
         await self._conn.commit()
 
     async def _migrate_tasks_table(self) -> None:

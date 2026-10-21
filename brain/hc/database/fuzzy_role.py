@@ -30,7 +30,8 @@ class FuzzyRoleOperations:
         if not source_session_id:
             return {"found": False, "entity_type": None, "entity_uuid": None}
 
-        session_type = source_session_id.split("_", 1)[0] if "_" in source_session_id else ""
+        from adapt.session_identity import session_scope
+        session_type = session_scope(source_session_id)
 
         if session_type == "group":
             group_ops = GroupOperations()

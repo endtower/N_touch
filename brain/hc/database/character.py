@@ -94,6 +94,7 @@ class CharacterOperations:
           impression: str    — 印象（单值）
           familiarity: str   — 熟悉度（单值）
           relationship: str  — 与 00000000 的关系（单值）
+          allow_conversation: bool — 是否允许 conversation_agent 对该角色的会话发起对话
         传 None 的字段跳过不修改。返回 False 表示角色 uuid 不存在。
         """
         if not uuid:
@@ -122,6 +123,9 @@ class CharacterOperations:
         if fields.get("relationship") is not None:
             sets.append("relationship=?")
             params.append(fields["relationship"])
+        if fields.get("allow_conversation") is not None:
+            sets.append("allow_conversation=?")
+            params.append(1 if fields["allow_conversation"] else 0)
 
         if sets:
             params.append(uuid)
@@ -131,8 +135,9 @@ class CharacterOperations:
             )
             await conn.commit()
 
-        # 描述性字段变更后重新向量化（内部自行处理未找到的兜底）
-        await self.update_character_vector(uuid)
+        # 仅切换放行开关不影响描述文本，避免无谓的向量重算
+        if set(fields) - {"allow_conversation"}:
+            await self.update_character_vector(uuid)
         return True
 
     async def delete_character(self, uuid: str) -> bool:
@@ -202,6 +207,7 @@ class CharacterOperations:
             "familiarities": [{"content": row["familiarity"]}] if row["familiarity"] else [],
             "contacts": json.loads(row["contacts"] or "[]"),
             "relationships_with_default": [{"type": row["relationship"]}] if row["relationship"] else [],
+            "allow_conversation": bool(row["allow_conversation"]),
             "affinity_events": json.loads(row["affinity_events"] or "[]"),
             "usage_count": row["usage_count"],
             "last_used_at": row["last_used_at"],

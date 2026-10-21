@@ -170,6 +170,11 @@ class MessageRepository:
                 position INTEGER DEFAULT -1,
                 PRIMARY KEY (session_id, consumer_id)
             );
+            CREATE TABLE IF NOT EXISTS session_routes (
+                session_id TEXT PRIMARY KEY, platform TEXT NOT NULL,
+                connection_id TEXT NOT NULL, remote_session_id TEXT NOT NULL,
+                generation TEXT NOT NULL DEFAULT ''
+            );
             """
         )
         await conn.commit()
@@ -333,6 +338,16 @@ class MessageRepository:
             session_update["remark"] = session_info["remark"]
 
         try:
+            if "platform" in session_info:
+                route = (str(session_info["platform"]), str(session_info["connection_id"]),
+                         str(session_info["remote_session_id"]), str(session_info.get("generation", "")))
+                existing = await conn.execute("SELECT platform,connection_id,remote_session_id,generation "
+                                              "FROM session_routes WHERE session_id=?", (session_id,))
+                old_route = await existing.fetchone()
+                if old_route is not None and tuple(old_route) != route:
+                    raise ValidationError("会话来源冲突，拒绝改写已有发送目标")
+                await conn.execute("INSERT OR IGNORE INTO session_routes VALUES (?,?,?,?,?)",
+                                   (session_id, *route))
             await conn.execute(
                 """INSERT INTO sessions (session_id, session_name, remark, last_update_time)
                    VALUES (?, ?, ?, ?)
@@ -345,7 +360,10 @@ class MessageRepository:
             )
             inserted, skipped = await self._insert_messages(conn, session_id, message_list)
             await conn.commit()
-        except aiosqlite.Error as e:
+        except (aiosqlite.Error, ValidationError) as e:
+            await conn.rollback()
+            if isinstance(e, ValidationError):
+                raise
             # 写入失败绝不吞掉：包装为 StorageError，由装饰器 raise_on 崩溃阻断
             raise StorageError(f"SQLite 写入失败 (session={session_id}): {e}") from e
 
@@ -359,6 +377,21 @@ class MessageRepository:
             "stored_at": str(self._db_path),
             "total_messages_stored": len(message_list),
         }
+
+    async def session_route(self, session_id: str) -> dict | None:
+        """Explicit source routing; historical numeric QQ sessions have a narrow fallback."""
+        conn = await self._ensure_connection()
+        cursor = await conn.execute("SELECT * FROM session_routes WHERE session_id=?", (session_id,))
+        row = await cursor.fetchone()
+        if row is not None:
+            return dict(row)
+        scope, sep, identity = session_id.partition("_")
+        if sep and scope in ("private", "group") and identity.isascii() and identity.isdigit():
+            cursor = await conn.execute("SELECT 1 FROM sessions WHERE session_id=?", (session_id,))
+            if await cursor.fetchone() is not None:
+                return {"session_id": session_id, "platform": "qq", "connection_id": "onebot",
+                        "remote_session_id": session_id, "generation": ""}
+        return None
 
     async def _insert_messages(
         self, conn: aiosqlite.Connection, session_id: str,

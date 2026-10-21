@@ -4,12 +4,15 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import asdict
 
 import aiosqlite
 from aiohttp import web
 
 from adapt.onebot.channel import OneBotChannel
 from adapt.onebot.parser import parse_onebot_event
+from adapt.bridge.config import load_bridge_config
+from adapt.bridge.runtime import BridgeRuntime
 from adapt.protocol import MessageSegment, OutboundPayload, OutboundTarget, SessionScope
 from ingress_config import api_port, onebot_config, onebot_enabled, service_token
 from memory.message_handler import MessageHandler
@@ -22,12 +25,14 @@ SHUTDOWN_EVENT = web.AppKey("ingress_shutdown", asyncio.Event)
 
 
 class IngressRuntime:
-    def __init__(self, channel=None, repository=None):
+    def __init__(self, channel=None, repository=None, bridge_config=None):
         self.channel = channel if channel is not None else (OneBotChannel(onebot_config()) if onebot_enabled() else None)
         self.repo = repository if repository is not None else MessageRepository()
         self.inbox = None
         self._inbox_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
+        bridge_config = bridge_config if bridge_config is not None else load_bridge_config()
+        self.bridge = BridgeRuntime(bridge_config, self.repo, self._write_lock) if bridge_config.enabled else None
         self._wake = asyncio.Event()
         self._media_wake = asyncio.Event()
         self._tasks = []
@@ -58,6 +63,8 @@ class IngressRuntime:
                 self.channel.bind_raw_message_sink(self.capture)
                 await self.channel.start()
             self._tasks = [asyncio.create_task(self._normalize_loop()), asyncio.create_task(self._media_loop())]
+            if self.bridge:
+                await self.bridge.start()
             self.ready = True
         except BaseException:
             await self.stop()
@@ -65,6 +72,8 @@ class IngressRuntime:
 
     async def stop(self):
         self.ready = False
+        if self.bridge:
+            await self.bridge.stop()
         # 先切断外部流入，再取消处理；未完成事件留在磁盘，下次继续。
         if self.channel is not None:
             await self.channel.stop()
@@ -190,6 +199,7 @@ class IngressRuntime:
         return {"service": "abyss-ingress", "instance": str(data_root()), "ready": self._healthy(),
                 "onebot_enabled": self.channel is not None,
                 "onebot_connected": bool(self.channel and self.channel.is_connected()),
+                "bridge": await self.bridge.status() if self.bridge else {"enabled": False},
                 "pending": counts, "last_error": self._capture_error or self.last_error,
                 "uptime_sec": round(time.time() - self.started_at, 1)}
 
@@ -248,7 +258,9 @@ def build_app(runtime=None):
         async with runtime._write_lock:
             # 本服务不初始化全局 MessageHandler；仅复用标准化与仓库。
             from config.role_settings import role_config
-            payload = {"session_info": {"session_id": f"{target.scope.value}_{target.target_id}"},
+            sid = f"{target.scope.value}_{target.target_id}"
+            payload = {"session_info": {"session_id": sid, "platform": "qq", "connection_id": "onebot",
+                                         "remote_session_id": sid, "generation": ""},
                        "message_list": [{"message_id": message_id, "user_id": "system",
                            "user_name": role_config.ASSISTANT_NAME, "timestamp": int(time.time()),
                            "content_text": "".join(s.to_text() for s in segments),
@@ -262,19 +274,28 @@ def build_app(runtime=None):
         asyncio.get_running_loop().call_later(0.2, lambda: app[SHUTDOWN_EVENT].set())
         return web.json_response({"ok": True})
 
+    async def bridge_send(request):
+        if runtime.bridge is None:
+            raise NetworkError("通用桥接已禁用")
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get("request_id"), str):
+            raise ValueError("request_id 必须为字符串")
+        return web.json_response(asdict(await runtime.bridge.submit(body["request_id"])))
+
     app.cleanup_ctx.append(lifecycle)
     app[SHUTDOWN_EVENT] = asyncio.Event()
     app.router.add_get("/health", health)
     app.router.add_get("/v1/status", status)
     app.router.add_post("/v1/onebot-api", api)
     app.router.add_post("/v1/send", send)
+    app.router.add_post("/v1/bridge/send", bridge_send)
     app.router.add_post("/v1/shutdown", shutdown)
     return app
 
 
 async def run_service(port=None):
     app = build_app()
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log=None)
     try:
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", port if port is not None else api_port())

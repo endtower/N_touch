@@ -173,7 +173,7 @@ class MediaDownloader:
                         seg.data["local_path"] = str(rel_path).replace("\\", "/")
                         seg.data["local_downloaded_at"] = datetime.now().isoformat()
                         seg.data["local_size_bytes"] = len(content)
-                        logger.info(
+                        logger.debug(
                             f"[Media] downloaded: {rel_path} "
                             f"({size_mb:.2f}MB, sub_type={sub_type})"
                         )

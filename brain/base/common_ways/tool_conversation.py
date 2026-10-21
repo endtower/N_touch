@@ -11,7 +11,7 @@ conversation 与 social_chat 各自的 ToolManager 只做目标注入与专有�
   （首条立即发送，后续条按打字速度模拟延迟、上限封顶），
   省去"每条等 tool 返回再发下一条"的多轮调用。
 - fail-fast：参数问题（空消息 / 文件名非法 / 图片不存在 / preflight 失败）raise
-  ValueError 交由 LLM 自纠；路由发送失败、平台未返回 message_id 直接抛错阻断。
+  ValueError 交由 LLM 自纠；即时通道无 message_id 抛错，桥接回执按实际阶段返回，结果不明不重发。
 """
 
 import asyncio
@@ -20,6 +20,8 @@ from typing import Any, Callable, Dict, List, Optional
 from utils.logger import get_logger
 from adapt import OutboundTarget, OutboundPayload, SessionScope
 from adapt.router import get_outbound_router
+from adapt.bridge.contract import SendReceipt
+from adapt.session_identity import parse_session_id
 from adapt.message_segments import text_segment, image_segment
 from brain.attachments import resolve_media_file, preflight
 from brain.base.common_ways.tool_handlers import ToolHandlers
@@ -139,13 +141,15 @@ class ToolConversation(ToolHandlers):
         max_parts = (1 if count >= 300 else 2) if limited else 3
         omitted = lines[max_parts:]
         out_segments = [text_segment(ln) for ln in lines[:max_parts]]
-        await cls.send_segments_with_typing(
+        receipts = await cls.send_segments_with_typing(
             scope, target_id, out_segments,
             typing_delay_per_char=typing_delay_per_char,
+            session_id=session_id,
         )
-        if on_sent is not None:
+        bridge_receipts = [receipt for receipt in (receipts or []) if isinstance(receipt, SendReceipt)]
+        if on_sent is not None and (not bridge_receipts or all(r.status == "observed" for r in bridge_receipts)):
             on_sent("\n".join(lines[:max_parts]))
-        result = cls._render_send_result(len(out_segments))
+        result = cls._render_bridge_result(bridge_receipts) if bridge_receipts else cls._render_send_result(len(out_segments))
         # 发送本次长篇后立即告知下一轮约束；正常发送不添加提示。
         pressure = await get_message_store().get_speech_pressure(session_id)
         if not pressure["user_replied"] and pressure["characters"] >= 150:
@@ -191,6 +195,7 @@ class ToolConversation(ToolHandlers):
         await cls.send_segments_with_typing(
             scope, target_id, [image_seg],
             typing_delay_per_char=typing_delay_per_char,
+            session_id=session_id,
         )
         return cls._render_send_result(1, image=(image or "").strip())
 
@@ -202,7 +207,8 @@ class ToolConversation(ToolHandlers):
         target_id: str,
         out_segments: List[Any],
         typing_delay_per_char: float = TYPING_DELAY_PER_CHAR,
-    ) -> List[str]:
+        session_id: str | None = None,
+    ) -> List[str | SendReceipt]:
         """带打字节奏逐条发送的机械原语（fail-fast：任何条发送失败直接抛错阻断）。
 
         发送节奏：第一条立即发送（LLM 生成耗时视作拟稿时间）；后续条按
@@ -228,7 +234,7 @@ class ToolConversation(ToolHandlers):
             raise ValueError("send_segments_with_typing 没有任何待发送条")
 
         router = await get_outbound_router()
-        message_ids: List[str] = []
+        message_ids: List[str | SendReceipt] = []
 
         for idx, seg in enumerate(out_segments):
             # 第一条不延时立即发送；后续条模拟真人打字节奏（上限封顶 MAX_TYPING_DELAY）
@@ -247,21 +253,27 @@ class ToolConversation(ToolHandlers):
                 )
                 await asyncio.sleep(per_seg_typing)
 
-            message_id = await router.send(
-                platform="qq",
-                target=OutboundTarget(scope=scope, target_id=target_id),
-                payload=OutboundPayload(segments=[seg]),
-            )
+            message_id = await router.send_to_session(
+                session_id or f"{scope.value}_{target_id}", OutboundPayload(segments=[seg]))
             if not message_id:
                 raise RuntimeError(
                     f"send_segments_with_typing 第 {idx + 1}/{len(out_segments)} 条发送失败："
                     "平台未返回 message_id"
                 )
             message_ids.append(message_id)
+            if isinstance(message_id, SendReceipt) and message_id.status in ("unknown", "prepared", "rejected", "failed"):
+                break  # Do not submit the remaining parts after an uncertain or failed send.
 
         return message_ids
 
     # ============ 内部辅助 ============
+
+    @staticmethod
+    def _render_bridge_result(receipts: list[SendReceipt]) -> str:
+        labels = {"queued": "已受理，等待执行", "actioned": "已执行发送，尚未在界面确认",
+                  "observed": "已在界面观察到发出，未证明对方收到", "unknown": "发送结果不明确",
+                  "prepared": "请求已保存，尚未确认受理", "rejected": "请求被拒绝", "failed": "发送失败"}
+        return "；".join(labels.get(receipt.status, "发送结果不明确") for receipt in receipts) + "。不要重复发送或补发；由用户核对平台状态。"
 
     @staticmethod
     def _resolve_target(session_id: str):
@@ -269,14 +281,10 @@ class ToolConversation(ToolHandlers):
 
         格式非法直接 raise ValueError（不做静默默认路由，防止错发目标）。
         """
-        sid = session_id or ""
-        if sid.startswith("group_"):
-            return SessionScope.GROUP, sid.split("_", 1)[1]
-        if sid.startswith("private_"):
-            return SessionScope.PRIVATE, sid.split("_", 1)[1]
-        raise ValueError(
-            f"session_id 格式非法: {session_id!r}（必须为 'group_xxx' / 'private_xxx'）"
-        )
+        parsed = parse_session_id(session_id or "")
+        if parsed.scope not in ("private", "group"):
+            raise ValueError("只允许向已知的私聊或群聊发送")
+        return SessionScope(parsed.scope), parsed.identity
 
     @staticmethod
     def _build_image_segment(image: str):

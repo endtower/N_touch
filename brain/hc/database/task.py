@@ -7,6 +7,14 @@ next_occurrence（下次唤醒时间）。status 仅 active / expired。
 语义（2026-10-11 收敛）：任务一次性——到点被 task_truck 交付 PFCA 后即自动置
 expired，不再回写；如需接续，由 PFCA 经 quest_agent 重新登记一条新任务。
 deadline / stage / brief / conclusion / notes 等旧字段与更新语义一并移除。
+
+2026-10-14 补充：新增受控回写（update_task）——仅供 Quest 把任务笔记并进
+对应事项时改写 active 任务的 context / next_occurrence。登记与「到点即过期」
+的语义不变；expired 任务不可回写。
+
+2026-10-19 补充：新增 kind 区分两类事项——
+- onetime（默认）：一次性，到点由 task_truck 交付并置 expired。
+- ongoing：持续任务，没有时间点、永不到期，由 PRE 规则层巡检后交给判断层。
 """
 
 from datetime import datetime
@@ -21,6 +29,10 @@ logger = get_logger(__name__, "DEBUG")
 # 任务状态常量
 TASK_STATUS_ACTIVE = "active"
 TASK_STATUS_EXPIRED = "expired"
+
+# 任务类型常量
+TASK_KIND_ONETIME = "onetime"
+TASK_KIND_ONGOING = "ongoing"
 
 # 已到处理时间的短语前缀（_calculate_time_until 的过期分支产出，
 # 调用方据此判断是否叠加「下次处理时间为」前缀——见 format_task_by_id / format_tasks_brief）
@@ -56,6 +68,13 @@ class TaskOperations:
     def __init__(self):
         self.db = get_memory_db()
 
+    async def count_active_tasks(self) -> int:
+        """返回当前 status=active 的事项数量。"""
+        conn = await self.db._ensure_connection()
+        cur = await conn.execute("SELECT COUNT(*) AS total FROM tasks WHERE status='active'")
+        row = await cur.fetchone()
+        return row["total"]
+
     async def get_task_id_by_title(self, title: str) -> Optional[str]:
         """通过 title 精确查找任务。"""
         if not title:
@@ -66,11 +85,13 @@ class TaskOperations:
         return row["task_id"] if row else None
 
     async def create_task(self, title: str, context: str, next_occurrence: str = "",
-                          status: str = TASK_STATUS_ACTIVE) -> str:
+                          status: str = TASK_STATUS_ACTIVE,
+                          kind: str = TASK_KIND_ONETIME) -> str:
         """创建任务。
 
         title 为标题；context 为要传递给下次启动时的上下文（目的、进展、线索等）；
-        next_occurrence 为下次唤醒时间（ISO 8601）。
+        next_occurrence 为下次唤醒时间（ISO 8601），持续任务留空；
+        kind 为任务类型：onetime / ongoing。
         """
         current_time = datetime.now().isoformat()
         task_id = generate_timestamp_id("Task")
@@ -78,27 +99,63 @@ class TaskOperations:
         # 任务不落向量（2026-09-19）：任务无语义检索消费方。
         conn = await self.db._ensure_connection()
         await conn.execute(
-            """INSERT INTO tasks (task_id, title, context, status,
+            """INSERT INTO tasks (task_id, title, context, kind, status,
                next_occurrence, start_time, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (task_id, title, context, status,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task_id, title, context, kind or TASK_KIND_ONETIME, status,
              next_occurrence or "", current_time, current_time),
         )
         await conn.commit()
         return task_id
 
-    async def expire_task(self, task_id: str) -> bool:
+    async def expire_task(self, task_id: str, *, expected_updated_at: Optional[str] = None,
+                          expected_next_occurrence: Optional[str] = None) -> bool:
         """把任务置为 expired 并写 end_time（触发即过期）。
 
+        truck 可提供扫描时的时间与版本，原子核对未被改期/改写后才交付。
         执行失败直接上抛，不吞错。
         """
         if not task_id:
             return False
         current_time = datetime.now().isoformat()
         conn = await self.db._ensure_connection()
+        condition = "task_id=? AND status=?"
+        params = [TASK_STATUS_EXPIRED, current_time, current_time, task_id, TASK_STATUS_ACTIVE]
+        if expected_next_occurrence is not None:
+            condition += " AND updated_at IS ? AND next_occurrence=?"
+            params.extend([expected_updated_at, expected_next_occurrence])
         cur = await conn.execute(
-            "UPDATE tasks SET status=?, end_time=?, updated_at=? WHERE task_id=?",
-            (TASK_STATUS_EXPIRED, current_time, current_time, task_id),
+            f"UPDATE tasks SET status=?, end_time=?, updated_at=? WHERE {condition}", tuple(params),
+        )
+        await conn.commit()
+        return cur.rowcount > 0
+
+    async def update_task(self, task_id: str, *, context: Optional[str] = None,
+                          next_occurrence: Optional[str] = None) -> bool:
+        """改写一条进行中事项的上下文 / 唤醒时间（仅 active）。
+
+        只作用于 status=active 的事项（已过期的不再改动，返回 False）；
+        context 与 next_occurrence 都未给出时返回 False。
+        SQL 失败直接上抛，不吞错。
+        """
+        if not task_id or (context is None and next_occurrence is None):
+            return False
+        current_time = datetime.now().isoformat()
+        assignments = []
+        params: List[object] = []
+        if context is not None:
+            assignments.append("context=?")
+            params.append(context)
+        if next_occurrence is not None:
+            assignments.append("next_occurrence=?")
+            params.append(next_occurrence)
+        assignments.append("updated_at=?")
+        params.append(current_time)
+        params.extend([task_id, TASK_STATUS_ACTIVE])
+        conn = await self.db._ensure_connection()
+        cur = await conn.execute(
+            f"UPDATE tasks SET {', '.join(assignments)} WHERE task_id=? AND status=?",
+            tuple(params),
         )
         await conn.commit()
         return cur.rowcount > 0
@@ -153,7 +210,7 @@ class TaskOperations:
             return None
         conn = await self.db._ensure_connection()
         cur = await conn.execute(
-            "SELECT task_id, title, context, status, next_occurrence, "
+            "SELECT task_id, title, context, kind, status, next_occurrence, "
             "start_time, end_time, updated_at FROM tasks WHERE task_id=?",
             (task_id,),
         )
@@ -164,6 +221,7 @@ class TaskOperations:
             "task_id": row["task_id"],
             "title": row["title"],
             "context": row["context"],
+            "kind": row["kind"] or TASK_KIND_ONETIME,
             "status": row["status"],
             "next_occurrence": row["next_occurrence"],
             "start_time": row["start_time"],
@@ -178,7 +236,7 @@ class TaskOperations:
 
         conn = await self.db._ensure_connection()
         cur = await conn.execute(
-            "SELECT task_id, title, context, status, next_occurrence, "
+            "SELECT task_id, title, context, kind, status, next_occurrence, "
             "start_time, end_time FROM tasks WHERE task_id=?",
             (task_id,),
         )
@@ -191,10 +249,13 @@ class TaskOperations:
         formatted_output.append(f"上下文：{row['context'] or '（无）'}")
 
         status = row["status"] or ""
+        kind = row["kind"] or TASK_KIND_ONETIME
         next_occurrence = row["next_occurrence"] or ""
 
         if status == TASK_STATUS_ACTIVE:
-            if next_occurrence:
+            if kind == TASK_KIND_ONGOING:
+                formatted_output.append("状态：进行中（持续任务，无固定时间点，由契机巡检）")
+            elif next_occurrence:
                 time_until = self._calculate_time_until(next_occurrence)
                 if time_until.startswith(_OVERDUE_PREFIX):
                     formatted_output.append(f"状态：进行中，{time_until}")
@@ -238,13 +299,16 @@ class TaskOperations:
         lines = []
         for task_id in task_ids:
             cur = await conn.execute(
-                "SELECT title, status, next_occurrence FROM tasks WHERE task_id=?",
+                "SELECT title, kind, status, next_occurrence FROM tasks WHERE task_id=?",
                 (task_id,),
             )
             row = await cur.fetchone()
             if row is None or row["status"] != TASK_STATUS_ACTIVE:
                 continue
             title = row["title"] or "未知标题"
+            if (row["kind"] or TASK_KIND_ONETIME) == TASK_KIND_ONGOING:
+                lines.append(f"{title} 持续进行中")
+                continue
             time_until = self._calculate_time_until(row["next_occurrence"] or "")
             if time_until.startswith(_OVERDUE_PREFIX):
                 lines.append(f"{title} {time_until}")
@@ -252,8 +316,8 @@ class TaskOperations:
                 lines.append(f"{title} 下次处理时间{time_until}")
         return "\n".join(lines)
 
-    async def format_active_task_overview(self, limit: int = 5) -> str:
-        """有界接续目录：总数与最近唤醒安排，附上下文摘要。"""
+    async def format_active_task_overview(self, limit: int = 5, *, full_context: bool = False) -> str:
+        """有界接续目录；Quest 可取得完整原文与准确时间，其他调用默认 120 字摘要。"""
         limit = max(1, min(int(limit), 20))
         conn = await self.db._ensure_connection()
         cur = await conn.execute("SELECT COUNT(*) AS total FROM tasks WHERE status='active'")
@@ -261,31 +325,50 @@ class TaskOperations:
         if not total:
             return ""
         cur = await conn.execute(
-            "SELECT title, context, next_occurrence FROM tasks WHERE status='active' "
+            "SELECT task_id, title, context, kind, next_occurrence FROM tasks WHERE status='active' "
             "ORDER BY CASE WHEN next_occurrence='' OR next_occurrence IS NULL THEN 1 ELSE 0 END, "
             "next_occurrence ASC, start_time DESC LIMIT ?", (limit,),
         )
         rows = await cur.fetchall()
-        lines = [f"待接续事项共 {total} 条，以下为最近的安排："]
+        lines = [f"待接续事项共 {total} 条，以下为最近的安排（括号内为事项编号）："]
         for row in rows:
             title = (row["title"] or "未知标题").replace("\n", " ")
-            context = (row["context"] or "待查询").replace("\n", " ")
-            context = context[:120] + ("…" if len(context) > 120 else "")
+            context = row["context"] or "待查询"
+            if not full_context:
+                context = context.replace("\n", " ")
+                context = context[:120] + ("…" if len(context) > 120 else "")
+            if (row["kind"] or TASK_KIND_ONETIME) == TASK_KIND_ONGOING:
+                if full_context:
+                    lines.append(f"· {title}（{row['task_id']}）\n上下文：{context}\n持续任务：无固定唤醒时间")
+                else:
+                    lines.append(f"· {title}（{row['task_id']}）：{context}；持续进行中")
+                continue
             when = row["next_occurrence"] or ""
             timing = self._calculate_time_until(when) if when else "未设置唤醒时间"
-            lines.append(f"· {title}：{context}；{timing}")
+            if full_context:
+                lines.append(f"· {title}（{row['task_id']}）\n上下文：{context}\n下次唤醒：{when}；{timing}")
+            else:
+                lines.append(f"· {title}（{row['task_id']}）：{context}；{timing}")
         if total > len(rows):
             lines.append(f"另有 {total - len(rows)} 条未展示，可按标题查询。")
         lines.append("目录仅提示已有安排，不要求现在处理所有事项；细节用 query_task_status 按标题查询。")
         return "\n".join(lines)
 
-    async def get_active_tasks(self, limit: int = 10) -> List[str]:
-        """获取所有进行中的任务。"""
+    async def get_active_tasks(self, limit: int = 10,
+                               kind: Optional[str] = None) -> List[str]:
+        """获取所有进行中的任务；kind 非空时按任务类型过滤。"""
         conn = await self.db._ensure_connection()
-        cur = await conn.execute(
-            "SELECT task_id FROM tasks WHERE status='active' "
-            "ORDER BY start_time DESC LIMIT ?",
-            (limit,),
-        )
+        if kind:
+            cur = await conn.execute(
+                "SELECT task_id FROM tasks WHERE status='active' AND kind=? "
+                "ORDER BY start_time DESC LIMIT ?",
+                (kind, limit),
+            )
+        else:
+            cur = await conn.execute(
+                "SELECT task_id FROM tasks WHERE status='active' "
+                "ORDER BY start_time DESC LIMIT ?",
+                (limit,),
+            )
         rows = await cur.fetchall()
         return [r["task_id"] for r in rows if r["task_id"]]

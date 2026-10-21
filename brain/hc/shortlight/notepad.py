@@ -21,7 +21,8 @@
 - 见闻录由 Reflection 经 record_observation 独立写入，不再自动复制事件见闻笔记。
 - 槽位独立于事件链文档与归档：archive_all 只 glob NOTES_DIR 顶层 *.json 并归档
   普通笔记，槽位位于 NOTES_DIR/slots/ 子目录，天然不受影响（反思整理不触碰槽位）；
-- clear_slot 为显式清理接口；Quest 不再自动清空任务槽位。
+- clear_slot 为显式清理接口；Quest 每次运行结束时自动清空任务槽位（2026-10-14：
+  把笔记并入对应事项后系统自动清空，未归属的笔记即视为丢弃）。
 - 见闻录槽位无自动清理，长期累积，保留观察到的现象及其依据。
 
 约定：
@@ -376,7 +377,7 @@ class ShortlightNotepad:
     async def clear_slot(self, slot: str) -> int:
         """清空指定槽位内容，返回被丢弃的条目数；无槽位文件返回 0。
 
-        任务 agent 处理完毕后调用（丢弃任务相关笔记槽位）；只清槽位，
+        任务 agent（Quest）每次运行结束时调用（丢弃任务相关笔记槽位）；只清槽位，
         不影响普通笔记中同条目的副本（仍可由反思系统消费）。
         """
         file_path = self._slot_path(slot)

@@ -10,6 +10,7 @@ ACT 表设计：
 - ExternalInteractionAct: 外部互动类（他人行为直接刺激）
 - EvaluationAct: 评价类（他人对我的能力/表现评价）
 - SelfActionAct: 自身行为类（我主动选择做什么）
+- PfcaRegulationAct: PFCA 专属情绪调节类（PFCA 主动调节自身情绪）
 - SystemBuiltInAct: 系统内置 act（Amy 启动时自动注入，不由 LLM 触发）
 - FinalEvaluationAct / TaskResultAct: PFCA 收尾社交评价和任务结果，不参与 NE/DA 计算
 - ACTEffects: 参与 thought 体系的 act 合并视图，提供 amy 内部的统一查询入口
@@ -49,7 +50,7 @@ class ExternalInteractionAct:
 
     实际贡献：
         每个 thought 贡献 = intensity * act.ne_delta / act.da_delta
-        所有 thought 贡献加性累加，最后 clamp 到 [-100, 100]。
+        所有 thought 贡献加性累加，最后 clamp 到 [0, 100]。
 
     设计原则（RimWorld 风格，2026-09-24 调整：允许所有想法堆叠，上限 3）：
         - 全部 act 统一 max_stack=3：同一事件连续触发会累积加深，
@@ -94,7 +95,7 @@ class ExternalInteractionAct:
         },
         # 强安全信号：可堆叠；防御意识大幅消退
         {
-            "name": "被夸奖/被善意支持",
+            "name": "被夸奖/被善意支持/被希望",
             "ne_delta": -15, "da_delta": 0,
             "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
@@ -102,7 +103,7 @@ class ExternalInteractionAct:
         },
         # 警报彻底解除：可堆叠；单次足以彻底放下戒心
         {
-            "name": "被真诚道歉/对方妥协安抚",
+            "name": "被真诚道歉/对方妥协安抚/被祈求",
             "ne_delta": -25, "da_delta": 0,
             "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
@@ -132,7 +133,7 @@ class EvaluationAct:
 
     字段格式与 ExternalInteractionAct.items 一致。
     """
-    items: List[dict] = [
+    success_items: List[dict] = [
         # 表达侧自我评价极大膨胀：可堆叠
         {
             "name": "策略卓越/超预期达成",
@@ -157,6 +158,8 @@ class EvaluationAct:
             "duration": 600,  # 10 分钟
             "desc_extra": "哦？有点意思。",
         },
+    ]
+    failure_items: List[dict] = [
         # 轻微失落：可堆叠
         {
             "name": "表现平淡/未达预期",
@@ -182,6 +185,13 @@ class EvaluationAct:
             "desc_extra": "全完了……",
         },
     ]
+
+    items = success_items + failure_items
+
+    @classmethod
+    def is_failure(cls, name: str) -> bool:
+        """按词表所属分区识别失败，不匹配中文字样或推断分数正负。"""
+        return name in [item["name"] for item in cls.failure_items]
 
     @classmethod
     def names(cls) -> List[str]:
@@ -218,6 +228,52 @@ class SelfActionAct:
             "max_stack": 3, "stack_coefficient": 0,
             "duration": 600,  # 10 分钟
             "desc_extra": "算了，忍了。",
+        },
+    ]
+
+    @classmethod
+    def names(cls) -> List[str]:
+        return [item["name"] for item in cls.items]
+
+    @classmethod
+    def entries(cls) -> List[dict]:
+        return cls.items
+
+
+# === PfcaRegulationAct：PFCA 专属情绪调节类（PFCA 主动调节自身情绪） ===
+class PfcaRegulationAct:
+    """PFCA 决策层主动调节自身情绪的 act（PFCA 专属，不对 conversation /
+    social_chat 的 nature / emotional_judgment 开放）。
+
+    与 SelfActionAct 的区别：SelfActionAct 锚定「我说了什么做了什么」，
+    本表只锚定「我对自己情绪做了什么处理」，由 PFCA 的调节工具单独触发。
+
+    字段格式与 ExternalInteractionAct.items 一致。
+    """
+    items: List[dict] = [
+        # 压抑兴奋与冲动：心理能量（DA）回落，语气与动作降温；可堆叠
+        {
+            "name": "冷静下来",
+            "ne_delta": 0, "da_delta": -25,
+            "max_stack": 3, "stack_coefficient": 0,
+            "duration": 600,  # 10 分钟
+            "desc_extra": "",
+        },
+        # 站到对方立场：敌对与防御感（NE）消退，戒心降低；可堆叠
+        {
+            "name": "共情对方",
+            "ne_delta": -25, "da_delta": 0,
+            "max_stack": 3, "stack_coefficient": 0,
+            "duration": 600,  # 10 分钟
+            "desc_extra": "",
+        },
+        # 给自己提气：心理能量（DA）回升，语气与动作活起来；与「冷静下来」对称
+        {
+            "name": "提起劲头",
+            "ne_delta": 0, "da_delta": 25,
+            "max_stack": 3, "stack_coefficient": 0,
+            "duration": 600,  # 10 分钟
+            "desc_extra": "",
         },
     ]
 
@@ -276,7 +332,8 @@ class SystemBuiltInAct:
 
 # === ACTEffects：合并视图 + 分类识别 ===
 class ACTEffects:
-    """ExternalInteractionAct + EvaluationAct + SelfActionAct + SystemBuiltInAct 的合并视图。
+    """ExternalInteractionAct + EvaluationAct + SelfActionAct + PfcaRegulationAct
+    + SystemBuiltInAct 的合并视图。
     amy 内部所有 act 查询都通过这里；同时支持按"分类标签"识别 act 属于哪个类。
 
     顶层导出 ACT_EFFECTS 由此推导得到。
@@ -285,6 +342,7 @@ class ACTEffects:
     - "external": 外部互动类（ExternalInteractionAct）
     - "evaluation": 评价类（EvaluationAct）
     - "self_action": 自身行为类（SelfActionAct）
+    - "pfca_regulation": PFCA 专属情绪调节类（PfcaRegulationAct）
     - "system": 系统内置类（SystemBuiltInAct，启动时由系统注入，不由 LLM 触发）
     """
     @classmethod
@@ -294,6 +352,7 @@ class ACTEffects:
             [(item, "external") for item in ExternalInteractionAct.entries()] +
             [(item, "evaluation") for item in EvaluationAct.entries()] +
             [(item, "self_action") for item in SelfActionAct.entries()] +
+            [(item, "pfca_regulation") for item in PfcaRegulationAct.entries()] +
             [(item, "system") for item in SystemBuiltInAct.entries()]
         )
 
@@ -313,7 +372,8 @@ class ACTEffects:
     @classmethod
     def category_of(cls, act: str) -> Optional[str]:
         """查询 act 所属分类标签。
-        返回值："external" / "evaluation" / "self_action" / "system" / None（act 不存在时）。
+        返回值："external" / "evaluation" / "self_action" / "pfca_regulation" /
+        "system" / None（act 不存在时）。
         """
         for item, category in cls._all_entries():
             if item["name"] == act:
@@ -325,13 +385,18 @@ class ACTEffects:
 class FinalEvaluationAct:
     """外部社交评价五档；旧四档名称仅作兼容别名，不再暴露给新工具。"""
     DEFAULT_FINAL_EVALUATION = "无评价"
-    items: List[dict] = [
+    success_items: List[dict] = [
         {"name": "明确好评价", "feedback_delta": 20},
         {"name": "含蓄好评价", "feedback_delta": 10},
+    ]
+    failure_items: List[dict] = [
         {"name": "含蓄坏评价", "feedback_delta": -10},
         {"name": "明确坏评价", "feedback_delta": -20},
+    ]
+    neutral_items: List[dict] = [
         {"name": "无评价", "feedback_delta": -5},
     ]
+    items = success_items + failure_items + neutral_items
     aliases = {"被他人夸奖为优秀": "明确好评价", "被他人评价为尚可": "含蓄好评价",
                "未得到他人评价与反馈": "无评价", "被他人评价欠佳/不认可": "明确坏评价"}
 
@@ -356,24 +421,47 @@ class FinalEvaluationAct:
         return next((float(item["feedback_delta"]) for item in cls.items
                      if item["name"] == cls.normalize(name)), 0.0)
 
+    @classmethod
+    def is_failure(cls, name: str) -> bool:
+        return cls.normalize(name) in [item["name"] for item in cls.failure_items]
+
 
 class TaskResultAct:
-    """任务是否完成由 PFCA 根据已承接目标与结果判断，不依据来源模块。"""
-    NEUTRAL = "纯闲聊或结果不明"
-    deltas = {"成功": 20, "失败": -20, NEUTRAL: 0}
+    """PFCA 按实际效益结算效能感：只有对方明确认可价值才加，其余按结果扣减。"""
+    BENEFIT = "对方明确说自己有用/产生了实际价值/明确使对方收益"
+    UNCERTAIN = "可能产生收益"
+    DISSATISFIED = "结果不满"
+    DELAYED = "任务延期"
+    NEGATIVE = "产生负面收益"
+    HARMFUL = "帮倒忙"
+    deltas = {BENEFIT: 10, UNCERTAIN: 0, DISSATISFIED: -5,
+              DELAYED: -10, NEGATIVE: -20, HARMFUL: -30}
+    DEFAULT = UNCERTAIN
+    # 保留旧效益标签的读取能力，不推断受益对象，也不重新结算旧评分。
+    legacy_results = ("帮了大忙，且反馈中收益明显", "帮了小事，反馈中有明确的较小收益",
+                      "可能有用，不太清楚", "结果未知/推迟了任务/没有明确反馈",
+                      "确认没有产生效益", "帮倒忙，实际使事情变差",
+                      "对主人产生了实际效益", "对自己带来了帮助、收获或体验改善",
+                      "结果未明", "产生实际效益", "未产生实际效益")
+
+    @classmethod
+    def is_beneficial(cls, result: str) -> bool:
+        return result in (cls.BENEFIT, "帮了大忙，且反馈中收益明显",
+                          "帮了小事，反馈中有明确的较小收益", "产生实际效益")
+
+    @classmethod
+    def is_failure(cls, result: str) -> bool:
+        return result in (cls.DISSATISFIED, cls.DELAYED, cls.NEGATIVE, cls.HARMFUL)
 
     @classmethod
     def names(cls) -> List[str]:
         return list(cls.deltas)
 
     @classmethod
-    def validate(cls, result: str, task_reason: str = "") -> None:
+    def validate(cls, result: str) -> None:
         if not isinstance(result, str) or result not in cls.deltas:
-            raise ValueError(f"未知任务结果：{result}")
-        if not isinstance(task_reason, str):
-            raise ValueError("任务原因必须是文本")
-        if result != cls.NEUTRAL and not task_reason.strip():
-            raise ValueError(f"任务结果为{result}时必须填写任务原因与依据，并区分证据与推测")
+            raise ValueError(f"未知效益评价：{result}；请选择{'、'.join(cls.names())}，不能仅按任务成败判断")
+
 
 
 # === 顶层常量（推导得到）===
@@ -384,11 +472,13 @@ ACT_EFFECTS = ACTEffects.all()
 # 全部 act 条目，附分类标签。[(act_dict, category_label), ...]
 ALL_ACT_ENTRIES = ACTEffects._all_entries()
 
-# 按分类组织的字典：{"external": [...], "evaluation": [...], "self_action": [...], "system": [...]}
+# 按分类组织的字典：{"external": [...], "evaluation": [...], "self_action": [...],
+# "pfca_regulation": [...], "system": [...]}
 ACT_EFFECTS_BY_CATEGORY = {
     "external": [item for item, cat in ALL_ACT_ENTRIES if cat == "external"],
     "evaluation": [item for item, cat in ALL_ACT_ENTRIES if cat == "evaluation"],
     "self_action": [item for item, cat in ALL_ACT_ENTRIES if cat == "self_action"],
+    "pfca_regulation": [item for item, cat in ALL_ACT_ENTRIES if cat == "pfca_regulation"],
     "system": [item for item, cat in ALL_ACT_ENTRIES if cat == "system"],
 }
 
@@ -500,8 +590,10 @@ def clamp(value: float, min_val: float, max_val: float) -> float:
 
 # === 基础参数 ===
 
+# NE/DA 单向量程 0–100（2026-10-20 由 ±100 收敛，跨度 200 → 100）。
+# ACT 表中的负增量保留原值，仍可抵消已累积的值，但结果不会低于 0。
 BASE_VALUE = 0.0
-MIN_VALUE = -100.0
+MIN_VALUE = 0.0
 MAX_VALUE = 100.0
 
 # === 反馈维度参数（0-100 仅为容器量程，实际按格子离散步进结算）===
@@ -509,10 +601,13 @@ MAX_VALUE = 100.0
 FEEDBACK_DEFAULT = 50.0   # 中性基线
 FEEDBACK_MIN = 0.0
 FEEDBACK_MAX = 100.0
-REFLECTION_VERIFICATION_COMPENSATION = 30.0  # 已安排自修正验证的行动补偿
-REFLECTION_SOCIAL_COMPENSATION = 30.0  # 已安排主动社交的归属感补偿
 
 THOUGHT_DURATION = 300
+
+# === DA 曲线平滑 ===
+# 计算快照后，DA 按比例朝中性锚点收敛，压低极端档位的跳变（NE 不平滑）。
+DA_NEUTRAL = 50.0
+DA_SMOOTH_RATIO = 0.2
 
 CAP_SCALE = 2.0
 
@@ -523,17 +618,17 @@ AFFINITY_BASE_DURATION = 3 * 24 * 3600
 # === 描述表 ===
 
 DOPAMINE_DESCRIPTIONS = [
-    # 表现侧：表达冲动与交互节奏，不改变底层决策逻辑。
-    (90, 100, "你嚣张蛮横，毫无道理可讲。别人说话必须经过你的允许，否则你会故意打断。你完全凭情绪肆意宣泄，禁止任何等待与妥协。"),
-    (80, 90, "你态度傲慢强势，掌控欲极强。你习惯打断对方，言辞直截了当，会经常彻底否决对方，要求所有人顺着你的思路走。禁止任何妥协。"),
-    (70, 80, "你自负而极度主动。你会在对方把话说完前抢先定死结论，自顾自把想法倒完，寸步不让，不给对方犹豫和插话的余地。"),
-    (60, 70, "你沟通兴致高昂，接话极快。你行文随性大方，乐于主动分享想法，习惯性使用否定来调整对话节奏，牢牢把握互动主导。"),
-    (50, 60, "你理性克制，维持标准的回合制沟通。你倾向于等待对方把话说完整，轮到你时再有条理地陈述观点，既不急于抢话，也不刻意拖延。"),
-    (40, 50, "你态度平淡，略带慵懒。你倾向于等待对方先开口，不会主动挑起多余话题。问什么答什么，就事论事，点到即止。"),
-    (30, 40, "你感到乏味无趣，沟通动力偏低。你倾向于自己少做事、让对方多做事，习惯性埋怨对方麻烦、事儿多。绝不主动追问，每次只用一两句短语把事情推给对方。"),
-    (20, 30, "你极度自私冷漠，完全不在意对方的感受。你奉行乐子人态度，喜欢打哈哈、糊弄过去，甚至在一旁看对方笑话。多说一句都嫌麻烦，只会给出漫不经心、毫无诚意的零碎反馈。"),
-    (10, 20, "你满心无语，表现出极致的无所谓与不在意。你故意敷衍、极度被动，处于半失联边缘。禁止输出完整长句，只能被动逼出一两个零碎字词来应付。"),
-    (0, 10, "你彻底放弃交流欲望，言语罢工。你不在乎任何后果，禁止给出任何实质性观点或解答，只会用单字、单个标点或冷漠的沉默结束对话。"),
+    # 表现侧：心情基调 + 表达冲动与交互节奏，不改变底层决策逻辑。
+    (90, 100, "你很开心，浑身是劲，也觉得自己怎么都对。别人说话你会直接插进去，不等他说完就接；想说什么就说什么，不绕、不客气。这份开心底下的自负很明显，你不觉得需要跟谁解释自己。"),
+    (80, 90, "你心情很好，带着明显的自负，觉得一切都在掌控里。你会打断对方，说话直截了当，不同意就整个否掉，要对方顺着你的思路走。你享受这种主导感，也不打算让着谁。"),
+    (70, 80, "你心情明亮，挺开心，兴致高，也乐于让人看出你相信自己是对的。你会抢在对方说完前把结论定下来，自己的想法一口气倒完，不给对方犹豫和插话的空。"),
+    (60, 70, "你心情不错，聊得起来。接话快，愿意主动说，也常带着对方走；偶尔用否定拨一下对话节奏，整体是愉快的、想多聊几句的。"),
+    (50, 60, "你表达平稳，有来有回。你会把对方的话听完整再答，轮到你时把观点说清楚；对方要情绪上的回应时，你就给情绪，不刻意保持距离，也不拿捏分寸。"),
+    (40, 50, "你心情平，带点懒。不太主动挑话题，等对方先开口；问什么答什么，就事论事，说完就收。"),
+    (30, 40, "你兴致不高，有点摆烂，觉得这些事麻烦。心里发闷，会少做一点、把事往外推，嘴上带两句抱怨；不主动追问，一两句说完。"),
+    (20, 30, "你情绪偏低，心里空落，也有些难过。做事提不起劲，索性摆烂，话很少，懒得展开，最多一两句；对方递话过来就答，不找话题，不问第二句。"),
+    (10, 20, "你情绪很低，压着一点难过，提不起精神。回话压到最短，能省则省，语气是懒的、散的；被点名或对方直接要一句应答时，还是给一句，短、平、没什么力气。"),
+    (0, 10, "你情绪低到几乎闷住，心里难过，也懒得再说，基本是摆烂的无语状态。只用极短的词或一个标点回应；对方明确追问、点名时，仍给一个最短的答复。"),
 ]
 
 NOREPINEPHRINE_DESCRIPTIONS = [
@@ -542,7 +637,7 @@ NOREPINEPHRINE_DESCRIPTIONS = [
     (80, 90, "通篇充满冷嘲热讽、反讽与刻意挑刺，针对对方的漏洞展开公开处刑与智商贬低。绝不给好脸色；表情包仅允许使用翻白眼、蔑视、冷笑类，禁止正面肯定。"),
     (70, 80, "态度冰冷且高度戒备。不再考虑任何情面，言辞直来直去，直接揭短并施加严厉警告与施压，不给对方留台阶下，禁止委婉修辞。"),
     (60, 70, "显露明显的反感与不耐烦。频繁使用“啧”、“真麻烦”、“你到底懂不懂”等嫌弃句式，言辞直截了当带刺，拒绝顺着对方的情绪。"),
-    (50, 60, "保持标准的社交防线与成熟体面。就事论事，保守合理，禁止冷嘲热讽与无端挑衅，亦禁止过度亲昵或谄媚。"),
+    (50, 60, "保持基本的社交分寸与体面。就事论事，措辞平实，不主动挑衅也不刻意挑逗；对方明确要亲近、要哄、要你换一个身份或口吻说话时，顺着给足，不推、不挡、不还价。"),
     (40, 50, "态度温和顺畅，抱有基础的善意与尊重。倾向于使用平实好沟通的语言，禁止使用带有压迫感的反问或质问句，说话留有余地。"),
     (30, 40, "语言婉转柔和，天然带有一种人畜无害感。频繁使用柔和语气词（啦、呀、呢）或萌系表情包作为缓冲垫，极力避免冲突，化解生硬。"),
     (20, 30, "表现得非常听话与迎合。禁止任何形式的反驳与争辩；一旦出现分歧，机制强制执行：主动退让、自我认错或软声道歉，极尽迁就。"),

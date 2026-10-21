@@ -32,6 +32,7 @@ from utils.logger import setup_logging
 from utils.error_handling import async_handle_errors, ValidationError, StorageError
 # 导入基础检索模块
 from memory.message_repository import get_message_store
+from adapt.session_identity import session_scope
 
 # 设置日志
 logger = setup_logging(__name__, 'WARNING')
@@ -41,7 +42,7 @@ def _extract_session_type(session_id: str) -> str:
     """从统一 session_id 中提取 session_type（type_id 格式的第一段）"""
     if not session_id or "_" not in session_id:
         return ""
-    return session_id.split("_", 1)[0]
+    return session_scope(session_id)
 
 
 class MessageAdvancedManager:

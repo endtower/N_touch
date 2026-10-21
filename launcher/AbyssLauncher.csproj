@@ -10,7 +10,10 @@
     <AssemblyName>AbyssLauncher</AssemblyName>
     <RootNamespace>AbyssLauncher</RootNamespace>
     <AssemblyTitle>Abyss 桌面启动管理器</AssemblyTitle>
-    <Version>0.3.3</Version>
+    <Version>0.6.0</Version>
+    <!-- 构建时间戳水印：写入程序集元数据，启动器标题栏读取并显示。
+         存在多份同名 EXE 时可据此辨认当前运行的是哪一次构建（2026-10-15）。 -->
+    <BuildStamp>$([System.DateTime]::Now.ToString('yyyy-MM-dd HH:mm'))</BuildStamp>
     <ApplicationIcon>..\assets\icon.ico</ApplicationIcon>
     <!-- 验证版锁定构建配置 -->
     <InvariantGlobalization>false</InvariantGlobalization>
@@ -18,6 +21,13 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="BuildStamp" Value="$(BuildStamp)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(BootstrapBundle)' != ''">
+    <EmbeddedResource Include="$(BootstrapBundle)" LogicalName="Abyss.Bootstrap.zip" />
   </ItemGroup>
 
   <!-- UseWindowsForms 会隐式引入 System.Windows.Forms / System.Drawing 全局 using，

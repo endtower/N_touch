@@ -37,6 +37,7 @@ logs/
 *.log
 
 # Runtime data
+user_settings/
 pids
 *.pid
 *.seed
@@ -189,3 +190,13 @@ manager/trucks.json
 /red-path-horizontal.html
 /red-path.html
 /symbol-language-studies.html
+
+# Component update staging, settings, receipts, and helper builds
+updater/bin/
+updater/obj/
+updater/AbyssUpdater.exe
+updater-tests/bin/
+updater-tests/obj/
+manager/update_sources.json
+manager/updates/
+.versions/

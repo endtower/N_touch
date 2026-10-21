@@ -415,9 +415,12 @@ class ReflectionCompensationAcceptance(unittest.IsolatedAsyncioTestCase):
         }
         agent.tool_functions = {"create_task": AsyncMock(return_value=receipt)}
         call = SimpleNamespace(id="create-1", function=SimpleNamespace(name="create_task", arguments="{}"))
+        finish = SimpleNamespace(id="finish-1", function=SimpleNamespace(name="finish", arguments="{}"))
+        agent._finish_impl = AsyncMock(return_value={"status": "finished", "summary": ""})
+        agent.tool_functions["finish"] = agent._finish_impl
         def reply(calls):
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="完成", tool_calls=calls))])
-        agent._call_llm = AsyncMock(side_effect=[reply([call]), reply([])])
+        agent._call_llm = AsyncMock(side_effect=[reply([call]), reply([finish]), reply([finish])])
         with patch("brain.base.light_agent.quest_agent.new_light_history_manager", return_value=Mock()), \
              patch("brain.hc.database.task.TaskOperations.format_active_task_overview",
                    AsyncMock(return_value="无")), \
@@ -426,7 +429,7 @@ class ReflectionCompensationAcceptance(unittest.IsolatedAsyncioTestCase):
             second = await agent.run("只咨询", "上下文", "2026-12-31T12:00:00")
         self.assertEqual(first["created_tasks"], [receipt])
         self.assertEqual(second["created_tasks"], [])
-        self.assertEqual(second["tools_called"], [])
+        self.assertEqual([c["tool"] for c in second["tools_called"]], ["finish"])
 
 
 if __name__ == "__main__":

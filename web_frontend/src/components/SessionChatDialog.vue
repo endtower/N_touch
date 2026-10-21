@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { computed, ref, watch } from 'vue'
 import {
   ChatDotRound,
@@ -145,12 +146,11 @@ watch(() => props.visible, (v) => {
 </script>
 
 <template>
-  <el-dialog
+  <AppDialog size="panel"
     :model-value="props.visible"
-    :width="'88vw'"
     :close-on-click-modal="false"
     align-center
-    :show-close="false"
+    title="会话记录"
     @update:model-value="(v: boolean) => emit('update:visible', v)"
     class="session-chat-dialog reading-dialog"
   >
@@ -305,11 +305,10 @@ watch(() => props.visible, (v) => {
         </template>
       </section>
     </ResizableSplit>
-  </el-dialog>
+  </AppDialog>
 </template>
 
 <style scoped>
-:global(.session-chat-dialog .el-dialog__header) { padding: 14px 20px !important; }
 
 .schat-header {
   display: flex;
@@ -348,7 +347,8 @@ watch(() => props.visible, (v) => {
 }
 
 .schat-body {
-  height: min(76vh, calc(100dvh - 160px));
+  flex: 1;
+  min-height: 0;
   border-top: 1px solid var(--border-1);
   border-bottom: 1px solid var(--border-1);
 }
@@ -663,4 +663,6 @@ watch(() => props.visible, (v) => {
 .schat-empty.error { color: var(--danger); }
 .schat-empty-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
 .schat-empty-sub { font-size: 12px; margin-top: 2px; }
+/* Keep header controls clear of the shared close button. */
+.schat-header-left, .schat-header-right { flex-wrap: wrap; min-width: 0; gap: 8px; }
 </style>

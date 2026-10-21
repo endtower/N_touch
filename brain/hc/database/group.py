@@ -96,6 +96,7 @@ class GroupOperations:
           familiarity: str       — 熟悉度（单值）
           member_impression: str — 群组成员印象（单值）
           self_image: str        — 我在该群聊的形象（单值）
+          allow_conversation: bool — 是否允许 conversation_agent 对该群的会话发起对话
         传 None 的字段跳过不修改。返回 False 表示群组 uuid 不存在。
         """
         if not uuid:
@@ -127,6 +128,9 @@ class GroupOperations:
         if fields.get("self_image") is not None:
             sets.append("self_image=?")
             params.append(fields["self_image"])
+        if fields.get("allow_conversation") is not None:
+            sets.append("allow_conversation=?")
+            params.append(1 if fields["allow_conversation"] else 0)
 
         if sets:
             params.append(uuid)
@@ -136,8 +140,9 @@ class GroupOperations:
             )
             await conn.commit()
 
-        # 描述性字段变更后重新向量化（内部自行处理未找到的兜底）
-        await self.update_group_vector(uuid)
+        # 仅切换放行开关不影响描述文本，避免无谓的向量重算
+        if set(fields) - {"allow_conversation"}:
+            await self.update_group_vector(uuid)
         return True
 
     async def delete_group(self, uuid: str) -> bool:
@@ -201,6 +206,7 @@ class GroupOperations:
             "member_impressions": [{"content": row["member_impression"]}] if row["member_impression"] else [],
             "contacts": json.loads(row["contacts"] or "[]"),
             "relationships_with_default": [{"type": row["self_image"]}] if row["self_image"] else [],
+            "allow_conversation": bool(row["allow_conversation"]),
             "usage_count": row["usage_count"],
             "last_used_at": row["last_used_at"],
             "created_at": row["created_at"],

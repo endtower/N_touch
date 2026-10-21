@@ -35,7 +35,6 @@ const systemPanelOpen = ref(false)
 const coreReady = ref(false)
 const managerAvailable = ref(false)
 const coreError = ref('')
-const coreActionPending = ref(false)
 let consolePoll: number | null = null
 let consolePolling = false
 let disposed = false
@@ -73,19 +72,6 @@ async function pollConsole() {
   }
 }
 
-async function controlCore(action: 'start' | 'stop') {
-  coreActionPending.value = true
-  try {
-    const res = await fetch(`/console/core/${action}`, { method: 'POST' })
-    const data = await res.json()
-    if (!res.ok || !data.ok) throw new Error(data.message || data.error || '操作失败')
-    await pollConsole()
-  } catch (e: any) {
-    ElMessage.error(e?.message || String(e))
-  } finally {
-    coreActionPending.value = false
-  }
-}
 const theme = ref<'light' | 'dark'>(
   (localStorage.getItem('abyss-theme') as 'light' | 'dark') || 'dark',
 )
@@ -286,16 +272,6 @@ async function onSend(payload: { text: string; images: string[] }) {
   }
 }
 
-const headerSubtitle = computed(() => {
-  const s = chat.activeSession.value
-  if (!s) return '没选会话'
-  const parts: string[] = []
-  parts.push(s.scope === 'group' ? '群聊' : '私聊')
-  parts.push(`文件: ${s.scope}_${s.session_id}.json`)
-  parts.push(`会话: ${s.user_name} (id=${s.user_id})`)
-  if (s.role) parts.push(`角色: ${s.role}`)
-  return parts.join('  ·  ')
-})
 </script>
 
 <template>
@@ -306,13 +282,9 @@ const headerSubtitle = computed(() => {
     <div class="app-main">
       <header class="app-header">
         <div style="display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;">
-          <h1 style="flex-shrink: 0;">Abyss</h1>
+          <h1 style="flex-shrink: 0;" :class="{ 'core-off': managerAvailable && !coreReady }">Abyss</h1>
           <span class="header-sub" style="white-space: nowrap; flex-shrink: 0;"
-            :title="coreError || 'Core 停止时仍可查看上下文、记录和配置 Truck'">{{ coreReady ? 'Core 运行中' : managerAvailable ? 'Core 未运行' : '管理服务未连接' }}</span>
-          <el-button v-if="managerAvailable" size="small" :loading="coreActionPending"
-            @click="controlCore(coreReady ? 'stop' : 'start')">{{ coreReady ? '停止 Core' : '启动 Core' }}</el-button>
-          <span class="header-divider"></span>
-          <span class="header-sub" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ headerSubtitle }}</span>
+            :title="coreError || 'Core 停止时仍可查看上下文、记录和配置 Truck'">{{ coreReady ? '运行中' : managerAvailable ? '已停止' : '未连接' }}</span>
         </div>
         <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
           <button
@@ -374,7 +346,7 @@ const headerSubtitle = computed(() => {
           </button>
           <button
             class="truck-toggle-btn"
-            title="系统面板 (进程管理 / 实时日志 / 优雅重启)"
+            title="系统设置 (模型接入 / 进程管理 / 实时日志)"
             @click="systemPanelOpen = true"
           >
             <el-icon :size="14"><Monitor /></el-icon>

@@ -12,6 +12,11 @@ proactive 工具模块
 - launch_pfca:               启动 PFCA（终结工具：调完 session 退出）
 - query_address_book:        查看通讯录（ToolSocial 通用实现，对齐 PFCA_tool_manager）
 - query_history:             查看一个会话的聊天记录（ToolSocial 通用实现，对齐 PFCA_tool_manager）
+- query_note:                按章节标题查询记事本条目细节（ToolHC 通用实现，对齐 PFCA_tool_manager）
+- query_task_status:         查询任务状态：不传标题返回待接续目录，传标题返回该任务细节
+                             （ToolTask 通用级，对齐 PFCA_tool_manager）
+- wait_and_observe:          在指定群等待并观察是否出现新消息（只读、不消费、不推进游标；
+                             供判断层等主人后续发言 / 关键信息再决定是否下场）
 - quest_agent:               登记一条待接续事项（委托 ToolTask，交给 Quest 查重后登记）
 - skip_proactive:            主动跳过本次任务（终结工具）
 
@@ -19,12 +24,14 @@ proactive 工具模块
 - memory_agent:              调整记忆（实现仍保留在 _tool_memory_adjustment）
 """
 
+import asyncio
 import json
+import time
 from functools import partial
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from utils.logger import get_logger
-from brain.base import ToolManager, ToolSocial, ToolTask
+from brain.base import ToolManager, ToolHC, ToolSocial, ToolTask
 
 logger = get_logger("ProactiveTools", "DEBUG")
 
@@ -80,6 +87,45 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     },
     ToolSocial.get_query_address_book_tool_schema(),
     ToolSocial.get_query_history_tool_schema(),
+    ToolHC.get_query_note_tool_schema(),
+    # 通用级任务工具（2026-10-19 接入：待接续目录为轻量表，细节按标题查询；
+    # 裁决级 create_task 仍私有于 QuestAgent，不对 proactive 开放）
+    *ToolTask.get_task_tool_schemas(),
+    # 后台等待（2026-10-19 接入：主人发「你好」这类无信息量开场时，判断层可先等
+    # 后续关键信息再决定是否下场；只读观察，不消费消息）
+    {
+        "type": "function",
+        "function": {
+            "name": "wait_and_observe",
+            "description": (
+                "在指定群里等待一段时间，观察是否出现新消息（尤其是主人的后续发言）。"
+                "只读观察：不消费消息、不推进任何游标。"
+                "一次只盯一个群；需要同时盯多个群时，分多轮调用。"
+                "单次最长 30 秒，需要等更久就多轮调用。"
+                "适用：主人刚发了一句无信息量的话（如「你好」），先等一等，"
+                "等他说出关键信息后再决定是否进群聊天。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "目标群聊 id，格式 'group_xxx'，"
+                            "取自本次唤醒原因里提到的群（或【主动任务】附加信息里的 session_ids）。"
+                        ),
+                    },
+                    "seconds": {
+                        "type": "number",
+                        "description": "等待的秒数（10-30，越界自动收敛到边界）。",
+                        "minimum": 10.0,
+                        "maximum": 30.0,
+                    },
+                },
+                "required": ["session_id", "seconds"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -130,6 +176,10 @@ class ProactiveToolRegistry(ToolManager):
             "query_address_book": ToolSocial.query_address_book,
             # consumer_id 显式传 "pfca"：LLM 已读到的消息推进 pfca 游标，truck 不再重复触发
             "query_history": partial(ToolSocial.query_history, consumer_id="pfca"),
+            "query_note": ToolHC.query_note,
+            # 通用级任务工具（直接引用 ToolTask 类方法，风格同 query_history 引用 ToolSocial）
+            "query_task_status": ToolTask.query_task_status,
+            "wait_and_observe": _tool_wait_and_observe,
             "memory_adjustment": _tool_memory_adjustment,
             "skip_proactive": _tool_skip_proactive,
             "quest_agent": ToolTask.quest_agent,
@@ -225,7 +275,7 @@ async def _tool_launch_pfca(
     """提交 PFCA 启动决策（不直接执行）。
 
     设计：proactive 只负责"选择做什么"，实际启动 PFCA / 任务链 / conversation
-    的动作交给 station 统一调度（与 ongoing_truck 的"只决策不执行"风格一致）。
+    的动作交给 station 统一调度（与 pre_truck 等 truck 的"只决策不执行"风格一致）。
 
     Args:
         task_info: 任务信息 str，含根源 + 时机 + 意图
@@ -237,7 +287,7 @@ async def _tool_launch_pfca(
     Returns:
         JSON 字符串：
         ``{"status": "queued", "task_info": ..., "target_session_id": ..., "target_task_title": ...}``
-        由 ongoing_truck 在 decision_result 里透传给 station，station 启动任务链
+        由 truck（pre_truck 等）在 decision_result 里透传给 station，station 启动任务链
         并调 PFCA 时会把这两段拼成 PFCA 的 user content。
     """
     logger.info(
@@ -315,6 +365,107 @@ async def _tool_memory_adjustment(
         extra_name=extra_name or None,
     )
     return str(result)
+
+
+async def _tool_wait_and_observe(session_id: str, seconds: float) -> str:
+    """在目标群等待并观察是否出现新消息（只读，不推进任何游标）。
+
+    与 PFCA / ToolHandlers 的同名工具语义不同：
+    - PFCA 版推进 pfca 游标（消费），本工具**绝不触碰游标**——pre 游标归 pre_truck
+      所有，判断层推进会顶掉 pre 的未读检测（硬约束）；
+    - ToolHandlers 版只报「有没有新消息」，本工具把新增消息原文取回给 LLM。
+
+    口径：
+    1. 以调用时刻该会话最新消息的 _seq 为基线；
+    2. 每秒轮询，一旦出现 _seq > 基线的消息，用 get_messages_by_seq_range 取其
+       (基线, 最新] 全部用户消息并渲染返回；
+    3. 超时返回「无新消息」提示。
+
+    Args:
+        session_id: 目标群聊 id，格式 "group_xxx"。
+        seconds: 最长等待秒数（10-30，越界收敛到边界）。
+
+    Returns:
+        str: 新增消息文本，或超时提示。
+    """
+    import datetime
+
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return "[错误] wait_and_observe 缺少必填参数 session_id"
+    seconds = min(max(float(seconds), 10.0), 30.0)
+
+    from memory.message_repository import get_message_store
+    from memory.session_history import (
+        get_global_session_history,
+        FetchOptions,
+        MessageFormatOptions,
+    )
+
+    store = get_message_store()
+    history = get_global_session_history()
+
+    # 1. 以调用时刻最新消息的 _seq 为基线（不用游标，避免与 pre 游标归属纠缠）
+    latest = await store.get_latest_session_messages(session_id, 1)
+    latest_list = latest.get("message_list", [])
+    base_seq = latest_list[0]["_seq"] if latest_list else 0
+    logger.info(
+        f"proactive wait_and_observe 开始等待: session_id={session_id}, "
+        f"seconds={seconds}, 基线seq={base_seq}"
+    )
+
+    start_time = time.time()
+    while True:
+        elapsed = time.time() - start_time
+        if elapsed >= seconds:
+            break
+        await asyncio.sleep(min(1.0, seconds - elapsed))
+
+        # 2. 只读探测：出现超出基线的新消息即取回
+        now_latest = await store.get_latest_session_messages(session_id, 1)
+        now_list = now_latest.get("message_list", [])
+        if not now_list:
+            continue
+        now_seq = now_list[0]["_seq"]
+        if now_seq <= base_seq:
+            continue
+
+        new_messages = await store.get_messages_by_seq_range(
+            session_id, base_seq + 1, now_seq
+        )
+        # 只保留用户消息（system 为本系统自身 outbound）；判断层此时尚未发言，无需额外排除
+        new_messages = [m for m in new_messages if m.get("user_id") != "system"]
+        if not new_messages:
+            base_seq = now_seq
+            continue
+
+        show_lines, _ = history.format_messages(
+            new_messages,
+            FetchOptions(
+                message_format=MessageFormatOptions(
+                    show_new_marker=False,
+                    show_timestamp=True,
+                    exclude_system=True,
+                )
+            ),
+        )
+        current_time = datetime.datetime.now().strftime("%H:%M:%S")
+        content = "\n".join(show_lines) if show_lines else ""
+        logger.info(
+            f"proactive wait_and_observe 等待 {int(elapsed)} 秒后出现 "
+            f"{len(new_messages)} 条新消息 ({session_id})"
+        )
+        return (
+            f"等待 {int(elapsed)} 秒后，群聊 {session_id} 出现新消息，"
+            f"当前时间：{current_time}\n{content}"
+        )
+
+    current_time = datetime.datetime.now().strftime("%H:%M:%S")
+    logger.info(f"proactive wait_and_observe 超时: session_id={session_id}")
+    return (
+        f"等待观察完成，总共等待 {int(seconds)} 秒，群聊 {session_id} 未出现新消息，"
+        f"当前时间：{current_time}"
+    )
 
 
 async def _tool_skip_proactive(reason: str = "no_action_needed") -> str:

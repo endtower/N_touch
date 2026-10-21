@@ -33,9 +33,11 @@ def build_session_environment(
     if not session_id:
         return ""
 
-    is_private = session_id.startswith("private_")
-    is_group = session_id.startswith("group_")
-    is_master = is_private and session_id == f"private_{master_id}"
+    from adapt.session_identity import parse_session_id, session_scope
+    scope = session_scope(session_id)
+    is_private, is_group = scope == "private", scope == "group"
+    parsed = parse_session_id(session_id) if scope else None
+    is_master = is_private and parsed.platform in (None, "qq") and parsed.identity == str(master_id)
 
     name = session_name or "未知"
     lines = [f"【当前会话环境】你正在与{name} id {session_id} 交流"]

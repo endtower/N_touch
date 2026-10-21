@@ -15,8 +15,6 @@ from brain.amy.constants import (
     SystemBuiltInAct,
     Thought, MoodSnapshot, generate_timestamp_id, THOUGHT_DURATION,
     FinalEvaluationAct, TaskResultAct, FINAL_EVALUATION_THOUGHT_DURATION,
-    REFLECTION_VERIFICATION_COMPENSATION,
-    REFLECTION_SOCIAL_COMPENSATION,
 )
 from brain.amy.thought_cache import ThoughtCache, calculate_duration
 from brain.amy.affinity import AffinityStore
@@ -163,37 +161,13 @@ class EmotionalInterface:
 
         return await self.build_thought(act=act, desc=desc, desc_extra=desc_extra)
 
-    async def apply_reflection_compensation(self, title: str, reason: str,
-                                            axis: str = "competence") -> str:
-        """安排自修正验证补偿效能感、安排主动社交补偿归属感，均为 +30。
-
-        由 Reflection 的发布入口调用，每项每轮只补偿一次由会话工具管理器保证。
-        仅修改指定轴，不生成表达侧想法，不改变 NE/DA 或欠账台账。
-        """
-        if not isinstance(title, str) or not title.strip():
-            raise ValueError("反思补偿必须提供事件标题")
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("反思补偿必须提供安排行动的依据")
-        if axis == "competence":
-            label, delta = "已安排自修正验证", REFLECTION_VERIFICATION_COMPENSATION
-        elif axis == "recognition":
-            label, delta = "已安排主动社交", REFLECTION_SOCIAL_COMPENSATION
-        else:
-            raise ValueError("反思补偿轴必须为 competence 或 recognition")
-        self.feedback_state.settle(title.strip(), [
-            (axis, label, delta, reason.strip()),
-        ])
-        return await self.get_reflection_description()
-
     # ===== 最终评价登记 =====
 
     async def apply_final_evaluation(self, final_evaluation: str, title: str,
-                                     task_result: str = TaskResultAct.NEUTRAL,
-                                     task_reason: str = "", evaluation_reason: str = "") -> None:
-        """确认收尾时结算效能感与归属感。成功/失败都必须给任务原因（通用条目）；不影响 NE/DA。"""
-        TaskResultAct.validate(task_result, task_reason)
-        if not isinstance(evaluation_reason, str):
-            raise ValueError("评价依据必须是文本")
+                                     task_result: str = TaskResultAct.DEFAULT,
+                                     failure_reason: str = "") -> None:
+        """收尾按六档实际效益结算效能感，外部评价独立结算；不影响 NE/DA。"""
+        TaskResultAct.validate(task_result)
         if not FinalEvaluationAct.contains(final_evaluation):
             allowed = "、".join(FinalEvaluationAct.names())
             raise ValueError(f"未知最终评价: '{final_evaluation}'，允许词表: {allowed}")
@@ -204,15 +178,19 @@ class EmotionalInterface:
         final_evaluation = FinalEvaluationAct.normalize(final_evaluation)
         now = int(time.time())
 
-        # 任务结果与外部评价分别结算，两个值不相互抵扣。
+        from brain.amy.failure_reasons import validate_failure_reason, cache_failure_reason
+        failure_act = task_result if TaskResultAct.is_failure(task_result) else final_evaluation
+        validate_failure_reason(failure_act, failure_reason)
+
+        # 实际效益与外部评价分别结算，变动词条的说明统一采用标题。
         delta = FinalEvaluationAct.feedback_delta(final_evaluation)
         self.feedback_state.settle(title, [
             ("competence", task_result, TaskResultAct.deltas[task_result],
-             task_reason.strip() or f"PFCA 收尾判断：{task_result}，详见笔记"),
+             title),
             ("recognition", final_evaluation, delta,
-             evaluation_reason.strip() or f"PFCA 根据本轮外部反馈判断：{final_evaluation}，详见笔记"),
+             title),
         ], task_result=task_result)
-        trend = "上升" if delta > 0 else "降低"
+        await cache_failure_reason(failure_act, failure_reason, source="pfca", title=title)
 
         # 欠账台账（系统级共享）：负向评价记一笔明细；正向评价作为额度从最旧欠账开始抵扣。
         if delta < 0:
@@ -222,13 +200,13 @@ class EmotionalInterface:
             self.debt_ledger.save_to_file()
 
         # 最终评价计入想法池：act=评价词（前端归为 final 分类），
-        # desc 包含事件标题、任务结果与任务原因（成功/失败对称），
+        # desc 包含事件标题、实际效益评价及依据，
         # desc_extra 挂该评价产生时对应笔记的标题，供 LLM 用 query_note 回溯原笔记。
         # 时长 4 小时；遵守统一堆叠上限 3（2026-09-24：池满 FIFO 替换最早）。
         thought = Thought(
             id=generate_timestamp_id(),
             create_time=now,
-            desc=f"{title}：{AXIS_NAMES['recognition']}{trend}；任务结果：{task_result}" + (f"；任务原因：{task_reason.strip()}" if task_reason.strip() else ""),
+            desc=title,
             act=final_evaluation,
             expire_time=now + FINAL_EVALUATION_THOUGHT_DURATION,
             desc_extra=f"笔记：{title}",

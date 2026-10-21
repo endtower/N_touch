@@ -12,7 +12,7 @@ from aiohttp import web
 
 from console_context import list_chains, read_chain_file
 from console_history import list_sessions, read_messages
-from paths import data_root, log_root, resource_root
+from paths import data_root, log_root, web_dist
 from truck_settings_store import snapshot, update_settings
 
 COOKIE = "abyss_console_session"
@@ -286,7 +286,7 @@ class Console:
             return web.Response(text=LOGIN, content_type="text/html", headers={"Cache-Control": "no-store"})
         if request.path.startswith(("/console/", "/context/")):
             raise web.HTTPNotFound()
-        root = (resource_root() / "web_frontend" / "dist").resolve()
+        root = web_dist().resolve()
         relative = request.match_info.get("tail", "") or "index.html"
         path = (root / relative).resolve()
         if not path.is_relative_to(root):
@@ -312,7 +312,7 @@ LOGIN = '''<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="refe
 <script>document.querySelector('form').onsubmit=async e=>{e.preventDefault();const input=document.querySelector('input');const r=await fetch('/console/session',{method:'POST',headers:{'X-Manager-Token':input.value}});input.value='';if(r.ok)location.reload();else document.querySelector('#error').textContent='连接失败，请检查令牌。'}</script></html>'''
 
 
-def register_console(app, service, manager_token, config_handlers=None):
+def register_console(app, service, manager_token, config_handlers=None, connection_handlers=None):
     console = Console(service, manager_token)
 
     @web.middleware
@@ -360,6 +360,13 @@ def register_console(app, service, manager_token, config_handlers=None):
             return await handler(request.clone(headers={**request.headers, "X-Manager-Token": manager_token}))
         app.router.add_get("/system/config", config)
         app.router.add_put("/system/config", config)
+    if connection_handlers:
+        async def connection(request):
+            handler = connection_handlers[request.path]
+            return await handler(request.clone(headers={**request.headers, "X-Manager-Token": manager_token}))
+        app.router.add_get("/system/connections", connection)
+        app.router.add_post("/system/connections/check", connection)
+        app.router.add_post("/system/connections/apply", connection)
     for path in ("/system/core/shutdown", "/system/core/restart", "/system/snowluma/start", "/system/snowluma/stop"):
         app.router.add_post(path, console.system_action)
     app.router.add_route("*", "/system/{tail:.*}", console.proxy)

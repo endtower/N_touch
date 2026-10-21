@@ -82,7 +82,9 @@ async def _service_call(method: str, path: str, body: dict | None = None,
     """异步调用管理服务 /v1 接口（不阻塞事件循环，复核 R1）。"""
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-            async with session.request(_SERVICE_BASE + path, method=method,
+            # aiohttp 的签名是 request(method, url, ...)：URL 必须走关键字传参，
+            # 否则会被当作第一个位置参数 method，与 method=method 冲突（TypeError）。
+            async with session.request(method=method, url=_SERVICE_BASE + path,
                                        headers={"X-Manager-Token": _service_token()},
                                        json=body) as resp:
                 try:
@@ -298,3 +300,25 @@ async def handle_config_put(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "bad_json"}, status=400)
     return await _proxy(await _service_call("PUT", "/v1/config/core", body))
+
+
+async def handle_connections(request: web.Request) -> web.Response:
+    if not _authorized(request):
+        return _denied()
+    return await _proxy(await _service_call("GET", "/v1/connections"))
+
+
+async def handle_connection_check(request: web.Request) -> web.Response:
+    if not _authorized(request):
+        return _denied()
+    try:
+        body = await request.json()
+    except ValueError:
+        return web.json_response({"error": "bad_json"}, status=400)
+    return await _proxy(await _service_call("POST", "/v1/connections/check", body))
+
+
+async def handle_connections_apply(request: web.Request) -> web.Response:
+    if not _authorized(request):
+        return _denied()
+    return await _proxy(await _service_call("POST", "/v1/connections/apply"))

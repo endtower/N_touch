@@ -178,6 +178,9 @@ class MessageHandler:
         # 只有当原始消息中包含remark时，才添加到标准化后的消息中
         if "remark" in session_info:
             session_info_normalized["remark"] = session_info["remark"]
+        for field in ("platform", "connection_id", "remote_session_id", "generation"):
+            if field in session_info:
+                session_info_normalized[field] = session_info[field]
 
         return {
             "session_info": session_info_normalized,

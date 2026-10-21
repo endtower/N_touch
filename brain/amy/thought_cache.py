@@ -37,8 +37,10 @@ from brain.amy.constants import (
     Thought, MoodSnapshot, ACTEffects,
     BASE_VALUE, MIN_VALUE, MAX_VALUE,
     clamp, THOUGHT_DURATION,
+    DA_NEUTRAL, DA_SMOOTH_RATIO,
     generate_timestamp_id,
 )
+from brain.amy.smoothing import pull_toward_value
 
 logger = get_logger('amy_thought', 'INFO')
 
@@ -320,7 +322,10 @@ class ThoughtCache:
         """计算当前情绪快照。
 
         每个 thought 贡献 = intensity * act 的 ne/da delta。
-        所有 thought 贡献加性累加，最后 clamp 到 [-100, 100]。
+        所有 thought 贡献加性累加，clamp 到 [0, 100]。
+
+        DA 再朝中性锚点 DA_NEUTRAL 按 DA_SMOOTH_RATIO 收敛一步，
+        把曲线拉平缓（极端档位不再一脚踩到底）；NE 不做平滑。
 
         thought 的 intensity 在 add() 时已根据"是否该 act 池已有 thought"确定。
         """
@@ -348,6 +353,17 @@ class ThoughtCache:
 
             norepinephrine = clamp(total_norepinephrine, MIN_VALUE, MAX_VALUE)
             dopamine = clamp(total_dopamine, MIN_VALUE, MAX_VALUE)
+
+            # 朝中性锚点收敛：step 取当前偏离量的固定比例，越远拉得越多。
+            dopamine = clamp(
+                pull_toward_value(
+                    dopamine,
+                    DA_NEUTRAL,
+                    abs(dopamine - DA_NEUTRAL) * DA_SMOOTH_RATIO,
+                ),
+                MIN_VALUE,
+                MAX_VALUE,
+            )
 
             # 按时间排序取前 3 条
             sorted_thoughts = sorted(self.thoughts, key=lambda x: x.create_time, reverse=True)

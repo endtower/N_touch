@@ -1,0 +1,62 @@
+<UserControl x:Class="AbyssLauncher.VersionSelectorControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <UserControl.Resources>
+        <Style x:Key="VersionPicker" TargetType="ComboBox">
+            <Setter Property="Foreground" Value="{DynamicResource BrushTextPrimary}"/>
+            <Setter Property="Background" Value="{DynamicResource BrushBgSunken}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BrushBorderSubtle}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="26"/></Grid.ColumnDefinitions>
+                                    <TextBox x:Name="PART_EditableTextBox" Background="Transparent" BorderThickness="0"
+                                             Foreground="{TemplateBinding Foreground}" Padding="8,5" VerticalContentAlignment="Center"/>
+                                    <ToggleButton Grid.Column="1" Focusable="False" Background="Transparent" BorderThickness="0"
+                                                  Foreground="{TemplateBinding Foreground}" Content="▾"
+                                                  IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"/>
+                                </Grid>
+                            </Border>
+                            <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True">
+                                <Border Background="{DynamicResource BrushBgSurface}" BorderBrush="{DynamicResource BrushBorderSubtle}" BorderThickness="1"
+                                        MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}">
+                                    <ScrollViewer MaxHeight="260" VerticalScrollBarVisibility="Auto"><ItemsPresenter/></ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="{DynamicResource BrushTextPrimary}"/>
+            <Setter Property="Padding" Value="10,7"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="ItemBorder" Background="Transparent" Padding="{TemplateBinding Padding}"><ContentPresenter/></Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="ItemBorder" Property="Background" Value="{DynamicResource BrushBgSunken}"/></Trigger>
+                            <Trigger Property="IsSelected" Value="True"><Setter Property="Foreground" Value="{DynamicResource BrushAccent}"/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+    <!-- 行内常驻的版本选择：窄下拉 + 刷新小图标，跟着组件行的右侧按钮排在一起 -->
+    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+        <ComboBox x:Name="Picker" Style="{StaticResource VersionPicker}" Width="132" IsEditable="True" IsTextSearchEnabled="False"
+                  Margin="0,0,6,0"
+                  ToolTip="选择历史版本，也可输入已发布的版本号"/>
+        <Button x:Name="Refresh" Style="{StaticResource RowIconButton}" ToolTip="从更新源重新拉取可选版本">
+            <TextBlock Style="{StaticResource RowGlyph}" Text="&#xE72C;"/>
+        </Button>
+    </StackPanel>
+</UserControl>

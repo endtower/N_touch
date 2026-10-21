@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { MagicStick, Refresh, ChatLineSquare, Sunny, Lightning, Clock, Plus, Edit, Delete, TrendCharts, Connection } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -105,7 +106,7 @@ async function apiJson(url: string, opts: RequestInit) {
 const allActNames = computed(() => {
   if (!data.value) return [] as string[]
   const names: string[] = []
-  for (const cat of ['external', 'evaluation', 'self_action'] as const) {
+  for (const cat of ['external', 'evaluation', 'self_action', 'pfca_regulation'] as const) {
     for (const e of data.value.acts[cat]) names.push(e.name)
   }
   return names
@@ -260,14 +261,12 @@ function durationShort(sec: number) {
 }
 
 // 心情数值 -> 视觉化 (进度条 + 色阶)
-// Amy 描述带都在 0-100 区间, 用户视角也只看"激活强度".
-// 用 Math.abs() 把 -100..+100 映射到 0..100, 然后按强度上色.
+// NE/DA 为单向 0-100, 用户视角只看"激活强度", 直接按数值上色.
 function moodTone(v: number) {
-  const abs = Math.abs(v)
-  if (abs >= 60) return { color: 'var(--danger)', bg: 'color-mix(in srgb, var(--tag-danger) 18%, transparent)', label: '极度' }
-  if (abs >= 40) return { color: 'var(--warn)',    bg: 'color-mix(in srgb, var(--tag-warning) 18%, transparent)', label: '偏强' }
-  if (abs >= 20) return { color: 'var(--accent-2)', bg: 'color-mix(in srgb, var(--tag-success) 18%, transparent)', label: '正向' }
-  if (abs >= 10) return { color: 'var(--text-2)', bg: 'var(--bg-subtle)', label: '微弱' }
+  if (v >= 60) return { color: 'var(--danger)', bg: 'color-mix(in srgb, var(--tag-danger) 18%, transparent)', label: '极度' }
+  if (v >= 40) return { color: 'var(--warn)',    bg: 'color-mix(in srgb, var(--tag-warning) 18%, transparent)', label: '偏强' }
+  if (v >= 20) return { color: 'var(--accent-2)', bg: 'color-mix(in srgb, var(--tag-success) 18%, transparent)', label: '正向' }
+  if (v >= 10) return { color: 'var(--text-2)', bg: 'var(--bg-subtle)', label: '微弱' }
   return { color: 'var(--text-3)', bg: 'var(--bg-subtle)', label: '平静' }
 }
 
@@ -276,6 +275,7 @@ function actCategoryLabel(c: AmyThought['category'] | string) {
     case 'external':    return { label: '外部互动', color: 'var(--accent-2)' }
     case 'evaluation':   return { label: '评价',     color: 'var(--accent)' }
     case 'self_action':  return { label: '自身行为', color: 'var(--warn)' }
+    case 'pfca_regulation': return { label: '情绪调节', color: 'var(--accent-2)' }
     case 'system':       return { label: '系统',     color: 'var(--text-3)' }
     case 'final':        return { label: '最终评价', color: 'var(--tag-special)' }
     default:             return { label: '未知',     color: 'var(--text-3)' }
@@ -284,10 +284,8 @@ function actCategoryLabel(c: AmyThought['category'] | string) {
 
 function bandTextFor(value: number, bands: AmyDescriptionBand[] | undefined) {
   if (!bands || !bands.length) return null
-  // Amy 描述带都定义在 0-100 区间 (10..90), 但底层 NE/DA 实际可以是 -100..+100.
-  // 用户视角: NE/DA 表示"激活强度", 用绝对值匹配描述带.
-  const v = Math.abs(value)
-  const b = bands.find(b => v >= b.lo && v < b.hi)
+  // 描述带与 NE/DA 同为 0-100 区间, 直接按数值匹配.
+  const b = bands.find(b => value >= b.lo && value < b.hi)
   return b || bands[0] || null
 }
 
@@ -296,7 +294,7 @@ const ACT_INDEX = computed(() => {
   if (!data.value) return new Map<string, AmyActEntry>()
   // 只索引参与 mood 的常规 ACT；final 词表不产生 NE/DA 增量, 不进入索引
   const m = new Map<string, AmyActEntry>()
-  for (const cat of ['external', 'evaluation', 'self_action', 'system'] as const) {
+  for (const cat of ['external', 'evaluation', 'self_action', 'pfca_regulation', 'system'] as const) {
     for (const e of data.value.acts[cat]) m.set(e.name, e)
   }
   return m
@@ -311,10 +309,10 @@ function thoughtContribution(t: AmyThought): { ne: number; da: number } {
   }
 }
 
-// 进度条 (单方向 0..100, 用 Math.abs 把 -100..+100 映射到 0..100)
+// 进度条 (单向 0..100)
 const MOOD_RANGE = 100
 function gaugeWidth(v: number) {
-  return Math.min(Math.abs(v), MOOD_RANGE) / MOOD_RANGE * 100
+  return Math.min(Math.max(v, 0), MOOD_RANGE) / MOOD_RANGE * 100
 }
 
 // 决策侧双轴（效能感 / 归属感）：0-100 直接显示（非 NE/DA 绝对值语义），默认 50
@@ -331,13 +329,12 @@ function feedbackAxisName(axis: string) {
 </script>
 
 <template>
-  <el-dialog
+  <AppDialog size="panel"
     :model-value="props.visible"
-    width="90vw"
     :close-on-click-modal="false"
     align-center
-    :show-close="false"
     class="amy-dialog"
+    title="LLM 情绪状态"
     @update:model-value="(v: boolean) => emit('update:visible', v)"
   >
     <template #header>
@@ -370,14 +367,13 @@ function feedbackAxisName(axis: string) {
               去甲肾上腺素 NE
             </span>
             <span class="amy-gauge-value" :style="{ color: moodTone(data.mood.norepinephrine).color }">
-              {{ Math.abs(data.mood.norepinephrine).toFixed(1) }}
+              {{ data.mood.norepinephrine.toFixed(1) }}
             </span>
           </div>
           <div class="amy-gauge-bar">
             <div class="amy-gauge-track">
               <div
                 class="amy-gauge-fill"
-                :class="data.mood.norepinephrine >= 0 ? 'pos' : 'neg'"
                 :style="{
                   width: gaugeWidth(data.mood.norepinephrine) + '%',
                   background: moodTone(data.mood.norepinephrine).color,
@@ -402,14 +398,13 @@ function feedbackAxisName(axis: string) {
               多巴胺 DA
             </span>
             <span class="amy-gauge-value" :style="{ color: moodTone(data.mood.dopamine).color }">
-              {{ Math.abs(data.mood.dopamine).toFixed(1) }}
+              {{ data.mood.dopamine.toFixed(1) }}
             </span>
           </div>
           <div class="amy-gauge-bar">
             <div class="amy-gauge-track">
               <div
                 class="amy-gauge-fill"
-                :class="data.mood.dopamine >= 0 ? 'pos' : 'neg'"
                 :style="{
                   width: gaugeWidth(data.mood.dopamine) + '%',
                   background: moodTone(data.mood.dopamine).color,
@@ -453,7 +448,7 @@ function feedbackAxisName(axis: string) {
           </div>
           <div class="amy-gauge-band">
             <span class="amy-gauge-band-label">{{ axisTone(data.decision_feedback.competence_value).label }}</span>
-            <span class="amy-gauge-band-text">默认 50 · 任务成功 +20 / 失败 -20 / 结果不明 0</span>
+            <span class="amy-gauge-band-text">默认 50 · 明确有用 +10 / 可能收益 0 / 结果不满 -5 / 任务延期 -10 / 负面收益 -20 / 帮倒忙 -30</span>
           </div>
         </div>
 
@@ -683,10 +678,10 @@ function feedbackAxisName(axis: string) {
         </div>
       </section>
     </div>
-  </el-dialog>
+  </AppDialog>
 
   <!-- 最终评价登记（自我评价记录 + 想法入池，时长 4 小时） -->
-  <el-dialog v-model="finalEvalDialogVisible" :title="`最终评价 · ${finalEvalForm.name}`" width="480px" append-to-body>
+  <AppDialog v-model="finalEvalDialogVisible" :title="`最终评价 · ${finalEvalForm.name}`" width="480px" append-to-body>
     <el-form label-width="90px" @submit.prevent>
       <el-form-item label="评价">
         <span class="amy-act-fixed">{{ finalEvalForm.name }}</span>
@@ -703,10 +698,10 @@ function feedbackAxisName(axis: string) {
       <el-button @click="finalEvalDialogVisible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="saveFinalEval">登记</el-button>
     </template>
-  </el-dialog>
+  </AppDialog>
 
   <!-- 新建 thought（调试/测试）：从 ACT 表行点击进入，act 已锁定 -->
-  <el-dialog v-model="createDialogVisible" :title="`新增 thought · ${createForm.act}`" width="480px" append-to-body>
+  <AppDialog v-model="createDialogVisible" :title="`新增 thought · ${createForm.act}`" width="480px" append-to-body>
     <el-form label-width="70px" @submit.prevent>
       <el-form-item label="act">
         <span class="amy-act-fixed">{{ createForm.act }}</span>
@@ -725,10 +720,10 @@ function feedbackAxisName(axis: string) {
       <el-button @click="createDialogVisible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="saveCreate">新增</el-button>
     </template>
-  </el-dialog>
+  </AppDialog>
 
   <!-- 编辑 thought（调试/测试） -->
-  <el-dialog v-model="editDialogVisible" title="编辑 thought" width="480px" append-to-body>
+  <AppDialog v-model="editDialogVisible" title="编辑 thought" width="480px" append-to-body>
     <el-form label-width="70px" @submit.prevent>
       <el-form-item label="act">
         <el-select v-model="editForm.act" filterable allow-create default-first-option placeholder="选择或输入 act 名">
@@ -749,19 +744,15 @@ function feedbackAxisName(axis: string) {
       <el-button @click="editDialogVisible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="saveUpdate">保存</el-button>
     </template>
-  </el-dialog>
+  </AppDialog>
 </template>
 
 <style scoped>
-.amy-dialog :deep(.el-dialog__body) { padding: 0; }
-.amy-dialog :deep(.el-dialog__header) { padding: 0; margin: 0; }
 
 .amy-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--border-1);
   background: var(--bg-surface);
 }
 .amy-title {
@@ -794,8 +785,8 @@ function feedbackAxisName(axis: string) {
 .amy-loading.amy-error { color: var(--danger); }
 
 .amy-body {
-  height: 80vh;
-  min-height: 600px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 16px 20px 28px 20px;
   background: var(--bg-app);
@@ -1339,4 +1330,6 @@ function feedbackAxisName(axis: string) {
   word-break: break-word;
   line-height: 1.5;
 }
+/* Keep header controls clear of the shared close button. */
+.amy-header, .amy-title, .amy-actions { flex-wrap: wrap; min-width: 0; gap: 8px; }
 </style>

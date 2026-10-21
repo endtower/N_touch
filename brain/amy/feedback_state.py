@@ -12,6 +12,7 @@ from typing import Optional
 from brain.amy.constants import (
     clamp,
     FEEDBACK_DEFAULT, FEEDBACK_MIN, FEEDBACK_MAX,
+    TaskResultAct,
 )
 
 HISTORY_LIMIT = 5
@@ -42,7 +43,7 @@ class FeedbackState:
         self._competence_value = float(FEEDBACK_DEFAULT)
         self._history = []
         self._task_results = []
-        self._applied_growth_actions = []
+        self._applied_critical_actions = []
         self.load_from_file()
 
     def read_value(self) -> float:
@@ -78,16 +79,16 @@ class FeedbackState:
         self._history = trim_history_per_axis(copy.deepcopy(data.get("history", [])))
         self._task_results = copy.deepcopy(data.get("task_results", [
             {"title": e["title"], "result": e["label"], "time": e["time"]}
-            for e in self._history if e.get("axis") == "competence" and e.get("label") in ("成功", "失败")
+            for e in self._history if e.get("axis") == "competence" and e.get("label") in (*TaskResultAct.names(), *TaskResultAct.legacy_results, "成功", "失败")
         ]))[-20:]
-        self._applied_growth_actions = list(data.get("applied_growth_actions", []))
+        self._applied_critical_actions = list(data.get("applied_critical_actions", []))
 
     def snapshot(self) -> dict:
         """两轴及各自最近五条变动的独立副本；旧 value 代表归属感。"""
         return copy.deepcopy({"schema_version": 2, "value": self._value,
                               "competence_value": self._competence_value, "history": self._history,
                               "task_results": self._task_results,
-                              "applied_growth_actions": self._applied_growth_actions})
+                              "applied_critical_actions": self._applied_critical_actions})
 
     def save_to_file(self) -> None:
         """同目录临时文件替换，失败上抛。"""
@@ -132,7 +133,7 @@ class FeedbackState:
                     if delta < 0 and before <= FEEDBACK_MIN:
                         self._trim_oldest_negative(axis, entry)
             self._history = trim_history_per_axis(self._history)
-            if task_result in ("成功", "失败"):
+            if task_result in TaskResultAct.names():
                 self._task_results = (self._task_results + [{"title": title, "result": task_result, "time": int(time.time())}])[-20:]
             self.save_to_file()
         except Exception:
@@ -142,12 +143,12 @@ class FeedbackState:
             self._task_results = previous["task_results"]
             raise
 
-    def reset_for_growth(self, action_id: str, axis: str, title: str, reason: str) -> bool:
-        """成功登记的高值行动独立重置对应轴；编号与重置原子保存，重试不重复扣分。"""
+    def reset_for_critical_action(self, action_id: str, axis: str, title: str, reason: str) -> bool:
+        """四种临界行动登记后重置对应轴；持久化编号防止恢复时重复重置。"""
         from config.maintenance_settings import RESET_VALUE
         if axis not in ("competence", "recognition") or not action_id or not reason.strip():
-            raise ValueError("高值行动必须有有效编号、情感轴和原因")
-        if action_id in self._applied_growth_actions:
+            raise ValueError("临界行动必须有有效编号、情感轴和原因")
+        if action_id in self._applied_critical_actions:
             return False
         previous = self.snapshot()
         try:
@@ -156,16 +157,16 @@ class FeedbackState:
                 self._competence_value = float(RESET_VALUE)
             else:
                 self._value = float(RESET_VALUE)
-            self._history.append({"axis": axis, "label": "高值行动已安排", "delta": RESET_VALUE - before,
+            self._history.append({"axis": axis, "label": "临界行动已登记", "delta": RESET_VALUE - before,
                                   "before": before, "after": RESET_VALUE, "title": title,
                                   "reason": reason, "time": int(time.time())})
             self._history = trim_history_per_axis(self._history)
-            self._applied_growth_actions.append(action_id)
+            self._applied_critical_actions.append(action_id)
             self.save_to_file()
         except BaseException:
             self._value, self._competence_value = previous["value"], previous["competence_value"]
             self._history = previous["history"]
-            self._applied_growth_actions = previous["applied_growth_actions"]
+            self._applied_critical_actions = previous["applied_critical_actions"]
             raise
         return True
 

@@ -11,7 +11,7 @@
 - 服务端自动补全路径并校验，LLM 永远拿不到完整路径
 """
 
-from brain.attachments.resolver import resolve_media_file
+from brain.attachments.resolver import resolve_media_file, normalize_filename_component
 from brain.attachments.preflight import preflight
 
-__all__ = ["resolve_media_file", "preflight"]
+__all__ = ["resolve_media_file", "normalize_filename_component", "preflight"]

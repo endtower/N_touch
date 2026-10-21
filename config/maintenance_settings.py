@@ -1,7 +1,5 @@
-"""人机共治初始参数；高值行动与低值补偿分别结算。"""
+"""统一维护工具：四种临界状态登记后只重置对应值，不发放补偿。"""
 HIGH_THRESHOLD = 100
+LOW_THRESHOLD = 0
 RESET_VALUE = 50
-RECENT_TASK_WINDOW = 3
-MIN_TASK_SUCCESSES = 2
-REQUEST_INTERVAL_HOURS = 48
 CHECK_INTERVAL_SECONDS = 30

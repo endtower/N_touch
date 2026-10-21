@@ -25,6 +25,16 @@ from fastapi import FastAPI
 from typing import Dict, Any, AsyncIterator
 from dotenv import load_dotenv
 
+# 受管源码使用 Python 子进程，输出必须与管理服务读取日志的 UTF-8 约定一致。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
+# 受管源码使用 Python 子进程，输出必须与管理服务读取日志的 UTF-8 约定一致。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from paths import app_root, data_root, log_root, ensure_cwd
 
 # 项目根：源码运行 = 仓库根；冻结运行 = exe 所在目录（.env.dev 与用户数据都在这）
@@ -39,9 +49,14 @@ load_dotenv(_env_file if _env_file.is_file() else project_root / ".env.dev")
 # 冻结（--noconsole）模式下 stdout/stderr 是无效句柄，重定向到文件保住启动输出
 # 注意必须是文本模式：logging/uvicorn 写的是 str，二进制句柄会 TypeError
 if getattr(sys, "frozen", False):
+    from utils.logger import rotate_log_file
+
     _log_dir = log_root()
     _log_dir.mkdir(parents=True, exist_ok=True)
-    sys.stdout = open(_log_dir / "core_stdout.log", "a", encoding="utf-8", errors="replace", buffering=1)
+    _stdout_log = _log_dir / "core_stdout.log"
+    # 每次启动先轮转：否则本文件会被反复追加，越滚越大
+    rotate_log_file(_stdout_log)
+    sys.stdout = open(_stdout_log, "a", encoding="utf-8", errors="replace", buffering=1)
     sys.stderr = sys.stdout
 
 # 导入日志模块
@@ -86,7 +101,8 @@ def main() -> int:
     parser.add_argument("--dev", action="store_true",
                         help="开发模式：开启热重载（生产/打包环境务必关闭）")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=5000)
+    from config.env_tools import env_int
+    parser.add_argument("--port", type=int, default=env_int("MAIN_PORT", 5000))
     args = parser.parse_args()
 
     try:
@@ -111,7 +127,7 @@ def main() -> int:
         else:
             # 生产模式：直接传 app 对象，无文件监视、无子进程。
             # 进程停止由管理服务统一协调（core 优雅关闭经 /system/core/shutdown）
-            config = uvicorn.Config(app, host=args.host, port=args.port)
+            config = uvicorn.Config(app, host=args.host, port=args.port, access_log=False)
             server = uvicorn.Server(config)
             from adapt.web.system_api import set_uvicorn_server
             set_uvicorn_server(server)   # 内部直达关闭入口需要 Server 句柄

@@ -1,4 +1,6 @@
 using System.IO;
+using System.Reflection;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -28,6 +30,16 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        // 构建时间戳水印：publish 时由 csproj 写入程序集元数据，
+        // 存在多份同名 EXE 时据此辨认当前运行的是哪一次构建。
+        var buildStamp = typeof(MainWindow).Assembly
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(attr => attr.Key == "BuildStamp")?.Value ?? "";
+        if (buildStamp.Length > 0)
+        {
+            BuildStampText.Text = "构建 " + buildStamp;
+            Title = "Abyss 桌面启动管理器 · 构建 " + buildStamp;
+        }
         ThemeManager.ThemeChanged += OnThemeChanged;
         UpdateThemeIcon();
         UpdateMaximizeGlyph();
@@ -40,7 +52,7 @@ public partial class MainWindow : Window
             // 诊断用：ABYSS_LAUNCHER_SECTION 可指定启动停在哪个区块（默认 overview）。
             // 配合 ABYSS_LAUNCHER_SNAPSHOT 就能对每个区块单独出一张图来目检。
             var startSection = Environment.GetEnvironmentVariable("ABYSS_LAUNCHER_SECTION");
-            ShowSection(string.IsNullOrWhiteSpace(startSection) ? "overview" : startSection);
+            ShowSection(string.IsNullOrWhiteSpace(startSection) || startSection == "updates" ? "overview" : startSection);
             UpdateLayout();               // 强制完成一次布局，保证快照内容完整
             ApplyCloseBehavior();         // 把设置里的"× 行为"反映到关闭键提示上
             await SaveSnapshotIfRequestedAsync();
@@ -48,6 +60,8 @@ public partial class MainWindow : Window
             await InitWebView();
             StartPoll();
             StartLogPoll();
+            StartUpdateChecks();
+            await SaveUpdateSnapshotIfRequested();
         };
         Closed += (_, _) => ThemeManager.ThemeChanged -= OnThemeChanged;
     }
@@ -60,46 +74,66 @@ public partial class MainWindow : Window
         try
         {
             var info = await _client.TryInfo();
-            if (info is not null)
+            if (info is null)
             {
-                ServiceStateText.Text = "管理服务运行中";
-                SetTheme(ServiceStateText, TextBlock.ForegroundProperty, "BrushTagSuccess");
-                return;
-            }
-            StatusBar.Text = "管理服务未运行，正在拉起…";
-            var exe = AppPaths.ServiceExe();
-            var psi = exe is not null
-                ? new System.Diagnostics.ProcessStartInfo(exe) { WorkingDirectory = AppPaths.DataRoot() }
-                : new System.Diagnostics.ProcessStartInfo("python",
-                    $"\"{Path.Combine(AppPaths.AppRoot(), "manager_service.py")}\"")
-                { WorkingDirectory = AppPaths.DataRoot() };
-            psi.CreateNoWindow = true; psi.UseShellExecute = false;
-            psi.Environment["ABYSS_DATA_DIR"] = AppPaths.DataRoot();
-            System.Diagnostics.Process.Start(psi);
-            for (int i = 0; i < 20; i++)
-            {
-                await Task.Delay(500);
-                info = await _client.TryInfo();
-                if (info is not null)
+                StatusBar.Text = "管理服务未运行，正在拉起…";
+                var exe = AppPaths.ServiceExe();
+                var psi = exe is not null
+                    ? new System.Diagnostics.ProcessStartInfo(exe) { WorkingDirectory = AppPaths.DataRoot() }
+                    : new System.Diagnostics.ProcessStartInfo("python",
+                        $"\"{Path.Combine(AppPaths.AppRoot(), "manager_service.py")}\"")
+                    { WorkingDirectory = AppPaths.DataRoot() };
+                psi.CreateNoWindow = true; psi.UseShellExecute = false;
+                psi.Arguments += $" --port {AppPaths.ServicePort()}";
+                psi.Environment["ABYSS_DATA_DIR"] = AppPaths.DataRoot();
+                System.Diagnostics.Process.Start(psi);
+                for (int i = 0; i < 20 && info is null; i++)
                 {
-                    ServiceStateText.Text = "管理服务运行中（本轮自动拉起）";
-                    SetTheme(ServiceStateText, TextBlock.ForegroundProperty, "BrushTagSuccess");
+                    await Task.Delay(500);
+                    info = await _client.TryInfo();
+                }
+                if (info is null)
+                {
+                    StatusBar.Text = "管理服务拉起失败，可在日志里查看原因";
                     return;
                 }
             }
-            ServiceStateText.Text = "管理服务拉起失败";
-            SetTheme(ServiceStateText, TextBlock.ForegroundProperty, "BrushTagDanger");
+            await EnsureIngressAsync();
         }
         catch (Exception ex)
         {
-            ServiceStateText.Text = "管理服务启动失败";
-            StatusBar.Text = ex.Message;
+            StatusBar.Text = "管理服务启动失败：" + ex.Message;
         }
         finally
         {
             Interlocked.Exchange(ref _serviceEnsuring, 0);
         }
     }
+
+    /// <summary>消息接入是常驻服务：启动器一起来就把它拉起来，Core 没运行时也持续收件。
+    /// 旧管理服务没有独立接入目标时静默跳过（总览那一行会给出"版本过旧"的提示）。
+    /// 截图/验收走的是只读流程，不做这个副作用。</summary>
+    private async Task EnsureIngressAsync()
+    {
+        if (IsSnapshotRun) return;
+        if (Bootstrap.Available && !File.Exists(Path.Combine(AppPaths.AppRoot(), "components", "core", "release.json")))
+        {
+            StatusBar.Text = "请选择 Core 和 SnowLuma 版本，确认下载并安装后即可启动";
+            return;
+        }
+        var root = await _client.GetAsync("/v1/targets");
+        var ingress = root.GetProperty("targets").EnumerateArray()
+            .Select(ManagerClient.ParseTarget).FirstOrDefault(t => t.Name == "ingress");
+        if (ingress is null || IsRunning(ingress)) return;
+        var result = await _client.PostAsync("/v1/targets/ingress/start");
+        if (result.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.False)
+            StatusBar.Text = "消息接入未能常驻："
+                + (result.TryGetProperty("message", out var message) ? message.GetString() : "未知原因");
+    }
+
+    private static bool IsSnapshotRun =>
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ABYSS_UPDATES_SNAPSHOT"))
+        || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ABYSS_LAUNCHER_SNAPSHOT"));
 
     // ---------------- 轮询 ----------------
 
@@ -128,8 +162,7 @@ public partial class MainWindow : Window
                     _navigationError = "";
                 }
             }
-            ServiceStateText.Text = "管理服务运行中";
-            SetTheme(ServiceStateText, TextBlock.ForegroundProperty, "BrushTagSuccess");
+            ApplyDot(ManagerDot, "running");
             ManagerClient.Target? core = null, snow = null, ingress = null;
             foreach (var t in root.GetProperty("targets").EnumerateArray())
             {
@@ -147,31 +180,39 @@ public partial class MainWindow : Window
             }
             if (core is not null)
             {
-                CoreStateText.Text = core.State;
-                SetTheme(CoreStateText, TextBlock.ForegroundProperty,
-                    core.State == "running" ? "BrushTagSuccess" : "BrushTagDanger");
-                CoreDetail.Text = $"pid {core.Pid?.ToString() ?? "—"} · 端口 {string.Join("/", core.Ports)} · "
+                ApplyDot(CoreDot, core.State);
+                var detail = $"pid {core.Pid?.ToString() ?? "—"} · 端口 {string.Join("/", core.Ports)} · "
                     + $"运行 {core.UptimeSec?.ToString("0") ?? "—"}s · "
                     + $"业务{(core.Ready ? "就绪" : "未就绪")}"
-                    + (string.IsNullOrEmpty(core.LastError) ? "" : $"\n{core.LastError}");
+                    + (string.IsNullOrEmpty(core.LastError) ? "" : $" · {core.LastError}");
+                CoreDetail.Text = detail;
+                CoreDetail.ToolTip = detail;
+                SetRunButtons(CoreStart, CoreStop, core);
             }
             if (ingress is not null)
             {
-                IngressStateText.Text = ingress.State;
-                SetTheme(IngressStateText, TextBlock.ForegroundProperty,
-                    ingress.Ready ? "BrushTagSuccess" : "BrushTagDanger");
+                ApplyDot(IngressDot, ingress.State);
                 var connection = ingress.OneBotConnected is true ? "SnowLuma 已连接"
                     : ingress.OneBotConnected is false ? "等待 SnowLuma 连接" : "连接状态未知";
-                IngressDetail.Text = $"{ingress.State} · pid {ingress.Pid?.ToString() ?? "—"} · "
+                var detail = $"{ingress.State} · pid {ingress.Pid?.ToString() ?? "—"} · "
                     + $"端口 {string.Join("/", ingress.Ports)} · {connection}"
-                    + (string.IsNullOrEmpty(ingress.LastError) ? "" : $"\n{ingress.LastError}");
+                    + (string.IsNullOrEmpty(ingress.LastError) ? "" : $" · {ingress.LastError}");
+                IngressDetail.Text = detail;
+                IngressDetail.ToolTip = detail;
+                SetRunButtons(IngressStart, IngressStop, ingress);
             }
             else
             {
-                IngressStateText.Text = "管理服务版本过旧";
-                IngressDetail.Text = "请从旧启动器选择退出全部，再打开新版；旧服务没有独立消息接入。";
+                IngressDetail.Text = "请从旧启动器选择退出全部，再打开新版";
+                IngressDetail.ToolTip = "旧服务没有独立消息接入。";
+                ApplyDot(IngressDot, "failed");
+                SetRunButtons(IngressStart, IngressStop, null);
             }
             _serviceConnected = true;
+            // 组件卡右上角的状态 chip：管理服务与启动器自身常驻，另有跑起来的业务/常驻目标
+            var runningCount = new[] { "core", "snowluma", "ingress" }.Count(TargetRunning) + 2;
+            SetChip(ComponentsChip, ComponentsChipText,
+                runningCount >= 5 ? "全部运行" : $"运行中 {runningCount} / 5", false);
             if (Web.CoreWebView2 is not null && DateTime.UtcNow >= _consoleSessionRenewAt)
             {
                 var session = await _client.GetAsync("/v1/console-session");
@@ -186,19 +227,20 @@ public partial class MainWindow : Window
             UpdateWebPage();
             if (snow is not null)
             {
-                SnowlumaStateText.Text = snow.State;
-                SetTheme(SnowlumaStateText, TextBlock.ForegroundProperty,
-                    snow.State == "running" ? "BrushTagSuccess" : "BrushTagDanger");
-                SnowlumaDetail.Text = $"pid {snow.Pid?.ToString() ?? "—"} · 端口 {string.Join("/", snow.Ports)}"
-                    + (string.IsNullOrEmpty(snow.LastError) ? "" : $"\n{snow.LastError}");
+                ApplyDot(SnowDot, snow.State);
+                var detail = $"pid {snow.Pid?.ToString() ?? "—"} · 端口 {string.Join("/", snow.Ports)}"
+                    + (string.IsNullOrEmpty(snow.LastError) ? "" : $" · {snow.LastError}");
+                SnowlumaDetail.Text = detail;
+                SnowlumaDetail.ToolTip = detail;
+                SetRunButtons(SnowStart, SnowStop, snow);
             }
         }
         catch (Exception)
         {
             _serviceConnected = false;
             _consoleSessionRenewAt = DateTime.MinValue;
-            ServiceStateText.Text = "与服务失去连接";
-            SetTheme(ServiceStateText, TextBlock.ForegroundProperty, "BrushTagDanger");
+            ApplyDot(ManagerDot, "failed");
+            SetChip(ComponentsChip, ComponentsChipText, "服务未连接", false);
             UpdateWebPage();
         }
         finally { Interlocked.Exchange(ref _targetRefresh, 0); }
@@ -242,10 +284,8 @@ public partial class MainWindow : Window
         WebPanel.Visibility = isWeb ? Visibility.Visible : Visibility.Collapsed;
         LogsPanel.Visibility = tag == "logs" ? Visibility.Visible : Visibility.Collapsed;
 
-        // 只有「总览」和「日志」用得到二级侧栏。
-        // 页面区块把整列收成 0，宽度全让给网页 —— 页面信息与刷新改放主区自己那条窄栏。
-        SideColumn.Width = isWeb ? new GridLength(0) : new GridLength(236);
-        SideStatus.Visibility = tag == "overview" ? Visibility.Visible : Visibility.Collapsed;
+        // 只有「日志」还用得到二级侧栏；总览的服务状态已并进组件清单，整列收 0 把宽度让给内容。
+        SideColumn.Width = tag == "logs" ? new GridLength(236) : new GridLength(0);
         SideLogs.Visibility = tag == "logs" ? Visibility.Visible : Visibility.Collapsed;
 
         // 页面名与状态在状态栏里，非网页区块要清掉，免得留着上一次的内容
@@ -563,11 +603,66 @@ public partial class MainWindow : Window
     {
         if (string.IsNullOrEmpty(_webSource)) return;
         var source = _webSource;
+        if (source == "core" && !await EnsureCoreSetup()) return;
         var action = _targets.TryGetValue(source, out var target) && target.Pid is not null ? "restart" : "start";
         await Send($"/v1/targets/{source}/{action}");
     }
 
     // ---------------- 控制动作 ----------------
+
+    /// <summary>受管目标是否处于"已起来"的状态（用于把启动/停止合并成一个切换按钮）。</summary>
+    private static bool IsRunning(ManagerClient.Target target) => target.State is "running" or "starting";
+
+    /// <summary>启动/停止两个图标常驻在一行：运行中亮"停止"，否则亮"启动"。
+    /// 两个按钮都在，差别只在是否可点。target 为 null（旧服务缺目标）时两个都置灰。</summary>
+    private static void SetRunButtons(Button start, Button stop, ManagerClient.Target? target)
+    {
+        var running = target is not null && IsRunning(target);
+        start.IsEnabled = target is not null && !running;
+        stop.IsEnabled = target is not null && running;
+        start.ToolTip = running ? "已在运行" : "启动";
+        stop.ToolTip = running ? "停止" : "未在运行";
+    }
+
+    // ---------------- 状态灯 ----------------
+
+    private readonly HashSet<System.Windows.Shapes.Ellipse> _pulsingDots = new();
+
+    /// <summary>状态色：运行绿，过渡态（启动中/停止中）橙，失败红，其余红。</summary>
+    private static string DotBrush(string state) => state switch
+    {
+        "running" => "BrushTagSuccess",
+        "starting" or "stopping" => "BrushTagWarning",
+        _ => "BrushTagDanger",
+    };
+
+    /// <summary>给状态灯上色；过渡态额外做呼吸灯，提示"正在开启/正在关闭"这类事件还在进行。</summary>
+    private void ApplyDot(System.Windows.Shapes.Ellipse dot, string state)
+    {
+        SetTheme(dot, System.Windows.Shapes.Shape.FillProperty, DotBrush(state));
+        if (state is "starting" or "stopping") StartPulse(dot);
+        else StopPulse(dot);
+    }
+
+    private void StartPulse(System.Windows.Shapes.Ellipse dot)
+    {
+        if (!_pulsingDots.Add(dot)) return;   // 已经在呼吸就不要重启动画，免得每轮轮询都跳一下
+        dot.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0.2, TimeSpan.FromMilliseconds(620))
+        {
+            AutoReverse = true,
+            RepeatBehavior = RepeatBehavior.Forever,
+            EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut },
+        });
+    }
+
+    private void StopPulse(System.Windows.Shapes.Ellipse dot)
+    {
+        if (!_pulsingDots.Remove(dot)) return;
+        dot.BeginAnimation(OpacityProperty, null);
+        dot.Opacity = 1;
+    }
+
+    private bool TargetRunning(string name) => _targets.TryGetValue(name, out var target) && IsRunning(target);
 
     private async Task Send(string path)
     {
@@ -593,18 +688,49 @@ public partial class MainWindow : Window
         }
     }
 
-    private void CoreStart_Click(object sender, RoutedEventArgs e) => _ = Send("/v1/targets/core/start");
-    private void CoreStop_Click(object sender, RoutedEventArgs e) => _ = Send("/v1/targets/core/stop");
-    private void CoreRestart_Click(object sender, RoutedEventArgs e) => _ = Send("/v1/targets/core/restart");
-    private void IngressStart_Click(object sender, RoutedEventArgs e) => _ = Send("/v1/targets/ingress/start");
-    private void IngressStop_Click(object sender, RoutedEventArgs e) => _ = Send("/v1/targets/ingress/stop");
-    private void IngressRestart_Click(object sender, RoutedEventArgs e) => _ = Send("/v1/targets/ingress/restart");
-    private void SnowlumaStart_Click(object sender, RoutedEventArgs e) => _ = Send("/v1/targets/snowluma/start");
-    private void SnowlumaStop_Click(object sender, RoutedEventArgs e) => _ = Send("/v1/targets/snowluma/stop");
-    private void SnowlumaWebui_Click(object sender, RoutedEventArgs e) => ShowSection("snowluma");
+    /// <summary>行右侧操作区：内部按钮/下拉已处理的点击到这里就停了；
+    /// 点操作区空白处也不该触发整行的展开/收起。</summary>
+    private void RowActions_Click(object sender, MouseButtonEventArgs e) => e.Handled = true;
+
+    /// <summary>启动/停止按按钮自己的 Tag 判断目标，不再依赖运行状态做方向判断。</summary>
+    private async void TargetStart_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag?.ToString() is string name && name.Length > 0)
+        {
+            if (name == "core" && !await EnsureCoreSetup()) return;
+            await Send($"/v1/targets/{name}/start");
+        }
+    }
+
+    private async Task<bool> EnsureCoreSetup()
+    {
+        if (!File.Exists(Path.Combine(AppPaths.AppRoot(), "components", "core", "release.json"))) return true;
+        try
+        {
+            var config = await _client.GetAsync("/v1/config/core");
+            var fields = config.GetProperty("fields");
+            var ownerSet = fields.TryGetProperty("MASTER_ID", out var owner) && long.TryParse(owner.GetString(), out var number) && number > 0;
+            var keySet = fields.TryGetProperty("FLASH_API_KEY_SET", out var configured) && configured.GetBoolean();
+            if (ownerSet && keySet) return true;
+            var dialog = new CoreSetupDialog(config) { Owner = this };
+            if (dialog.ShowDialog() != true) return false;
+            var saved = await _client.PutAsync("/v1/config/core", new { fields = dialog.Fields });
+            if (!saved.TryGetProperty("saved", out var ok) || !ok.GetBoolean())
+                throw new InvalidOperationException(saved.TryGetProperty("message", out var message) ? message.GetString() : "配置未保存");
+            return true;
+        }
+        catch (Exception error) { StatusBar.Text = "首次设置未完成：" + error.Message; return false; }
+    }
+
+    private void TargetStop_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag?.ToString() is string name && name.Length > 0)
+            _ = Send($"/v1/targets/{name}/stop");
+    }
 
     private async void StartAll_Click(object sender, RoutedEventArgs e)
     {
+        if (!await EnsureCoreSetup()) return;
         await Send("/v1/targets/core/start");
         await Send("/v1/targets/snowluma/start");
     }
@@ -620,6 +746,7 @@ public partial class MainWindow : Window
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
+        if (_exitConfirmed) return;
         if (!UiSettings.CloseToTray)
         {
             // 设置成"退出程序"：走既有的停止全部并退出流程。
@@ -666,7 +793,20 @@ public partial class MainWindow : Window
 
         _ = Task.Run(async () =>
         {
-            try { await _client.PostAsync("/v1/shutdown"); } catch { }
+            try
+            {
+                var result = await _client.PostAsync("/v1/shutdown");
+                if (result.TryGetProperty("ok", out var ok) && ok.ValueKind == System.Text.Json.JsonValueKind.False)
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        _exitConfirmed = false;
+                        StatusBar.Text = result.TryGetProperty("message", out var message) ? message.GetString() : "暂时无法退出";
+                    });
+                    return;
+                }
+            }
+            catch { }
             Dispatcher.Invoke(() => ((App)Application.Current).ReallyExit());
         });
     }

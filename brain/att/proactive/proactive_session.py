@@ -18,6 +18,7 @@ proactive 模块单次会话
 """
 
 import asyncio
+from collections import deque
 from typing import Any, Dict, Literal, Optional
 
 from utils.error_handling import async_handle_errors
@@ -52,6 +53,9 @@ class ProactiveSession(HeavySession):
     TOKEN_BUDGET = 500_000
     # 本类重写了 start()（不走基类骨架），max_rounds 在自有循环里手工判
     max_rounds = 40
+    # wait_and_observe 的语义就是"参数相同地反复等待"，豁免重复调用检测
+    # （对齐 conversation / social_chat；否则同参多轮等待会被判空转强制退出）
+    repeat_exempt_tools = frozenset({"wait_and_observe"})
 
     def __init__(self, task_draft: Dict[str, Any]):
         self.task_draft = task_draft
@@ -86,7 +90,11 @@ class ProactiveSession(HeavySession):
 
     async def _handle_tool_call(self, tool_call):
         """处理单个工具调用（委托给 tool_registry）"""
-        return await self.tool_registry.handle_tool_call(tool_call)
+        result = await self.tool_registry.handle_tool_call(tool_call)
+        content = result.get("content", "") if isinstance(result, dict) else str(result)
+        if not str(content).startswith("[错误]"):
+            self._on_tool_result(tool_call.function.name, result)
+        return result
 
     # ============================================================
     # 生命周期
@@ -124,7 +132,7 @@ class ProactiveSession(HeavySession):
             # 2. 推进主循环（含 token 预算作用域与轮数上限；process_cycle 用基类实现）
             budget = TokenBudget(self.TOKEN_BUDGET) if self.TOKEN_BUDGET else None
             self.token_budget = budget
-            self._recent_tool_sigs = []
+            self._recent_tool_sigs = deque(maxlen=self.repeat_threshold)
             self._tool_repeat_strikes = 0
             self._last_repeat_tool = ""
             with token_budget_scope(budget), agent_scope(self.agent_name or type(self).__name__):
@@ -171,12 +179,15 @@ class ProactiveSession(HeavySession):
     # ============================================================
 
     async def _prepare_first_message(self) -> None:
-        """通过 input_manager 准备首次消息（plan + triggered + 任务草稿）"""
+        """通过 input_manager 准备首次消息（triggered 任务 + 任务草稿）
+
+        待接续事项目录由 input_manager 自取轻量表（format_active_task_overview），
+        此处不再预拉整张任务表。
+        """
         if self._prepared:
             return
         self._prepared = True
 
-        planned_tasks = await self._fetch_planned_tasks()
         triggered_task = (
             self.payload.get("task")
             or self.task_draft.get("triggered_task")
@@ -184,7 +195,7 @@ class ProactiveSession(HeavySession):
 
         # 当 truck 传入了触发任务时, 在首条 user 消息底部追加一句「本次主动唤醒原因」
         # 唤醒原因文本由 truck 在 task_draft.wakeup_reason 中显式给出
-        # (目前由 scheduled_proactive_truck / ongoing_truck 两个推给 proactive 的 truck 强制填入);
+        # (目前由 pre_truck 等 truck 强制填入);
         # 未提供则温柔兜底 (有 triggered_task 时用任务型文案, 否则省略避免空话)。
         wakeup_reason = self.task_draft.get("wakeup_reason")
         if not wakeup_reason and triggered_task:
@@ -193,33 +204,13 @@ class ProactiveSession(HeavySession):
         self.input_manager.prepare_first_message(
             message_type=FirstMessageType.NORMAL_STARTUP,
             task_draft=self.task_draft,
-            planned_tasks=planned_tasks,
             triggered_task=triggered_task,
             wakeup_reason=wakeup_reason,
         )
         logger.debug(
             f"proactive 首次消息已准备好, payload.task={'有' if triggered_task else '无'}, "
-            f"planned={len(planned_tasks)}, wakeup_reason={'有' if wakeup_reason else '无'}"
+            f"wakeup_reason={'有' if wakeup_reason else '无'}"
         )
-
-    async def _fetch_planned_tasks(self) -> list:
-        """拉取所有未完成任务，喂给 input_manager
-
-        拉取失败直接上抛崩溃阻断（按 user_rules，不 try-ex 静默跳过）。"""
-        from brain.hc.database.task import TaskOperations
-        task_ops = TaskOperations()
-        task_ids = await task_ops.get_active_tasks(limit=50)
-        tasks = []
-        for tid in task_ids:
-            rec = await task_ops.get_task_by_id(tid)
-            if rec:
-                tasks.append({
-                    "task_id": rec.get("task_id"),
-                    "title": rec.get("title"),
-                    "context": rec.get("context"),
-                    "next_occurrence": rec.get("next_occurrence"),
-                })
-        return tasks
 
     # ============================================================
     # 主循环（复用父类 HeavySession.process_cycle 固定骨架）
@@ -249,7 +240,7 @@ class ProactiveSession(HeavySession):
             self.running = False
             logger.info(f"proactive 终结工具 {tool_name} 已调用, 退出 session (skipped)")
 
-    async def _inject_single_user_message(self) -> bool:
+    async def _inject_first_user_message(self) -> bool:
         """从 input_manager 拿首次消息，注入 history"""
         if self.input_manager._queued_request is None:
             return False
@@ -258,6 +249,10 @@ class ProactiveSession(HeavySession):
             self.history_manager.append({"role": "user", "content": content})
             logger.debug(f"proactive 注入首次 user 消息, 长度={len(content)}")
             return True
+        return False
+
+    async def _inject_incremental_user_message(self) -> bool:
+        """PRE 每次只投递一份契机；后续轮次由工具结果提供上下文。"""
         return False
 
     async def _call_llm(self):

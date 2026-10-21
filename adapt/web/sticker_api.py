@@ -20,7 +20,6 @@ from __future__ import annotations
 from paths import data_root
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -40,17 +39,9 @@ _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 
 def _sanitize_filename(title: str, max_len: int = 50) -> str:
-    """把标题清洗成可作为文件名的字符串（与 VisionAgent._sanitize_filename 一致）。"""
-    if not title:
-        return "untitled"
-    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]', '', title)
-    cleaned = cleaned.strip().rstrip('.')
-    cleaned = re.sub(r'\s+', ' ', cleaned)
-    if not cleaned:
-        return "untitled"
-    if len(cleaned) > max_len:
-        cleaned = cleaned[:max_len].rstrip()
-    return cleaned
+    """把标题清洗成可作为文件名的字符串（与 VisionAgent._sanitize_filename 同源）。"""
+    from brain.attachments import normalize_filename_component
+    return normalize_filename_component(title, max_len)
 
 
 def _resolve_sticker_file(filename: str) -> Path:

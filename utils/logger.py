@@ -6,9 +6,10 @@
 
 此模块提供日志配置和管理功能，包括：
 1. 设置日志级别和格式
-2. 创建文件日志处理器（包括总日志和模块日志）
+2. 创建文件日志处理器（包括总日志和模块日志，均按大小轮转）
 3. 提供日志记录器获取功能
 4. 支持彩色日志输出
+5. 启动期清理超过保留期的历史日志
 """
 
 from paths import log_root, resource_root
@@ -18,6 +19,7 @@ import sys
 import time
 import asyncio
 import threading
+from logging.handlers import RotatingFileHandler
 from typing import Optional, Callable, Awaitable, List
 from pathlib import Path
 from dotenv import load_dotenv
@@ -92,6 +94,20 @@ TIME_FORMAT = '%m-%d %H:%M:%S'  # 月-日 时:分:秒
 # 配置需要单独记录日志的模块列表
 SEPARATE_LOG_MODULES = os.getenv('SEPARATE_LOG_MODULES', '').split(',') if os.getenv('SEPARATE_LOG_MODULES') else []
 
+# 日志轮转与保留策略：单文件上限（默认 10MB）、轮转备份份数、历史日志保留天数
+LOG_MAX_BYTES = int(os.getenv('LOG_MAX_BYTES', str(10 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '7'))
+LOG_RETENTION_DAYS = int(os.getenv('LOG_RETENTION_DAYS', '7'))
+
+# 是否写入全局总日志文件（app_*.log）。
+# 多个进程同时写同一个文件时，Windows 下轮转所需的 rename 会因文件被占用而失败，
+# 因此只允许主进程写入；ingress 等子进程通过 LOG_GLOBAL_FILE=0 关闭（其日志由 *.out.log 承载）。
+LOG_GLOBAL_FILE_ENABLED = os.getenv('LOG_GLOBAL_FILE', '1').strip().lower() not in ('0', 'false', 'no')
+
+# 第三方库降噪：这些 logger 默认刷屏（aiohttp 访问日志、httpx 请求日志、uvicorn 访问日志），
+# 统一压到 WARNING，除非显式把 LOG_LEVEL 调成 DEBUG。
+NOISY_LOGGERS = ('aiohttp.access', 'httpx', 'httpcore', 'uvicorn.access')
+
 # 全局总日志记录器实例
 _global_logger = None
 
@@ -101,6 +117,80 @@ INFO = logging.INFO
 WARNING = logging.WARNING
 ERROR = logging.ERROR
 CRITICAL = logging.CRITICAL
+
+
+def cleanup_stale_logs(keep_days: int = LOG_RETENTION_DAYS) -> int:
+    """
+    清理日志根目录下超过保留期的历史日志文件
+
+    覆盖 app_*.log 及其轮转分片（app_*.log.1、app_*.log.2 …）。
+    子目录（manager/、onebot_raw_events/）由各自的策略负责，不在此处处理。
+
+    Args:
+        keep_days: 保留天数，早于该天数的文件会被删除
+
+    Returns:
+        int: 删除的文件数量
+    """
+    if keep_days <= 0:
+        return 0
+
+    log_dir = log_root()
+    if not log_dir.exists():
+        return 0
+
+    cutoff = time.time() - keep_days * 86400
+    candidates = list(log_dir.glob("app_*.log*")) + list(log_dir.glob("core_stdout.log*"))
+    manager_dir = log_dir / "manager"
+    if manager_dir.is_dir():
+        # 子进程输出（core/ingress/snowluma/service.out.log）及其轮转分片；
+        # 运行中的进程每次写入都会刷新 mtime，因此只可能命中已经停用的陈旧文件
+        candidates += list(manager_dir.glob("*.out.log*"))
+    removed = 0
+    for path in candidates:
+        if not path.is_file():
+            continue
+        if path.stat().st_mtime < cutoff:
+            path.unlink()
+            removed += 1
+    return removed
+
+
+def rotate_log_file(
+    path: "Path | str",
+    max_bytes: int = LOG_MAX_BYTES,
+    backup_count: int = LOG_BACKUP_COUNT,
+) -> bool:
+    """按大小轮转单个日志文件（供子进程输出等非 logging 流使用）。
+
+    RotatingFileHandler 只能统计「本进程自己写入」的字节；子进程输出是通过
+    继承的文件句柄写入的，父进程无法计数，因此改为在每次拉起进程前显式轮转：
+    文件超过 max_bytes 时 .log → .log.1、.1 → .2 …… 丢弃最旧的一份。
+    这样每次重启都会翻页，历史内容不会无限追加到同一个文件里。
+
+    Args:
+        path: 目标日志文件
+        max_bytes: 单文件上限，<=0 表示不轮转
+        backup_count: 保留的备份份数，<=0 表示不轮转
+
+    Returns:
+        bool: 是否发生了轮转
+    """
+    path = Path(path)
+    if max_bytes <= 0 or backup_count <= 0 or not path.is_file():
+        return False
+    if path.stat().st_size < max_bytes:
+        return False
+
+    oldest = Path(f"{path}.{backup_count}")
+    if oldest.exists():
+        oldest.unlink()
+    for index in range(backup_count - 1, 0, -1):
+        source = Path(f"{path}.{index}")
+        if source.exists():
+            source.replace(Path(f"{path}.{index + 1}"))
+    path.replace(Path(f"{path}.1"))
+    return True
 
 
 def setup_global_logger() -> logging.Logger:
@@ -135,6 +225,9 @@ def setup_global_logger() -> logging.Logger:
     root_logger = logging.getLogger()
     root_logger.setLevel(level_map.get(log_level, logging.INFO))
 
+    # 启动期清理过期历史日志（日志初始化失败的场景要阻断暴露，不静默继续）
+    cleanup_stale_logs()
+
     # 各类 handler 独立判重（FileHandler 是 StreamHandler 的子类，console 判重需排除它）
     has_file = any(isinstance(h, logging.FileHandler) for h in root_logger.handlers)
     has_console = any(
@@ -142,9 +235,14 @@ def setup_global_logger() -> logging.Logger:
         for h in root_logger.handlers
     )
 
-    if not has_file:
-        # 文件处理器 - 无颜色（用于总日志文件）
-        global_file_handler = logging.FileHandler(global_log_file, encoding='utf-8')
+    if not has_file and LOG_GLOBAL_FILE_ENABLED:
+        # 文件处理器 - 无颜色（用于总日志文件），按大小轮转，避免单文件无限膨胀
+        global_file_handler = RotatingFileHandler(
+            global_log_file,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding='utf-8',
+        )
         file_formatter = logging.Formatter(
             '%(asctime)s [%(levelname)s] %(name)s | %(message)s',
             datefmt=TIME_FORMAT
@@ -168,6 +266,12 @@ def setup_global_logger() -> logging.Logger:
     # 形成「检测到变更 → 打日志 → 写回日志文件 → 再检测到变更」的自指永动刷屏。
     # 切断传播即可让该日志不再进入终端与文件。
     logging.getLogger("watchfiles").propagate = False
+
+    # 第三方库降噪：默认只保留 WARNING 及以上（逐次请求/访问日志属高频低价值噪声）。
+    # 需要排查这些库时把 LOG_LEVEL 设为 DEBUG 即可恢复。
+    if log_level != 'DEBUG':
+        for noisy_name in NOISY_LOGGERS:
+            logging.getLogger(noisy_name).setLevel(logging.WARNING)
 
     # 设置_global_logger为根日志记录器
     _global_logger = root_logger
@@ -231,7 +335,12 @@ def setup_logging(name: str = 'app', log_level: Optional[int or str] = None) -> 
         isinstance(h, logging.FileHandler) for h in logger.handlers
     ):
         module_log_file = log_dir / f"{name}_{time.strftime('%Y-%m-%d')}.log"
-        module_file_handler = logging.FileHandler(module_log_file, encoding='utf-8')
+        module_file_handler = RotatingFileHandler(
+            module_log_file,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding='utf-8',
+        )
         module_file_handler.setFormatter(logging.Formatter(
             '%(asctime)s [%(levelname)s] %(name)s | %(message)s',
             datefmt=TIME_FORMAT

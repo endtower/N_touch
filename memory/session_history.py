@@ -13,6 +13,7 @@ from typing import Dict, Any, List, Optional
 
 from utils.logger import setup_logging
 from memory.message_repository import get_message_store
+from adapt.session_identity import session_scope
 
 logger = setup_logging(__name__, log_level="INFO")
 
@@ -25,7 +26,7 @@ def _extract_session_type(session_id: str) -> str:
     """
     if not session_id or "_" not in session_id:
         return ""
-    return session_id.split("_", 1)[0]
+    return session_scope(session_id)
 
 
 class MessageFormatOptions:

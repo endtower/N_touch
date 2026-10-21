@@ -125,6 +125,19 @@ class ManualManagementTests(unittest.TestCase):
         self.assertEqual(len(self.created), 1)
         self.assertEqual(self.stopped, [])
 
+    def test_release_startup_budget_waits_past_the_generic_limit(self):
+        self.healthy.clear()
+        self.specs['core'].startup_timeout = 0.8
+        timer = threading.Timer(0.15, self.healthy.set)
+        with patch.object(manager_core, 'HEALTH_WAIT_SEC', 0.05):
+            self.start_worker()
+            timer.start()
+            try:
+                self.assertTrue(self.controller.submit('start')['ok'])
+            finally:
+                timer.cancel(); timer.join()
+        self.assertTrue(self.controller.ready)
+
     def test_crash_reports_failure_until_manual_start(self):
         self.start_worker()
         self.assertTrue(self.controller.submit('start')['ok'])

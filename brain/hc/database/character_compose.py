@@ -263,7 +263,8 @@ class CharacterCompose:
         if not name and not session_id:
             raise ValueError("至少需要提供 name 或 session_id")
 
-        is_group = bool(session_id) and session_id.startswith("group_")
+        from adapt.session_identity import session_scope
+        is_group = session_scope(session_id) == "group"
 
         entity_uuid = None
         created = False

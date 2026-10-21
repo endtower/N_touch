@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Identity, SessionRuntime, WebSession } from '../types'
@@ -118,7 +119,7 @@ function close() {
 </script>
 
 <template>
-  <el-dialog
+  <AppDialog
     :model-value="props.visible"
     title="角色管理"
     width="560"
@@ -183,7 +184,7 @@ function close() {
       <el-button @click="close">关闭</el-button>
       <el-button type="primary" @click="onCreate">+ 新建身份</el-button>
     </template>
-  </el-dialog>
+  </AppDialog>
 
   <CreateIdentityDialog
     v-model:visible="createDialogVisible"

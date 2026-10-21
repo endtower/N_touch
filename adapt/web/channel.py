@@ -36,7 +36,7 @@ WebChannel：用浏览器 WebSocket 替代 NapCat/QQ 作为消息通道。
 """
 
 from __future__ import annotations
-from paths import data_root
+from paths import data_root, web_dist
 
 import asyncio
 import base64
@@ -376,8 +376,8 @@ class WebChannel:
             handle_create_observation, handle_update_observation, handle_delete_observation,
         )
         from .maintenance_api import (
-            handle_maintenance, handle_maintenance_items, handle_review,
-            handle_maintenance_request, handle_personas, handle_update_persona,
+            handle_maintenance, handle_maintenance_items, handle_review, handle_review_all,
+            handle_archive, handle_personas, handle_update_persona,
         )
         from .graph_api import (
             handle_list_tasks,
@@ -419,6 +419,7 @@ class WebChannel:
             handle_logs_ws,
             handle_config_get,
             handle_config_put,
+            handle_connections, handle_connection_check, handle_connections_apply,
             handle_core_shutdown_internal,
         )
         self._app.router.add_get("/system/status", handle_system_status)
@@ -430,6 +431,9 @@ class WebChannel:
         self._app.router.add_get("/system/ws/logs", handle_logs_ws)
         self._app.router.add_get("/system/config", handle_config_get)
         self._app.router.add_put("/system/config", handle_config_put)
+        self._app.router.add_get("/system/connections", handle_connections)
+        self._app.router.add_post("/system/connections/check", handle_connection_check)
+        self._app.router.add_post("/system/connections/apply", handle_connections_apply)
         # 内部直达关闭入口：仅供常驻管理服务调用（令牌鉴权；绝不回调服务）
         self._app.router.add_post("/system/core/shutdown-internal",
                                   handle_core_shutdown_internal)
@@ -450,7 +454,8 @@ class WebChannel:
         self._app.router.add_get("/memory/maintenance", handle_maintenance)
         self._app.router.add_get("/memory/maintenance/items", handle_maintenance_items)
         self._app.router.add_post("/memory/maintenance/reviews", handle_review)
-        self._app.router.add_patch("/memory/maintenance/requests/{request_id}", handle_maintenance_request)
+        self._app.router.add_post("/memory/maintenance/reviews/all", handle_review_all)
+        self._app.router.add_post("/memory/maintenance/archive", handle_archive)
         self._app.router.add_get("/memory/personas", handle_personas)
         self._app.router.add_patch("/memory/personas/{persona_name}", handle_update_persona)
         self._app.router.add_post("/memory/kits", handle_create_kit)
@@ -491,10 +496,11 @@ class WebChannel:
         self._app.router.add_patch("/stickers/{filename}", handle_update_sticker)
         self._app.router.add_delete("/stickers/{filename}", handle_delete_sticker)
 
-        # 前端构建产物伺服 (web_frontend/dist 存在才注册): 5002 直接提供页面 + API,
-        # 生产模式不再依赖 Vite dev server。静态路由必须注册在所有 API 路由之后,
-        # 兜底规则才不会抢走 /memory /events 等已有路径。
-        self._dist_dir = Path(__file__).resolve().parents[2] / "web_frontend" / "dist"
+        # 前端活资源伺服 (web_frontend/dist 存在才注册): 5002 直接提供页面 + API,
+        # 生产模式不再依赖 Vite dev server。前端不进 exe 包内 (web_dist() 指向
+        # 数据根, 2026-10-15), npm run build 后刷新即生效。静态路由必须注册在
+        # 所有 API 路由之后, 兜底规则才不会抢走 /memory /events 等已有路径。
+        self._dist_dir = web_dist()
         if self._dist_dir.is_dir():
             assets_dir = self._dist_dir / "assets"
             if assets_dir.is_dir():

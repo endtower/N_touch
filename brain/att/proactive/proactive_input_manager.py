@@ -5,26 +5,51 @@ proactive 输入管理模块
 类比 pfca_input_manager：
 - 缓存并更新槽位数据（由外部调用 update 方法）
 - 提供槽位数据获取接口（编译后返回 content）
-- 增量变化检测
 
-设计原则：
-- 解耦：更新和获取分离
-- 仅构造 content：只返回 str 类型
-- 变化检测：实例级状态用于检测增量变化
+首条 content 的拼接口径与 pfca_input_manager._build_first_input 对齐
+（槽位定义序即拼接序，_compile 过滤空槽，条件段可能缺席）：
 
-Slot 设计（参考 pfca_input_manager）：
-    message_base:    本次主动任务的核心描述（intent + reason + target）
-    planned_tasks:   当前数据库里所有未完成任务
-    triggered_task:  当前已到达预定时间的那个任务
-    amy_effect:      情绪状态
-    temporary_memory: 短期记忆
+    {message_base}                        <- 本次主动任务的核心描述
+                                             （intent + reason + 目标会话 + 附加信息）
+    【当前环境状态】{年月日 时刻 时段}        <- 纯同步取系统时间，恒非空
+    【当前情绪】{轴名}：{值}/100。{感受}      <- amy 决策侧描述（全部轴），首条无条件给出；
+    {事件标题} {评价标签} {分数变化}            每轴现状行下紧跟该轴最近五条变动
+    {近期经历}                            <- temporary_memory 取到非空才拼（≤3 条）
+    【待接续事项目录】                      <- 任务命中才拼（轻量简表：标题 + 下次处理时间，
+    {title} 下次处理时间{相对时间}            概况全文不进首条，细节由 query_task_status 溯源）
+    【当前已到达计划再处理时间的未完成任务】   <- 本次焦点的细节（仅这一条保留 context）
+    【记事本手册】                         <- render_manual 生成（自带段头），
+    记事本存在以下章节:                      章节式裸文本 ≤1000 字符，细节由 query_note 溯源
+    └ {条目}
+    【本次主动唤醒原因】                    <- truck 注入的唤醒原因（判断层专属，PFCA 无此段）
+
+与 PFCA 的差异：不注入人格总览（判断层不指派人格，人格由 PFCA 逐会话指定）。
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 from utils.logger import get_logger
 
 logger = get_logger("ProactiveInputManager", "INFO")
+
+
+def _describe_time_period(hour: int) -> str:
+    """按小时返回时段描述。
+
+    划分与 pfca_input_manager._describe_time_period 一致
+    （凌晨/早上/上午/中午/下午/晚上），内部实现，不引入跨模块依赖。
+    """
+    if hour < 6:
+        return "凌晨"
+    if hour < 9:
+        return "早上"
+    if hour < 11:
+        return "上午"
+    if hour < 13:
+        return "中午"
+    if hour < 18:
+        return "下午"
+    return "晚上"
 
 
 class FirstMessageType:
@@ -43,9 +68,6 @@ class ProactiveInputManager:
         # ========== 槽位数据 ==========
         self._blocks: Dict[str, str] = {}
 
-        # ========== 实例级状态（用于变化检测） ==========
-        self._last_amy: str = ""
-
         self._initialized = True
         logger.debug("ProactiveInputManager 初始化")
 
@@ -55,7 +77,6 @@ class ProactiveInputManager:
         self,
         message_type: str,
         task_draft: Dict[str, Any],
-        planned_tasks: List[Dict[str, Any]] = None,
         triggered_task: Optional[Dict[str, Any]] = None,
         wakeup_reason: Optional[str] = None,
     ) -> None:
@@ -63,15 +84,17 @@ class ProactiveInputManager:
 
         Args:
             message_type: 消息类型（当前仅 NORMAL_STARTUP）
-            task_draft: 主动任务草稿
-            planned_tasks: 数据库里所有未完成任务（用于"当前计划中要做的任务"）
-            triggered_task: 当前已到达预定时间的任务
+            task_draft: 主动任务草稿（intent / reason / target_session_id / payload）
+            triggered_task: 当前已到达预定时间的任务（本次焦点的细节）
             wakeup_reason: 本次主动唤醒原因（注入到首条 user 消息最底部）
+
+        Notes:
+            待接续任务目录不再由调用方传入：此处自取
+            format_active_task_overview 轻量表（口径同 pfca_input_manager）。
         """
         self._queued_request = {
             "message_type": message_type,
             "task_draft": task_draft or {},
-            "planned_tasks": planned_tasks or [],
             "triggered_task": triggered_task,
             "wakeup_reason": wakeup_reason,
         }
@@ -90,25 +113,34 @@ class ProactiveInputManager:
         request = self._queued_request
         self._queued_request = None
 
-        # 1. 重置槽位
+        # 1. 重置槽位（槽位定义序即拼接序）
         self._reset_blocks()
 
-        # 2. 收集计划中要做的任务
-        self._collect_planned_tasks(request["planned_tasks"])
+        # 2. 本次主动任务的核心描述（intent / reason / 目标会话 / 附加信息）
+        self._collect_message_base(request["task_draft"])
 
-        # 3. 收集当前已触发的任务
-        self._collect_triggered_task(request["triggered_task"])
+        # 3. 当前环境状态（纯同步方法，不可 await）
+        self._collect_current_environment()
 
-        # 4. 收集近期事件（最近 5 条临时记忆）
-        self._collect_recent_memory()
-
-        # 5. 收集动态块
+        # 4. 情绪状态（首条无条件给出全部轴）
         await self._collect_amy_effect()
 
-        # 6. 收集本次主动唤醒原因（位于心情下方，最末）
+        # 5. 近期经历（最近 3 条临时记忆）
+        self._collect_recent_memory(limit=3)
+
+        # 6. 待接续事项目录（轻量简表，细节由 query_task_status 溯源）
+        await self._collect_ongoing_tasks(limit=5)
+
+        # 7. 当前已触发的任务（本次焦点的细节）
+        self._collect_triggered_task(request["triggered_task"])
+
+        # 8. 记事本手册（长期底色先于决策思考）
+        await self._collect_notebook_manual()
+
+        # 9. 本次主动唤醒原因（位于最末）
         self._collect_wakeup_reason(request.get("wakeup_reason"))
 
-        # 7. 编译并返回
+        # 10. 编译并返回
         content = self._compile()
         if content:
             logger.info(f"Proactive 首次消息 content 构造完成，长度: {len(content)}")
@@ -118,13 +150,14 @@ class ProactiveInputManager:
     # ========== 槽位重置 / 编译 ==========
 
     def _reset_blocks(self) -> None:
-        from datetime import datetime
         self._blocks = {
-            "current_time": f"【当前时间】{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "planned_tasks": "",
-            "triggered_task": "",
-            "recent_memory": "",
+            "message_base": "",
+            "current_environment": "",
             "amy_effect": "",
+            "recent_memory": "",
+            "ongoing_tasks": "",
+            "triggered_task": "",
+            "notebook_manual": "",
             "wakeup_reason": "",
         }
 
@@ -138,7 +171,7 @@ class ProactiveInputManager:
     # ========== 槽位收集方法 ==========
 
     def _collect_message_base(self, task_draft: Dict[str, Any]) -> None:
-        """收集主动任务核心描述（intent / reason / target）"""
+        """收集主动任务核心描述（intent / reason / 目标会话 / 附加信息）"""
         lines = ["【主动任务】"]
         intent = task_draft.get("intent", "")
         reason = task_draft.get("reason", "")
@@ -154,24 +187,72 @@ class ProactiveInputManager:
             lines.append(f"附加信息: {payload}")
         self._blocks["message_base"] = "\n".join(lines)
 
-    def _collect_planned_tasks(self, planned_tasks: List[Dict[str, Any]]) -> None:
-        """收集"当前计划中要做的任务"，即所有未完成任务"""
-        if not planned_tasks:
-            self._blocks["planned_tasks"] = "（当前没有进行中的任务）"
+    def _collect_current_environment(self) -> None:
+        """收集当前环境状态（当前时间 + 时段）。
+
+        格式与 pfca_input_manager._collect_current_environment 一致：
+        年/月/日 + 具体时刻 + 时段（凌晨/早上/上午/中午/下午/晚上）。
+        纯同步方法，不可 await。
+        """
+        from datetime import datetime
+
+        now = datetime.now()
+        period = _describe_time_period(now.hour)
+        self._blocks["current_environment"] = (
+            f"【当前环境状态】{now.year}年{now.month}月{now.day}日 "
+            f"{now.strftime('%H:%M')} {period}"
+        )
+
+    async def _collect_amy_effect(self) -> None:
+        """收集情绪状态（情绪消费者游标，决策侧）。
+
+        首条口径与 pfca 一致：无条件取当前决策侧描述（统一出口
+        get_decision_description，含全部轴的现状与各自最近五条变动），
+        取到描述后再推进游标，把当前未读事件全部消费掉，避免其在后续轮次重复注入。
+        描述取不到时不写槽且不推进游标，事件留给下一轮，不丢。
+        取描述异常直接上抛崩溃阻断（硬约定），不吞异常。
+        """
+        from brain.amy.emotional_interface import get_emotional_interface
+
+        ei = await get_emotional_interface()
+        current = await ei.get_decision_description()
+        if not current:
             return
-        lines = ["【当前计划中要做的任务】"]
-        for i, task in enumerate(planned_tasks, 1):
-            title = task.get("title", "未知")
-            context = task.get("context", "")
-            next_occ = task.get("next_occurrence") or "未排期"
-            lines.append(f"{i}. {title}")
-            if context:
-                lines.append(f"   上下文: {context}")
-            lines.append(f"   下次处理时间: {next_occ}")
-        self._blocks["planned_tasks"] = "\n".join(lines)
+
+        events = await ei.get_unread_events("proactive")
+        if events:
+            await ei.advance_cursor("proactive", max(e["seq"] for e in events))
+
+        self._blocks["amy_effect"] = current
+
+    def _collect_recent_memory(self, limit: int = 3) -> None:
+        """收集近期经历（最近 N 条临时记忆）。
+
+        口径与 pfca 一致：label 为"近期经历"，不重复注入当前时间
+        （当前时间已在【当前环境状态】槽内）。
+        记忆获取失败直接上抛崩溃阻断（硬约定 #4）。
+        """
+        from brain.hc.temporary_memory import get_recent_experience
+        text = get_recent_experience(
+            limit=limit, label="近期经历", with_current_time=False
+        )
+        if text:
+            self._blocks["recent_memory"] = text
+
+    async def _collect_ongoing_tasks(self, limit: int = 5) -> None:
+        """收集待接续事项目录（只注入总数与最近的少量接续安排，细节按标题查询）。
+
+        口径与 pfca_input_manager._collect_ongoing_tasks 一致：轻量简表，
+        目录不代表当前要执行所有事项。数据库失败直接上抛。
+        """
+        from brain.hc.database.task import TaskOperations
+        task_ops = TaskOperations()
+        text = await task_ops.format_active_task_overview(limit=limit)
+        if text:
+            self._blocks["ongoing_tasks"] = f"【待接续事项目录】\n{text}"
 
     def _collect_triggered_task(self, triggered_task: Optional[Dict[str, Any]]) -> None:
-        """收集"当前已到达预定时间的任务"（即本次触发的任务）"""
+        """收集"当前已到达预定时间的任务"（本次焦点的细节，保留 context 全文）"""
         if not triggered_task:
             return
         title = triggered_task.get("title", "未知")
@@ -187,64 +268,17 @@ class ProactiveInputManager:
             lines.append(f"下次处理时间: {next_occ}")
         self._blocks["triggered_task"] = "\n".join(lines)
 
-    def _collect_recent_memory(self, limit: int = 5) -> None:
-        """收集近期事件（最近 N 条临时记忆），拼接在【当前已到达预定时间的事件】之后
+    async def _collect_notebook_manual(self) -> None:
+        """收集记事本手册（章节式裸文本，细节经 query_note 工具溯源）。
 
-        通过临时记忆的统一接口 get_recent_experience 获取，
-        返回结构: 【近期事件】(当前时间: ...)\\n1. [...] xxx\\n...
-
-        Args:
-            limit: 拉取最近 N 条，默认 5
+        聚合渲染见 notepad.render_manual；字符预算 max_chars=1000
+        （与 pfca_input_manager._collect_notebook_manual 一致）；
+        拉取失败直接上抛崩溃阻断（按 user_rules，不静默跳过）。
         """
-        # 记忆获取失败直接上抛崩溃阻断（硬约定 #4），与 PFCA 读取侧语义一致
-        from brain.hc.temporary_memory import get_recent_experience
-        text = get_recent_experience(limit=limit, label="近期事件", with_current_time=True)
-        if text:
-            self._blocks["recent_memory"] = text
-
-    async def _collect_amy_effect(self) -> None:
-        """收集情绪状态（情绪消费者游标，决策侧）。
-
-        契约与 pfca 一致（get_unread_events → 取描述 → 成功后再 advance_cursor）：
-        - 无未消费事件直接返回；
-        - 情绪体系隔离过滤：仅当未读事件含最终评价类事件（act 命中
-          FinalEvaluationAct 词表）才更新情绪槽；表现侧 NE/DA 事件
-          （conversation/social_chat 的情感遭遇）是噪声，仅推进游标消费掉。
-        - 取描述失败/为空时不推进游标，事件留给下一轮，不丢；
-        - 取描述异常直接上抛崩溃阻断（硬约定），不吞异常。
-        """
-        from brain.amy.emotional_interface import get_emotional_interface
-        from brain.amy.constants import FinalEvaluationAct
-
-        ei = await get_emotional_interface()
-        events = await ei.get_unread_events("proactive")
-        if not events:
-            return
-
-        max_seq = max(e["seq"] for e in events)
-        # 决策侧只关心最终评价类事件；NE/DA 噪声事件游标照常推进消费掉
-        # （不推进会无限积压重查），但不触发情绪槽更新。
-        final_events = [
-            e for e in events
-            if FinalEvaluationAct.contains(e.get("act", "") or "")
-        ]
-        if not final_events:
-            await ei.advance_cursor("proactive", max_seq)
-            return
-
-        # 决策侧出口描述：原因：最终评价类想法摘要（成因出口内嵌）
-        current = await ei.get_decision_description()
-        if not current:
-            return
-
-        # 描述已成功取到，推进游标到已消费的最大 seq
-        await ei.advance_cursor("proactive", max_seq)
-
-        # 描述与上次相同则不重复注入（游标已推进，仅跳过槽位更新）
-        if current == self._last_amy:
-            return
-        self._last_amy = current
-        self._blocks["amy_effect"] = current
+        from brain.hc.shortlight import get_shortlight_notepad
+        manual = await get_shortlight_notepad().render_manual(max_chars=1000)
+        if manual:
+            self._blocks["notebook_manual"] = manual
 
     def _collect_wakeup_reason(self, wakeup_reason: Optional[str]) -> None:
         """收集本次主动唤醒原因（注入到首条 user 消息最底部）。
@@ -264,7 +298,6 @@ class ProactiveInputManager:
         """清空所有状态（一般用于会话/进程重置）"""
         self._queued_request = None
         self._reset_blocks()
-        self._last_amy = ""
         logger.debug("ProactiveInputManager 已清空")
 
 

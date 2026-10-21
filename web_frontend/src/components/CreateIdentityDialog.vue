@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { ref, watch } from 'vue'
 import type { Identity } from '../types'
 
@@ -45,7 +46,7 @@ function submit() {
 </script>
 
 <template>
-  <el-dialog
+  <AppDialog
     :model-value="props.visible"
     :title="props.editing ? '改名 / 改 id' : '新建身份'"
     width="440"
@@ -105,7 +106,7 @@ function submit() {
         {{ props.editing ? '保存修改' : '创建' }}
       </el-button>
     </template>
-  </el-dialog>
+  </AppDialog>
 </template>
 
 <style scoped>

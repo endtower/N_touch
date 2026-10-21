@@ -255,8 +255,6 @@ class SocialChatInputManager:
         persona_header = self._build_persona_header()
         if persona_header:
             user_input = f"{persona_header}\n{user_input}"
-            from brain.hc.maintenance import MaintenanceService
-            await MaintenanceService().record_usage("persona", ["common", self._social_chat_core.persona_name], "selected")
 
         # 6) 记事本手册：长期经验底色（全部已落库条目，条目的 category 不参与路由），
         #    章节式裸文本；拉取失败直接上抛崩溃阻断（按 user_rules），细节经 query_note 工具溯源

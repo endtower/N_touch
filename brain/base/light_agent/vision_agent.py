@@ -13,7 +13,6 @@
 
 import sys
 import json
-import re
 import shutil
 import base64
 from typing import List, Dict, Any, Optional
@@ -408,21 +407,14 @@ description中必须包含对图片内容的详细描述，文字需要复述原
 
     @staticmethod
     def _sanitize_filename(title: str, max_len: int = 50) -> str:
-        """把标题清洗成可作为文件名的字符串。"""
-        if not title:
-            return "untitled"
+        """把标题清洗成可作为文件名的字符串。
 
-        cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]', '', title)
-        cleaned = cleaned.strip().rstrip('.')
-        cleaned = re.sub(r'\s+', ' ', cleaned)
-
-        if not cleaned:
-            return "untitled"
-
-        if len(cleaned) > max_len:
-            cleaned = cleaned[:max_len].rstrip()
-
-        return cleaned
+        委托 brain.attachments.resolver.normalize_filename_component：全角标点折半角、
+        白名单外字符（空格 / Windows 非法字符 / glob 通配符）一律降级为下划线。
+        与发送侧 FILENAME_PATTERN 同源，保证「存得下」必然「发得出」。
+        """
+        from brain.attachments import normalize_filename_component
+        return normalize_filename_component(title, max_len)
 
     @staticmethod
     def _resolve_sticker_file(sticker_filename: str) -> Path:

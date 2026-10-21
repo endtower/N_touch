@@ -9,7 +9,8 @@
 
   <!-- ==========================================================
        图标几何（24x24 视框，描边式）
-       用 Path 画而不是图标字体：不依赖 Segoe MDL2、也更好控粗细。
+       左侧轨道这类"要控粗细的描边图标"用 Path 画，不依赖图标字体；
+       组件行里的小操作图标走系统图标字体，见下面的 RowGlyph。
        ========================================================== -->
   <StreamGeometry x:Key="IconHome">M3.5,10.8 L12,3.6 L20.5,10.8 M5.6,9.4 L5.6,20 L18.4,20 L18.4,9.4 M9.6,20 L9.6,13.6 L14.4,13.6 L14.4,20</StreamGeometry>
   <StreamGeometry x:Key="IconMonitor">M3.2,4.6 L20.8,4.6 L20.8,16 L3.2,16 Z M9,16 L9,19.4 M15,16 L15,19.4 M6.6,19.4 L17.4,19.4</StreamGeometry>
@@ -59,6 +60,151 @@
     <Setter Property="BorderThickness" Value="1"/>
     <Setter Property="Padding" Value="{DynamicResource Pad4}"/>
     <Setter Property="Margin" Value="0,0,0,12"/>
+  </Style>
+
+  <!-- ==========================================================
+       组件清单行：清单里每个组件占一行，悬停整行抬底
+       更新区在该行下方就地展开/收起，不另开窗口
+       ========================================================== -->
+  <Style x:Key="ComponentRow" TargetType="Border">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="Padding" Value="2,9"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource RadiusSm}"/>
+    <Style.Triggers>
+      <Trigger Property="IsMouseOver" Value="True">
+        <Setter Property="Background" Value="{DynamicResource BrushBgHover}"/>
+      </Trigger>
+    </Style.Triggers>
+  </Style>
+
+  <!-- 组件行第二行的版本号：等宽小字，紧跟名称下方，右边接运行信息 -->
+  <Style x:Key="VersionChip" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{DynamicResource FontMono}"/>
+    <Setter Property="FontSize" Value="{DynamicResource FontSizeSm}"/>
+    <Setter Property="Foreground" Value="{DynamicResource BrushTextTertiary}"/>
+    <Setter Property="VerticalAlignment" Value="Center"/>
+    <Setter Property="Margin" Value="0,0,8,0"/>
+  </Style>
+
+  <!-- ==========================================================
+       卡片标题右上角的状态 chip：走 Pill 圆角，内容只是一个短标签。
+       底色/边框/字色分"常态"与"需要处理"两档，由 code-behind 依状态
+       换资源键（见 MainWindow 的 SetChip），切主题时自动重绘。
+       ========================================================== -->
+  <Style x:Key="StatusChip" TargetType="Border">
+    <Setter Property="CornerRadius" Value="{DynamicResource RadiusPill}"/>
+    <Setter Property="Background" Value="{DynamicResource BrushBgSunken}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource BrushBorderDefault}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="9,3"/>
+    <Setter Property="VerticalAlignment" Value="Center"/>
+  </Style>
+
+  <Style x:Key="StatusChipText" TargetType="TextBlock">
+    <Setter Property="FontSize" Value="{DynamicResource FontSizeXs}"/>
+    <Setter Property="FontWeight" Value="Medium"/>
+    <Setter Property="Foreground" Value="{DynamicResource BrushTextTertiary}"/>
+  </Style>
+
+  <!-- 行尾的折叠箭头：收起时朝下（可展开），展开时转 180° 朝上（可收起） -->
+  <Style x:Key="ChevronToggle" TargetType="ToggleButton">
+    <Setter Property="Width" Value="26"/>
+    <Setter Property="Height" Value="26"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Focusable" Value="False"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="ToolTip" Value="展开 / 收起版本选择与安装"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ToggleButton">
+          <Border x:Name="Shell" Background="{TemplateBinding Background}" CornerRadius="{DynamicResource RadiusSm}">
+            <Path x:Name="Chev" Width="11" Height="7" Stretch="Uniform"
+                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Data="M 0,0 L 5.5,5.5 L 11,0"
+                  Stroke="{DynamicResource BrushTextTertiary}" StrokeThickness="1.6"
+                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                  RenderTransformOrigin="0.5,0.5">
+              <Path.RenderTransform>
+                <RotateTransform Angle="0"/>
+              </Path.RenderTransform>
+            </Path>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Shell" Property="Background" Value="{DynamicResource BrushBgHover}"/>
+              <Setter TargetName="Chev" Property="Stroke" Value="{DynamicResource BrushTextPrimary}"/>
+            </Trigger>
+            <Trigger Property="IsChecked" Value="True">
+              <Trigger.EnterActions>
+                <BeginStoryboard>
+                  <Storyboard>
+                    <DoubleAnimation Storyboard.TargetName="Chev"
+                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                     To="180" Duration="0:0:0.16"/>
+                  </Storyboard>
+                </BeginStoryboard>
+              </Trigger.EnterActions>
+              <Trigger.ExitActions>
+                <BeginStoryboard>
+                  <Storyboard>
+                    <DoubleAnimation Storyboard.TargetName="Chev"
+                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                     To="0" Duration="0:0:0.16"/>
+                  </Storyboard>
+                </BeginStoryboard>
+              </Trigger.ExitActions>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- ==========================================================
+       组件行里的操作按钮：图标化，和行尾折叠角标（ChevronToggle）同规格 26x26
+       角标只作指示（IsHitTestVisible=False），点击由整行表头接管；
+       这几个按钮则自己吃掉点击，不触发整行的展开/收起。
+       ========================================================== -->
+  <Style x:Key="RowIconButton" TargetType="ButtonBase">
+    <Setter Property="Width" Value="26"/>
+    <Setter Property="Height" Value="26"/>
+    <Setter Property="Margin" Value="0,0,4,0"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Focusable" Value="False"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="Foreground" Value="{DynamicResource BrushTextTertiary}"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ButtonBase">
+          <Border x:Name="Shell" Background="{TemplateBinding Background}"
+                  CornerRadius="{DynamicResource RadiusSm}">
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Shell" Property="Background" Value="{DynamicResource BrushBgHover}"/>
+              <Setter Property="Foreground" Value="{DynamicResource BrushTextPrimary}"/>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+              <Setter TargetName="Shell" Property="Background" Value="{DynamicResource BrushBgActive}"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Opacity" Value="0.4"/>
+              <Setter Property="Cursor" Value="Arrow"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- 组件行里的操作图标：下载 / 启动 / 停止 / 刷新。
+       字形统一取系统 Segoe 图标字体，禁用态只靠按钮的不透明度，不用换字符。 -->
+  <Style x:Key="RowGlyph" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets"/>
+    <Setter Property="FontSize" Value="{DynamicResource FontSizeMd}"/>
+    <Setter Property="HorizontalAlignment" Value="Center"/>
+    <Setter Property="VerticalAlignment" Value="Center"/>
   </Style>
 
   <!-- ==========================================================

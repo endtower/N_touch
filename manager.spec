@@ -5,7 +5,7 @@ a = Analysis(
     ['manager_service.py'],
     pathex=['.'],
     binaries=[],
-    datas=[('web_frontend/dist', 'web_frontend/dist')],
+    datas=[('component_versions.json', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

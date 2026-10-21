@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { Document, Refresh, ArrowDown, CaretRight, Connection, Fold, Expand, Share } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -227,11 +228,12 @@ async function refreshAll() {
 // ===== 展示辅助 =====
 
 // 各 agent 上下文文件的 kind 标签 (后端从文件名解析; null 时按原始文件名展示)
-type Kind = 'chat' | 'pfca' | 'proactive' | 'social_chat' | 'quest'
+type Kind = 'chat' | 'pfca' | 'proactive' | 'pre' | 'social_chat' | 'quest'
 const KIND_META: Record<Kind, { label: string; color: string }> = {
   chat: { label: '聊天', color: 'var(--accent-2)' },
   pfca: { label: 'PFCA', color: 'var(--accent)' },
   proactive: { label: '主动', color: 'var(--warn)' },
+  pre: { label: 'PRE', color: 'var(--warn)' },
   social_chat: { label: 'Social', color: 'var(--accent)' },
   quest: { label: '任务', color: 'var(--warn)' },
 }
@@ -549,13 +551,12 @@ watch([parsedEntries, () => props.visible], () => { void nextTick(); measureStep
 </script>
 
 <template>
-  <el-dialog
+  <AppDialog size="panel"
     :model-value="props.visible"
-    width="90vw"
     :close-on-click-modal="false"
     align-center
-    :show-close="false"
     class="ctx-dialog reading-dialog"
+    title="LLM 上下文"
     @update:model-value="(v: boolean) => emit('update:visible', v)"
   >
     <template #header>
@@ -902,19 +903,16 @@ watch([parsedEntries, () => props.visible], () => { void nextTick(); measureStep
         </main>
       </ResizableSplit>
     </ResizableSplit>
-  </el-dialog>
+  </AppDialog>
 </template>
 
 <style scoped>
 /* —— 弹窗整体 —— */
-:global(.ctx-dialog .el-dialog__header) { padding: 0 !important; }
 
 .ctx-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--border-1);
   background: var(--bg-surface);
   flex-wrap: wrap;
   gap: 10px;
@@ -968,7 +966,8 @@ watch([parsedEntries, () => props.visible], () => { void nextTick(); measureStep
 
 /* —— 主体两栏 —— */
 .ctx-body {
-  height: min(76vh, calc(100dvh - 160px));
+  flex: 1;
+  min-height: 0;
   background: var(--bg-app);
 }
 

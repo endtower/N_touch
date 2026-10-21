@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MagicStick, Loading, Delete, CopyDocument } from '@element-plus/icons-vue'
@@ -173,7 +174,7 @@ watch(
 </script>
 
 <template>
-  <el-dialog
+  <AppDialog
     :model-value="visible"
     title="环境准备 (预设)"
     width="620px"
@@ -245,7 +246,7 @@ watch(
         应用环境
       </el-button>
     </template>
-  </el-dialog>
+  </AppDialog>
 </template>
 
 <style scoped>

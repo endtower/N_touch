@@ -22,18 +22,24 @@ logger = get_logger(__name__, "DEBUG")
 class VectorStore:
     """向量存储类"""
 
-    async def generate_vector(self, content: str, target: str = "bequest") -> Optional[List[float]]:
-        """生成文本的向量表示（异步）。
+    async def generate_vectors(self, contents: List[str], target: str = "bequest") -> Optional[List[List[float]]]:
+        """批量生成文本的向量表示（异步，内部按 API 上限自动分块）。
 
         Args:
-            content: 待向量化的文本
+            contents: 待向量化的文本列表（返回顺序与输入一致）
             target: 向量化目标（"bequest" / "character" / "group" / "task"）。
                 VectorConfig.ONLY_BEQUEST_VECTORIZATION=True 时非 bequest 目标
                 直接返回 None（不调 API），生成侧写 NULL、检索侧返回空。
 
+        Returns:
+            向量列表；功能停用或目标被过滤时返回 None。
+
         Raises:
             NetworkError: 嵌入 API 调用失败（崩溃阻断，不降级）。
         """
+        if not contents:
+            return []
+
         if not vector_config.ENABLE_VECTOR_EMBEDDING:
             logger.debug("向量嵌入功能已禁用")
             return None
@@ -48,9 +54,24 @@ class VectorStore:
             model=vector_config.MODEL_NAME,
         )
         embedding_service = get_embedding_service()
-        vector = await embedding_service.generate_embedding(content)
-        logger.debug(f"成功生成文本嵌入，向量维度: {len(vector)}")
-        return vector
+        vectors = await embedding_service.generate_embeddings(list(contents))
+        logger.debug(f"成功生成 {len(vectors)} 条文本嵌入，向量维度: {len(vectors[0])}")
+        return vectors
+
+    async def generate_vector(self, content: str, target: str = "bequest") -> Optional[List[float]]:
+        """生成单条文本的向量表示（内部走批量接口）。
+
+        Args:
+            content: 待向量化的文本
+            target: 向量化目标（"bequest" / "character" / "group" / "task"）。
+                VectorConfig.ONLY_BEQUEST_VECTORIZATION=True 时非 bequest 目标
+                直接返回 None（不调 API），生成侧写 NULL、检索侧返回空。
+
+        Raises:
+            NetworkError: 嵌入 API 调用失败（崩溃阻断，不降级）。
+        """
+        vectors = await self.generate_vectors([content], target)
+        return vectors[0] if vectors else None
 
 
 _vector_store: Optional[VectorStore] = None

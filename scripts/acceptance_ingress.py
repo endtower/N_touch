@@ -351,6 +351,31 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
                         except Exception:
                             return False
                     await until(core_ready, 30)
+                    # Verify the frozen Core contains the actual-benefit scoring rule.
+                    # All requests target this paused, isolated fixture; no model calls.
+                    async with client.post(f"http://127.0.0.1:{web_port}/amy/final-evaluation", json={
+                        "title": "旧成败口径", "final_evaluation": "无评价", "task_result": "成功",
+                        "failure_reason": "完成任务不能自动证明效益",
+                    }) as response:
+                        self.assertEqual(response.status, 400, await response.text())
+                    expected = 50
+                    for result, reason, delta in (
+                        ("对方明确说自己有用/产生了实际价值/明确使对方收益", "主人明确说资料正是他要的", 10),
+                        ("可能产生收益", "有迹象可能有用，但说不清具体收益", 0),
+                        ("结果不满", "主人对这次的处理表示不满", -5),
+                        ("任务延期", "任务被推迟，尚未交付", -10),
+                        ("产生负面收益", "提供的错误信息使主人返工", -20),
+                        ("帮倒忙", "错误操作使已完成的进度丢失", -30),
+                    ):
+                        async with client.post(f"http://127.0.0.1:{web_port}/amy/final-evaluation", json={
+                            "title": "隔离效益验收", "final_evaluation": "无评价", "task_result": result, "failure_reason": reason,
+                        }) as response:
+                            self.assertEqual(response.status, 200, await response.text())
+                        expected += delta
+                        async with client.get(f"http://127.0.0.1:{web_port}/amy/state") as response:
+                            state = (await response.json())["decision_feedback"]
+                            self.assertEqual(state["competence_value"], expected)
+                            self.assertEqual(state["task_results"][-1]["result"], result)
                     async with client.ws_connect(f"http://127.0.0.1:{ob_port}/onebot/v11/ws?access_token=acceptance-local") as ws:
                         await ws.send_json(event("1"))
                         async def one():

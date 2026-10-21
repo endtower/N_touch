@@ -17,11 +17,20 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from paths import app_root, data_root, log_root
+from paths import app_root, data_root, is_frozen, log_root
 
 PROJECT_ROOT = app_root()
 LOG_DIR = log_root() / "manager"
-SNOWLUMA_DIR = (data_root() / "SnowLuma") if (data_root() / "SnowLuma").is_dir() else PROJECT_ROOT / "SnowLuma"
+def snowluma_root() -> Path:
+    """Keep legacy login data in place; updater and launcher use this same root."""
+    override = os.getenv("ABYSS_SNOWLUMA_DIR", "").strip()
+    if override:
+        return Path(override).resolve()
+    legacy = data_root() / "SnowLuma"
+    return legacy if legacy.is_dir() else app_root() / "SnowLuma"
+
+
+SNOWLUMA_DIR = snowluma_root()
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 DETACHED_PROCESS = 0x00000008
@@ -67,18 +76,28 @@ def source_root() -> Path:
 
 
 def core_cmd() -> list:
-    """Core 启动命令：始终以源码方式拉起（改完点重启即生效，不随 exe 冻结）。"""
+    """Release manager runs frozen Core; source manager keeps the development flow."""
+    if is_frozen() and os.getenv("ABYSS_RUN_MODE") != "source":
+        managed = app_root() / "components" / "core"
+        if (managed / "release.json").is_file():
+            return [str(managed / "runtime" / "python.exe"), "-u", str(managed / "source" / "main.py")]
+        return [str(app_root() / "core.exe")]
     return [python_exe(), "-u", str(source_root() / "main.py")]
 
 
 def ingress_cmd() -> list:
-    """Ingress 启动命令：同样始终以源码方式拉起。"""
+    """Release manager runs the independently installed ingress executable."""
+    if is_frozen() and os.getenv("ABYSS_RUN_MODE") != "source":
+        managed = app_root() / "components" / "core"
+        if (managed / "release.json").is_file():
+            return [str(managed / "runtime" / "python.exe"), "-u", str(managed / "source" / "ingress_service.py")]
+        return [str(app_root() / "ingress.exe")]
     return [python_exe(), "-u", str(source_root() / "ingress_service.py")]
 
 
 def snowluma_webui_port() -> int:
     try:
-        cfg = json.loads((SNOWLUMA_DIR / "config" / "runtime.json").read_text(encoding="utf-8"))
+        cfg = json.loads((snowluma_root() / "config" / "runtime.json").read_text(encoding="utf-8"))
         return int(cfg.get("webuiPort", 5099))
     except Exception:
         return 5099
@@ -106,6 +125,7 @@ class ProcSpec:
     order: int = 0                 # start all 的顺序
     desc: str = ""
     dependencies: tuple[str, ...] = ()
+    startup_timeout: float = 0  # 0 使用管理器默认；发行版冷启动允许证书/杀毒扫描完成。
 
 
 def build_specs() -> dict[str, ProcSpec]:
@@ -133,11 +153,12 @@ def build_specs() -> dict[str, ProcSpec]:
             order=2,
             desc="Abyss Core（大脑 + Web；消息接入独立运行）",
             dependencies=("ingress",),
+            startup_timeout=90 if is_frozen() else 0,
         ),
         "snowluma": ProcSpec(
             name="snowluma",
-            cmd=["cmd", "/c", "launcher.bat"],
-            cwd=SNOWLUMA_DIR,
+            cmd=[str(snowluma_root() / "node.exe"), str(snowluma_root() / "index.mjs")],
+            cwd=snowluma_root(),
             out_log=LOG_DIR / "snowluma.out.log",
             ports=[snowluma_webui_port(), 3001],
             order=1,
@@ -187,14 +208,21 @@ def wait_ports_free(spec: ProcSpec, timeout: float = 15) -> bool:
 # ============================================================
 
 def spawn(spec: ProcSpec, detached: bool = False, clean_env: bool = False) -> subprocess.Popen:
-    """拉起进程（输出追加到 spec.out_log），等待健康就绪由调用方决定。
+    """拉起进程（输出写入 spec.out_log），等待健康就绪由调用方决定。
+
+    每次拉起前按大小轮转 spec.out_log：子进程输出走的是继承的文件句柄，
+    父进程无法用 RotatingFileHandler 计数，若不显式翻页，重启会不断把新内容
+    追加到旧文件上，越长越慢。
 
     detached=True: DETACHED_PROCESS——完全脱离当前控制台与生命周期。
     clean_env=True: 从继承环境剔除配置覆盖键（WEB_WS_PORT 等），让子进程
     从 .env.dev 重新读取最新值——避免常驻服务的旧环境覆盖用户新保存的
     配置（复核 R4-4）。
     """
+    from utils.logger import rotate_log_file
+
     spec.out_log.parent.mkdir(parents=True, exist_ok=True)
+    rotate_log_file(spec.out_log)
     out = open(spec.out_log, "ab")
     # CREATE_NO_WINDOW：管理服务自身无控制台时，Windows 会给控制台子进程
     # 新开可见终端——加此标志让 Core/SnowLuma 静默后台运行（日志已在文件里）
@@ -205,6 +233,13 @@ def spawn(spec: ProcSpec, detached: bool = False, clean_env: bool = False) -> su
         env = os.environ.copy()
         for key in CONFIG_OVERRIDE_KEYS:
             env.pop(key, None)
+        # 子进程日志归属：ingress 与 core 会同时初始化 utils.logger，
+        # 但 app_*.log 总日志只允许一个进程写——Windows 下轮转需要 rename，
+        # 两个进程同写同一文件会导致轮转失败。故 ingress 一律关闭总日志，
+        # 其日志由 manager/ingress.out.log 承载。
+        # ingress_service.py 不加载 .env.dev，只能由父进程在此注入。
+        if spec.name == "ingress":
+            env["LOG_GLOBAL_FILE"] = "0"
     try:
         return subprocess.Popen(
             spec.cmd, cwd=spec.cwd,

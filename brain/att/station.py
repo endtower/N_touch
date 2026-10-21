@@ -7,7 +7,7 @@ from utils.error_handling import async_handle_errors
 from utils.chain_context import generate_chain_id, set_chain_context, reset_chain_context
 from config.truck_settings import is_truck_enabled
 from .trucks.private_truck import PrivateTruck
-from .trucks.special_attention_truck import SpecialAttentionTruck
+from .trucks.at_mention_truck import AtMentionTruck
 from .trucks.reflection_truck import ReflectionCharTruck, ReflectionTimeTruck
 from .trucks.feedback_reflection_truck import ReflectionEfficacyTruck, ReflectionBelongingTruck
 
@@ -18,7 +18,7 @@ def _force_archive_chain_contexts():
     """链结束强制归档：终结所有 kind 对该链的写入资格。
 
     - conversation / observe / temporary / social_chat → Chat_HistoryManager 工厂
-    - pfca / proactive → 各自全局单例
+    - pfca / proactive / pre → 各自全局单例
     - quest → Quest_HistoryManager 全局单例（QuestAgent 落盘，链尾终结写入资格）
     - persona / vision / bequest / memory → LightAgent_HistoryManager 前缀单例
       （LightweightAgent._llm_loop 落盘，链尾终结写入资格）
@@ -32,6 +32,7 @@ def _force_archive_chain_contexts():
     from brain.chat.chat_history_manager import get_history_manager
     from brain.pfc.pfca.pfca_history_manager import get_pfca_history_manager
     from brain.att.proactive.proactive_history_manager import get_proactive_history_manager
+    from brain.att.trucks.pre_history_manager import get_pre_history_manager
     from brain.base.light_agent.quest_history_manager import get_quest_history_manager
     from brain.base.light_agent.light_history_manager import archive_light_contexts
     managers = [
@@ -41,6 +42,7 @@ def _force_archive_chain_contexts():
         get_history_manager('social_chat'),
         get_pfca_history_manager(),
         get_proactive_history_manager(),
+        get_pre_history_manager(),
         get_quest_history_manager(),
     ]
     for m in managers:
@@ -53,14 +55,13 @@ class AttentionStation:
     def __init__(self):
         self.running = False
         self.private_truck = None  # 先初始化为None，避免循环引用
-        self.ongoing_truck = None  # 先初始化为None，避免循环引用
-        self.special_attention_truck = None  # 先初始化为None，避免循环引用
-        self.scheduled_proactive_truck = None  # 定时主动任务 truck
+        self.at_mention_truck = None  # 群聊被@触发 truck
         self.reflection_char_truck = None  # 反思系统字符触发 truck
         self.reflection_time_truck = None  # 反思系统定时触发 truck
         self.reflection_efficacy_truck = None  # 效能感低值自发入口
         self.reflection_belonging_truck = None  # 归属感低值自发入口
         self.task_truck = None  # 任务到期触发 truck
+        self.pre_truck = None  # PRE 契机规则层 truck
         # 任务队列 - 存储需要处理的truck请求
         self.task_queue = asyncio.Queue()
         # 已入队但尚未被 _process_tasks 消费的 truck_id 集合（去重，防止同一 truck 堆栈）
@@ -73,11 +74,11 @@ class AttentionStation:
     def _all_running_trucks(self):
         """返回所有处于 running 状态的 truck 实例 (跳过 None)"""
         trucks = []
-        for t in (self.private_truck, self.ongoing_truck,
-                  self.special_attention_truck, self.scheduled_proactive_truck,
+        for t in (self.private_truck,
+                  self.at_mention_truck,
                   self.reflection_char_truck, self.reflection_time_truck,
                   self.reflection_efficacy_truck, self.reflection_belonging_truck,
-                  self.task_truck):
+                  self.task_truck, self.pre_truck):
             if t is None:
                 continue
             try:
@@ -137,7 +138,7 @@ class AttentionStation:
             # 链内 proactive 决策阶段（get_truck_messages 内部阻塞等待 session 跑完）
             # 与 PFCA / conversation / social_chat 阶段的上下文写入全部归属同一链。
             # ProactiveCore 主循环跑在独立任务上，contextvar 不会自动传播，
-            # 由 truck 把 chain_id 塞进 task_draft 显式携带（见 ongoing/scheduled truck）。
+            # 由 truck 把 chain_id 塞进 task_draft 显式携带（见 scheduled truck）。
             chain_id = generate_chain_id()
             chain_token = set_chain_context(chain_id)
             logger.debug(f"本轮任务链 ID: {chain_id}")
@@ -164,19 +165,13 @@ class AttentionStation:
                     focus_state.start_new_event_chain(formatted_message or "", chain_id=chain_id)
 
                     # PFCA 工厂接口仅需 (message, session_id, name)
-                    # - raw_sessions 在 truck 侧形态:
-                    #     * private/group/special_attention/scheduled: dict,
-                    #       含 session_id 与 session_name
-                    #     * ongoing: list, 取首项作为会话源
-                    #     * 无 raw_sessions / proactive 场景: session_id=None, name=None
+                    # - raw_sessions 在 truck 侧形态: dict, 含 session_id 与 session_name;
+                    #   无 raw_sessions / proactive 场景: session_id=None, name=None
                     session_id_for_pfca = None
                     name_for_pfca = None
                     if isinstance(raw_sessions, dict):
                         session_id_for_pfca = raw_sessions.get("session_id") or None
                         name_for_pfca = raw_sessions.get("session_name") or None
-                    elif isinstance(raw_sessions, list) and raw_sessions and isinstance(raw_sessions[0], dict):
-                        session_id_for_pfca = raw_sessions[0].get("session_id") or None
-                        name_for_pfca = raw_sessions[0].get("session_name") or None
 
                     result = await async_process_from_att_factory(
                         formatted_message,
@@ -193,7 +188,6 @@ class AttentionStation:
                         logger.info("消息处理成功")
                 else:
                     # truck 校验后认为不需要调 PFCA
-                    # （如 OngoingTruck: proactive 决策 skip / 没决策 / 异常）
                     logger.info(
                         f"{truck_id} 校验/决策后无需 PFCA, 跳过"
                     )
@@ -279,26 +273,12 @@ class AttentionStation:
                     self.private_truck.start()
                 else:
                     logger.info("private_truck 已禁用，不启动线程")
-            if self.ongoing_truck is None:
-                from .trucks.ongoing_truck import OngoingTruck
-                self.ongoing_truck = OngoingTruck()
-                if is_truck_enabled('ongoing_truck'):
-                    self.ongoing_truck.start()
+            if self.at_mention_truck is None:
+                self.at_mention_truck = AtMentionTruck()
+                if is_truck_enabled('at_mention_truck'):
+                    self.at_mention_truck.start()
                 else:
-                    logger.info("ongoing_truck 已禁用，不启动线程")
-            if self.special_attention_truck is None:
-                self.special_attention_truck = SpecialAttentionTruck()
-                if is_truck_enabled('special_attention_truck'):
-                    self.special_attention_truck.start()
-                else:
-                    logger.info("special_attention_truck 已禁用，不启动线程")
-            if self.scheduled_proactive_truck is None:
-                from .trucks.scheduled_proactive_truck import ScheduledProactiveTruck
-                self.scheduled_proactive_truck = ScheduledProactiveTruck()
-                if is_truck_enabled('scheduled_proactive_truck'):
-                    self.scheduled_proactive_truck.start()
-                else:
-                    logger.info("scheduled_proactive_truck 已禁用，不启动线程")
+                    logger.info("at_mention_truck 已禁用，不启动线程")
             if self.reflection_char_truck is None:
                 self.reflection_char_truck = ReflectionCharTruck()
                 if is_truck_enabled('reflection_char_truck'):
@@ -330,6 +310,13 @@ class AttentionStation:
                     self.task_truck.start()
                 else:
                     logger.info("task_truck 已禁用，不启动线程")
+            if self.pre_truck is None:
+                from .trucks.pre_truck import PreTruck
+                self.pre_truck = PreTruck()
+                if is_truck_enabled('pre_truck'):
+                    self.pre_truck.start()
+                else:
+                    logger.info("pre_truck 已禁用，不启动线程")
             
             # 启动任务处理主任务
             self._process_task = asyncio.create_task(self._process_tasks())
@@ -353,12 +340,8 @@ class AttentionStation:
         # 如果truck存在，停止它们
         if self.private_truck:
             self.private_truck.stop()
-        if self.ongoing_truck:
-            self.ongoing_truck.stop()
-        if self.special_attention_truck:
-            self.special_attention_truck.stop()
-        if self.scheduled_proactive_truck:
-            self.scheduled_proactive_truck.stop()
+        if self.at_mention_truck:
+            self.at_mention_truck.stop()
         if self.reflection_char_truck:
             self.reflection_char_truck.stop()
         if self.reflection_time_truck:
@@ -369,6 +352,8 @@ class AttentionStation:
             self.reflection_belonging_truck.stop()
         if self.task_truck:
             self.task_truck.stop()
+        if self.pre_truck:
+            self.pre_truck.stop()
 
     def get_queue_size(self) -> int:
         """获取当前任务队列大小
@@ -382,14 +367,13 @@ class AttentionStation:
         """根据 truck_id 获取已实例化的 truck 对象 (None 表示未启用或不存在)"""
         mapping = {
             'private_truck': self.private_truck,
-            'ongoing_truck': self.ongoing_truck,
-            'special_attention_truck': self.special_attention_truck,
-            'scheduled_proactive_truck': self.scheduled_proactive_truck,
+            'at_mention_truck': self.at_mention_truck,
             'reflection_char_truck': self.reflection_char_truck,
             'reflection_time_truck': self.reflection_time_truck,
             'reflection_efficacy_truck': self.reflection_efficacy_truck,
             'reflection_belonging_truck': self.reflection_belonging_truck,
             'task_truck': self.task_truck,
+            'pre_truck': self.pre_truck,
         }
         return mapping.get(truck_id)
 
@@ -397,8 +381,7 @@ class AttentionStation:
         """运行时切换 truck 状态 (在 station 已启动后调用)
 
         Args:
-            truck_id: 'private_truck' / 'ongoing_truck' /
-                      'special_attention_truck'
+            truck_id: 'private_truck' / 'at_mention_truck' / ...
             enabled: True 启动, False 停止
 
         Returns:

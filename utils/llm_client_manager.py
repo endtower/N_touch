@@ -4,8 +4,7 @@ LLM客户端管理器
 
 提供统一的LLM调用接口，按模型等级（level）调用：
 - flash: 主力模型（LLMSettings.FLASH，当前统一使用）
-- vision: 视觉位（LLMSettings.VISION，当前 = deepseek/deepseek-v4.1-flash，与 flash 同走
-  commandcode 中转接入点）
+- vision: 视觉位（LLMSettings.VISION，走其专属接入点；未配置时回退主接入点）
 - pro: 高阶模型（LLMSettings.PRO）
 - embedding: 嵌入等级（由 VectorConfig 专用链路消费，不走本模块）
 
@@ -122,6 +121,12 @@ TOKEN_PRICING = {
         "output_per_million": 2,
         "cached_per_million": 0.02
     },
+    # 火山方舟套餐接入点返回的模型名（大小写保留）：同一档价
+    "DeepSeek-V4.1-Flash": {
+        "input_per_million": 1,
+        "output_per_million": 2,
+        "cached_per_million": 0.02
+    },
     "deepseek-v4-pro": {
         "input_per_million": 3,
         "output_per_million": 6,
@@ -198,11 +203,9 @@ class LLMClient:
         # extra_headers 用于覆盖 SDK 默认头（如 User-Agent，部分第三方 WAF 拦截 OpenAI SDK UA）
         if extra_headers:
             headers.update(extra_headers)
-        self._client = openai.AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            default_headers=headers or None,
-        )
+        # 导入工具/启动 Web 时不创建网络客户端；证书及代理初始化留到实际模型调用。
+        self._client = None
+        self._client_options = dict(api_key=api_key, base_url=base_url, default_headers=headers or None)
     
     async def chat(self, model: str, messages: List[Dict], extra_body: Dict = None,
                   caller_file: str = None, caller_name: str = None, caller_line: int = None, **kwargs):
@@ -224,6 +227,8 @@ class LLMClient:
 
         request_params.update(kwargs)
 
+        if self._client is None:
+            self._client = openai.AsyncOpenAI(**self._client_options)
         response = await self._client.chat.completions.create(**request_params)
 
         if budget is not None and response.usage is not None:
@@ -452,9 +457,9 @@ class LLMBridge:
     """LLM调用桥接器（单例由模块级 llm_bridge 持有）
 
     模型等级统一从 LLMSettings 注册表解析（flash / conversation / persona /
-    pro / vision / embedding），等级同时决定接入点：flash / vision / pro 走主接入点
+    pro / vision / embedding），等级同时决定接入点：flash / pro 走主接入点
     （flash 专属 commandcode 中转 DeepSeek V4.1 Flash，未配置时回退 opencode 统一接入点），
-    conversation / persona 走各自专属接入点（未配置时回退 opencode 统一接入点）。
+    conversation / persona / vision 走各自专属接入点（未配置时回退主接入点）。
     思考开关由 LLMSettings.THINKING 全局控制（仅 opencode 接入点注入 thinking
     extra_body，第三方接入点不注入——commandcode 接入点走其默认值，默认即思考模式）。
     """
@@ -472,11 +477,13 @@ class LLMBridge:
         self._conversation_client = None
         # persona（内心人格）专属 client（接入点配置为空时与主 client 等价）
         self._persona_client = None
+        # vision（视觉位）专属 client（接入点配置为空时与主 client 等价）
+        self._vision_client = None
 
     def _resolve_conversation_client(self) -> LLMClient:
         """解析 conversation 等级的 client（专属接入点，懒初始化）。
 
-        专用接入点为空时回退 opencode 统一接入点（直接复用主 client）。
+        专用接入点为空时复用 common；只覆盖部分字段时，其余字段继承 common。
         """
         conv_key = LLMSettings.CONVERSATION_API_KEY
         conv_url = LLMSettings.CONVERSATION_BASE_URL
@@ -484,8 +491,8 @@ class LLMBridge:
             return self._client
         if self._conversation_client is None:
             self._conversation_client = LLMClient(
-                api_key=conv_key or LLMSettings.API_KEY,
-                base_url=conv_url or LLMSettings.BASE_URL,
+                api_key=conv_key or LLMSettings.FLASH_API_KEY or LLMSettings.API_KEY,
+                base_url=conv_url or LLMSettings.FLASH_BASE_URL or LLMSettings.BASE_URL,
                 use_session_header=False,
                 # 部分第三方中转 WAF 拦截 OpenAI SDK 默认 UA（403 Your request was blocked），
                 # 覆盖为应用自有 UA
@@ -496,8 +503,7 @@ class LLMBridge:
     def _resolve_persona_client(self) -> LLMClient:
         """解析 persona（内心人格）等级的 client（专属接入点，懒初始化）。
 
-        与 conversation 接入点相互独立配置；专用接入点为空时回退
-        opencode 统一接入点（直接复用主 client）。
+        与 conversation 相互独立；空字段继承 common，接入点皆空时复用主 client。
         """
         persona_key = LLMSettings.PERSONA_API_KEY
         persona_url = LLMSettings.PERSONA_BASE_URL
@@ -505,12 +511,31 @@ class LLMBridge:
             return self._client
         if self._persona_client is None:
             self._persona_client = LLMClient(
-                api_key=persona_key or LLMSettings.API_KEY,
-                base_url=persona_url or LLMSettings.BASE_URL,
+                api_key=persona_key or LLMSettings.FLASH_API_KEY or LLMSettings.API_KEY,
+                base_url=persona_url or LLMSettings.FLASH_BASE_URL or LLMSettings.BASE_URL,
                 use_session_header=False,
                 extra_headers={"User-Agent": "N-Touch/1.0"},
             )
         return self._persona_client
+
+    def _resolve_vision_client(self) -> LLMClient:
+        """解析 vision（视觉位）等级的 client（专属接入点，懒初始化）。
+
+        与主力/会话/人格接入点相互独立配置；专用接入点为空时回退主接入点
+        （直接复用主 client）。
+        """
+        vision_key = LLMSettings.VISION_API_KEY
+        vision_url = LLMSettings.VISION_BASE_URL
+        if not vision_key and not vision_url:
+            return self._client
+        if self._vision_client is None:
+            self._vision_client = LLMClient(
+                api_key=vision_key or LLMSettings.FLASH_API_KEY or LLMSettings.API_KEY,
+                base_url=vision_url or LLMSettings.FLASH_BASE_URL or LLMSettings.BASE_URL,
+                use_session_header=False,
+                extra_headers={"User-Agent": "N-Touch/1.0"},
+            )
+        return self._vision_client
 
     async def call_llm(
         self,
@@ -529,7 +554,7 @@ class LLMBridge:
             level: 模型等级，可选值：
                 - flash: 主力模型（LLMSettings.FLASH）
                 - conversation: conversation 会话模型（LLMSettings.CONVERSATION，专属接入点）
-                - pro: 高阶模型（LLMSettings.PRO，未设置时直接报错阻断）
+                - pro: 高阶模型（未单独配置时继承 common）
                 - vision / embedding: 视觉 / 嵌入等级
             messages: 消息列表 (必需)
             tools: 工具列表 (可选)
@@ -547,12 +572,14 @@ class LLMBridge:
         if not model:
             raise ValueError(f"模型等级 {level} 尚未在 LLMSettings 中设置模型，禁止降级调用")
 
-        # conversation 等级路由到专属接入点；persona 等级路由到人格专属接入点；
+        # conversation / persona / vision 等级各自路由到专属接入点；
         # 其余走主接入点（flash 专属 commandcode DeepSeek V4.1 Flash / opencode 统一）
         if level_attr == 'CONVERSATION':
             client = self._resolve_conversation_client()
         elif level_attr == 'PERSONA':
             client = self._resolve_persona_client()
+        elif level_attr == 'VISION':
+            client = self._resolve_vision_client()
         else:
             client = self._client
         is_opencode = client.is_opencode

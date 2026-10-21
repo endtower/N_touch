@@ -66,10 +66,9 @@ class ConversationToolManager(ToolManager):
                             "failure_reason": {
                                 "type": "string",
                                 "description": (
-                                    "失败原因归纳（可选；表现不佳或表现很好时填写）。"
-                                    "用于归纳失败与好的原因，例如某条经验是错误的、自身发言不佳、"
-                                    "上游 PFCA 经验错误等。填写后将自动以「自我修正」类别记入笔记，"
-                                    "供系统自我改进。限 1 句话、50 字以内。"
+                                    "表现差的具体原因，例如经验不适用、自身发言问题或上游判断错误。"
+                                    "选中负面结束评价（坏评价、失败、结果不满等）时必填，不填会被拒绝并退回重填。"
+                                    "正面评价不收录。"
                                 )
                             }
                         },
@@ -243,25 +242,18 @@ class ConversationToolManager(ToolManager):
     ) -> Dict[str, Any]:
         """流转回 PFCA。
 
-        failure_reason: 失败原因归纳（可选）——表现不佳或表现很好时填写，
-            归纳失败与好的原因（如某条经验错误、自身发言不佳、上游 PFCA 经验错误），
-            自动以「自我修正」类别记入笔记，供系统自我改进。
+        failure_reason: 失败评价分区对应的原因，缓存到下次维护申请；正面评价不收录。
         """
         logger.debug(f"收到仔细思索请求，总结: {summary}")
 
+        from brain.amy.failure_reasons import validate_failure_reason, cache_failure_reason
+        if encounter_type and encounter_type not in EvaluationAct.names():
+            raise ValueError("encounter_type 必须来自 AMY 结束评价词表")
+        validate_failure_reason(encounter_type, failure_reason)
         if encounter_type:
-            logger.debug(f"检测到遭遇类型参数: {encounter_type}，执行情感判断")
             await self.emotional_judgment(act=encounter_type)
-
-        # 失败原因归纳：以「自我修正」类别记入记事本（同一事件链缓存文档，
-        # 随 PFCA 结束落库）。写入在停止会话之前完成，避免漏记。
-        cleaned_reason = (failure_reason or "").strip()
-        if cleaned_reason:
-            from brain.hc.shortlight import NOTE_CATEGORY_SELF_FIX
-
-            await self.record_to_notepad(
-                text=cleaned_reason, category=NOTE_CATEGORY_SELF_FIX
-            )
+        await cache_failure_reason(encounter_type, failure_reason, source="conversation",
+                                   title=summary[:80], session_id=self.conversation_core.conversation_id or "")
 
         logger.debug("执行停止聊天操作")
         result = await self.conversation_core.stop_session(summary)
@@ -282,7 +274,8 @@ class ConversationToolManager(ToolManager):
         session_id = core.conversation_id or ""
         session_name = core.session_name or "未知会话"
         # session_id 已是 type_id 格式，前缀即为 session_type
-        session_type = session_id.split("_", 1)[0] if session_id and "_" in session_id else ""
+        from adapt.session_identity import session_scope
+        session_type = session_scope(session_id)
 
         success, msg, prompt = await ei.build_conversation_thought(act=act, session_type=session_type, session_name=session_name)
 

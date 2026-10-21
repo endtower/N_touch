@@ -33,8 +33,6 @@ class ToolJinnang:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query 必须描述当前遇到的困境")
         kits = await DecisionKitOperations().list_all()
-        from brain.hc.maintenance import MaintenanceService
-        await MaintenanceService().record_usage("kit", [item["kit_id"] for item in kits], "returned")
         try:
             observations = await search_observations(query)
         except Exception:

@@ -28,7 +28,7 @@ class OneBotChannelConfig:
         send_timeout           发送超时（秒）
         fail_fast_on_disconnect  NapCat 离线时调用 send() 立即抛 SendAbortedError（不缓冲、不等）
         record_raw_events      是否把每个原始事件落盘（用于事后分析与生成 fixture）
-        raw_events_dir         录制目录（按日期自动分子目录）
+        raw_events_dir         录制目录（当天事件合并为单个 JSONL 文件）
         max_raw_events_per_day 单日最大录制数（防止磁盘爆掉）
     """
     host: str = "127.0.0.1"

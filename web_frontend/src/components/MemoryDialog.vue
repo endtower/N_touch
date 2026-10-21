@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -12,6 +13,7 @@ import {
   ArrowRight,
   Collection,
   Delete,
+  Tools,
 } from '@element-plus/icons-vue'
 import type {
   SocialNode,
@@ -24,6 +26,7 @@ import MemoryFields from './MemoryFields.vue'
 import MaintenanceStatus from './MaintenanceStatus.vue'
 import MaintenanceRequests from './MaintenanceRequests.vue'
 import { memoryRequest } from '../api/memory'
+import { memoryDrafts, memoryDraft, newMemoryDraft, updateMemoryDraft, removeMemoryDraft, draftFields, draftNames, draftComplete, type MemoryDraft, type MemoryDraftKind } from '../stores/memoryDrafts'
 
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [v: boolean] }>()
@@ -43,7 +46,18 @@ const maintenancePanel = ref<InstanceType<typeof MaintenanceRequests> | null>(nu
 const selectedExpId = ref<string | null>(null)
 const expCollapsed = ref<Record<string, boolean>>({})
 
-const snap = computed(() => chat.state.memorySocialSnapshot)
+const snap = computed(() => {
+  const original = chat.state.memorySocialSnapshot
+  const drafts: SocialNode[] = memoryDrafts.value.filter(item => ['character', 'group', 'fuzzy_role'].includes(item.kind)).map(item => ({
+    id: item.id, uuid: item.id, type: item.kind === 'character' ? 'Character' : item.kind === 'group' ? 'Group' : 'FuzzyRole',
+    label: item.fields.name || `未命名${draftNames[item.kind]}`, name: item.fields.name || '', content: item.fields.content || '',
+    impressions: [{ content: item.fields.impression || '' }], source_session_id: item.fields.source_session_id || '', created_at: item.createdAt,
+  }))
+  if (!original && !drafts.length) return null
+  const base = original ?? { nodes: [], edges: [], root_id: '00000000', character_count: 0, group_count: 0, fuzzy_role_count: 0 }
+  return { ...base, nodes: [...drafts, ...base.nodes], character_count: base.character_count + drafts.filter(n => n.type === 'Character').length,
+    group_count: base.group_count + drafts.filter(n => n.type === 'Group').length, fuzzy_role_count: base.fuzzy_role_count + drafts.filter(n => n.type === 'FuzzyRole').length }
+})
 
 // =====================================================================
 // 分组列表
@@ -128,9 +142,11 @@ function isCollapsed(key: string) {
 interface EditRow {
   key: string
   label: string
-  value: string | string[]
+  value: string | string[] | boolean
   multiline?: boolean
   tags?: boolean
+  boolean?: boolean
+  options?: { value: string; label: string }[]
 }
 
 function firstContent(items?: SocialContent[]): string {
@@ -144,6 +160,7 @@ function firstType(items?: SocialRelationship[]): string {
 const editRows = computed<EditRow[]>(() => {
   const n = selectedNode.value
   if (!n) return []
+  if (memoryDraft(n.id)) return draftRows(n.id)
   if (n.type === 'Character') {
     return [
       { key: 'name', label: 'name', value: n.name ?? '' },
@@ -151,6 +168,7 @@ const editRows = computed<EditRow[]>(() => {
       { key: 'impression', label: '印象', value: firstContent(n.impressions), multiline: true },
       { key: 'familiarity', label: '熟悉度', value: firstContent(n.familiarities) },
       { key: 'relationship', label: '与 00000000 关系', value: firstType(n.relationships_with_default) },
+      { key: 'allow_conversation', label: '允许 conversation', value: !!n.allow_conversation, boolean: true },
     ]
   }
   if (n.type === 'Group') {
@@ -161,6 +179,7 @@ const editRows = computed<EditRow[]>(() => {
       { key: 'familiarity', label: '熟悉度', value: firstContent(n.familiarities) },
       { key: 'member_impression', label: '成员印象', value: firstContent(n.member_impressions), multiline: true },
       { key: 'self_image', label: '群组自我形象', value: firstType(n.relationships_with_default) },
+      { key: 'allow_conversation', label: '允许 conversation', value: !!n.allow_conversation, boolean: true },
     ]
   }
   if (n.type === 'FuzzyRole') {
@@ -172,10 +191,14 @@ const editRows = computed<EditRow[]>(() => {
   return []
 })
 
-async function saveSocialField(key: string, value: string | string[]) {
+async function saveSocialField(key: string, value: string | string[] | boolean) {
   const node = selectedNode.value
   if (!node) throw new Error('请先选择实体')
-  if (key === 'name' && !value.length) throw new Error('名称不能为空')
+  if (memoryDraft(node.id)) {
+    if (typeof value !== 'string') throw new Error('请填写文字')
+    return saveDraftField(node.id, key, value)
+  }
+  if (key === 'name' && (!value || (typeof value !== 'boolean' && !value.length))) throw new Error('名称不能为空')
   const type = node.type === 'Character' ? 'character' : node.type === 'Group' ? 'group' : 'fuzzy_role'
   await chat.updateSocialMemory(type, node.uuid, { [key]: value })
   ElMessage.success('已保存')
@@ -187,6 +210,7 @@ const socialDeleting = ref(false)
 async function socialDelete() {
   const n = selectedNode.value
   if (!n || socialDeleting.value) return
+  if (memoryDraft(n.id)) { removeMemoryDraft(n.id); clearSel(); return }
   const cascade = n.type === 'FuzzyRole' ? '' : '，锚定到它的模糊角色也会一并删除'
   try {
     await ElMessageBox.confirm(
@@ -211,7 +235,11 @@ async function socialDelete() {
 }
 
 // ---- 经验视图 ----
-const expList = computed(() => chat.state.memoryExperiences?.experiences ?? [])
+const expList = computed<ExperienceItem[]>(() => [
+  ...memoryDrafts.value.filter(item => item.kind === 'experience').map(item => ({ bequest_id: item.id, title: item.fields.title || '',
+    summary: item.fields.summary || '', category: item.fields.category || 'speech', start_time: item.createdAt })),
+  ...(chat.state.memoryExperiences?.experiences ?? []),
+])
 
 const filteredExperiences = computed(() => {
   const kw = searchKeyword.value.trim().toLowerCase()
@@ -252,6 +280,26 @@ function expCollapsedGet(key: string) {
   return !!expCollapsed.value[key]
 }
 
+const expBatchBusy = ref(false)
+async function reviewAllExperiences() {
+  const count = chat.state.memoryExperiences?.experiences.length ?? 0
+  if (!count) { ElMessage.warning('当前没有可维护的经验'); return }
+  try {
+    await ElMessageBox.confirm(
+      `将 ${count} 条经验各记录一次人工维护？检索次数不受影响。`,
+      '一键维护全部经验',
+      { confirmButtonText: '全部维护', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch { return }
+  expBatchBusy.value = true
+  try {
+    const data = await memoryRequest('/memory/maintenance/reviews/all', 'POST', {})
+    await chat.loadExperiences(200)
+    ElMessage.success(`已维护 ${data.reviewed} 条经验`)
+  } catch (err: any) { ElMessage.error(err.message || String(err)) }
+  finally { expBatchBusy.value = false }
+}
+
 function scenarioName(s: string): string {
   if (s === 'speech') return '话术经验'
   if (s === 'decision') return '决策经验'
@@ -270,13 +318,14 @@ function scenarioBadgeClass(s: string): string {
   return 'other'
 }
 
-const experienceRows = computed<EditRow[]>(() => selectedExp.value ? [
+const experienceRows = computed<EditRow[]>(() => memoryDraft(selectedExpId.value) ? draftRows(selectedExpId.value!) : selectedExp.value ? [
   { key: 'title', label: '标题', value: selectedExp.value.title },
   { key: 'summary', label: '摘要', value: selectedExp.value.summary, multiline: true },
 ] : [])
-async function saveExperienceField(key: string, value: string | string[]) {
+async function saveExperienceField(key: string, value: string | string[] | boolean) {
   const item = selectedExp.value
   if (!item || typeof value !== 'string') throw new Error('请先选择经验')
+  if (memoryDraft(item.bequest_id)) return saveDraftField(item.bequest_id, key, value)
   if (key === 'title' && !value) throw new Error('标题不能为空')
   await chat.updateExperience(item.bequest_id, { [key]: value })
   ElMessage.success('已保存')
@@ -288,6 +337,7 @@ const expDeleting = ref(false)
 async function expDelete() {
   const e = selectedExp.value
   if (!e || expDeleting.value) return
+  if (memoryDraft(e.bequest_id)) { removeMemoryDraft(e.bequest_id); clearSelExp(); return }
   try {
     await ElMessageBox.confirm(
       `确定删除经验「${e.title || '（未命名）'}」吗？删除后不可恢复。`,
@@ -316,12 +366,19 @@ const selectedRecordId = ref(''), recordLoading = ref(false), recordError = ref(
 const recordCollapsed = ref<Record<string, boolean>>({})
 const dilemmaQuery = ref(''), matchedObservations = ref<Record<string, any>[] | null>(null)
 const matching = ref(false), matchHint = ref(''), matchError = ref('')
+// 见闻录列表筛选：显示条数与时间段（限制一次性全量渲染，2026-10-14）
+const obsLimit = ref(20), obsRange = ref<[Date, Date] | null>(null), observationTotal = ref(0)
 let recordVersion = 0, matchVersion = 0
 const recordLabel = computed(() => activeView.value === 'kits' ? '锦囊' : activeView.value === 'personas' ? '人格' : '见闻')
-const records = computed<MemoryRecord[]>(() => activeView.value === 'kits'
+const records = computed<MemoryRecord[]>(() => {
+  const drafts = memoryDrafts.value.filter(item => activeView.value === 'kits' ? item.kind === 'kit' : activeView.value === 'observations' && item.kind === 'observation')
+    .map(item => ({ id: item.id, name: item.fields.dilemma || item.fields.text?.split('\n')[0] || `未命名${draftNames[item.kind]}`,
+      category: item.kind === 'kit' ? item.fields.category || '未分类' : '见闻录', snippet: item.fields.advice || item.fields.text || '', raw: item.fields }))
+  return [...drafts, ...(activeView.value === 'kits'
   ? kitItems.value.map(item => ({ id: item.kit_id, name: item.dilemma, category: item.category, snippet: item.advice, raw: item }))
-  : activeView.value === 'personas' ? personaItems.value.map(item => ({ id: item.persona_name, name: item.persona_name, category: item.persona_name === 'common' ? '基本说话风格' : '内心人格', snippet: item.scene, raw: item }))
-  : (matchedObservations.value ?? observationItems.value).map(item => ({ id: item.note_id, name: item.text.split('\n')[0] || '见闻', category: '见闻录', snippet: item.text, raw: item })))
+  : activeView.value === 'personas' ? personaItems.value.map(item => ({ id: item.persona_name, name: item.display_name || item.persona_name, category: item.user_only ? '系统人格' : item.persona_name === 'common' ? '基本说话风格' : '内心人格', snippet: item.scene, raw: item }))
+  : (matchedObservations.value ?? observationItems.value).map(item => ({ id: item.note_id, name: item.text.split('\n')[0] || '见闻', category: '见闻录', snippet: item.text, raw: item })))]
+})
 const selectedRecord = computed(() => records.value.find(item => item.id === selectedRecordId.value))
 const recordGroups = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
@@ -329,32 +386,56 @@ const recordGroups = computed(() => {
   return [...new Set(list.map(item => item.category))].map(category => ({ category, items: list.filter(item => item.category === category) }))
 })
 const recordRows = computed<EditRow[]>(() => {
+  if (memoryDraft(selectedRecordId.value)) return draftRows(selectedRecordId.value)
   const raw = selectedRecord.value?.raw
   if (!raw) return []
   return activeView.value === 'kits' ? [
     { key: 'advice', label: '建议正文', value: raw.advice, multiline: true },
     { key: 'dilemma', label: '作用困境', value: raw.dilemma, multiline: true },
     { key: 'category', label: '困境分类', value: raw.category },
+  ] : activeView.value === 'personas' && raw.user_only ? [
+    { key: 'kernel_prompt', label: '补充人格设定', value: raw.kernel_prompt, multiline: true },
   ] : activeView.value === 'personas' ? [
     { key: 'scene', label: '适配场景', value: raw.scene, multiline: true },
     { key: 'kernel_prompt', label: '人格正文', value: raw.kernel_prompt, multiline: true },
   ] : [{ key: 'text', label: '见闻正文', value: raw.text, multiline: true }]
 })
+// 本地时间戳（见闻录时间段用本地时间提交，避免 toISOString 的时区偏移）
+function localStamp(date: Date, endOfDay: boolean): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  return `${day}T${endOfDay ? '23:59:59' : '00:00:00'}`
+}
 async function loadRecords() {
   const version = ++recordVersion, view = activeView.value
   recordLoading.value = true; recordError.value = ''
   try {
-    const data = await memoryRequest(view === 'kits' ? '/memory/kits' : view === 'personas' ? '/memory/personas' : '/memory/observations')
+    let path = view === 'kits' ? '/memory/kits' : view === 'personas' ? '/memory/personas' : '/memory/observations'
+    if (view === 'observations') {
+      const params = new URLSearchParams({ limit: String(obsLimit.value) })
+      if (obsRange.value && obsRange.value.length === 2) {
+        params.set('since', localStamp(obsRange.value[0], false))
+        params.set('until', localStamp(obsRange.value[1], true))
+      }
+      path += `?${params.toString()}`
+    }
+    const data = await memoryRequest(path)
     if (version !== recordVersion || view !== activeView.value) return
     if (view === 'kits') kitItems.value = data.kits
     else if (view === 'personas') personaItems.value = data.personas
-    else observationItems.value = data.observations
+    else { observationItems.value = data.observations; observationTotal.value = data.total ?? data.observations.length }
   } catch (err: any) { if (version === recordVersion) recordError.value = err.message || String(err) }
   finally { if (version === recordVersion) recordLoading.value = false }
 }
-async function saveRecordField(key: string, value: string | string[]) {
+function changeObservationFilter() { clearMatches(); loadRecords() }
+async function saveRecordField(key: string, value: string | string[] | boolean) {
   const item = selectedRecord.value, view = activeView.value
-  if (!item || typeof value !== 'string' || !value) throw new Error('内容不能为空')
+  if (item && memoryDraft(item.id)) {
+    if (typeof value !== 'string') throw new Error('请填写文字')
+    return saveDraftField(item.id, key, value)
+  }
+  const canClear = view === 'personas' && item?.raw.user_only && key === 'kernel_prompt'
+  if (!item || typeof value !== 'string' || (!value && !canClear)) throw new Error('内容不能为空')
   const data = await memoryRequest(`/memory/${view === 'kits' ? 'kits' : view === 'personas' ? 'personas' : 'observations'}/${encodeURIComponent(item.id)}`, 'PATCH', { [key]: value })
   if (view === 'kits') kitItems.value = kitItems.value.map(old => old.kit_id === item.id ? data.kit : old)
   else if (view === 'personas') personaItems.value = personaItems.value.map(old => old.persona_name === item.id ? data.persona : old)
@@ -368,6 +449,7 @@ async function saveRecordField(key: string, value: string | string[]) {
 async function deleteRecord() {
   const item = selectedRecord.value, view = activeView.value
   if (!item || recordDeleting.value) return
+  if (memoryDraft(item.id)) { removeMemoryDraft(item.id); selectedRecordId.value = ''; return }
   try { await ElMessageBox.confirm(`确定删除这条${recordLabel.value}吗？删除后不可恢复。`, `删除${recordLabel.value}`, { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }) } catch { return }
   recordDeleting.value = true
   try {
@@ -419,67 +501,81 @@ async function openMaintenanceItem(kind: string, itemId: string) {
 }
 onBeforeUnmount(() => { ++recordVersion; ++matchVersion })
 
-// 四种记忆共用“添加”表单，字段按数据类型配置；不改变各自的储存模型。
-type CreateKind = 'character' | 'group' | 'fuzzy_role' | 'experience' | 'kit' | 'observation'
-const createVisible = ref(false), createKind = ref<CreateKind>('character'), creating = ref(false), createError = ref('')
-const createDraft = ref<Record<string, string>>({})
-const createNames: Record<CreateKind, string> = { character: '角色', group: '群组', fuzzy_role: '模糊角色', experience: '经验', kit: '锦囊', observation: '见闻' }
-interface CreateField { key: string; label: string; required?: boolean; multiline?: boolean; placeholder?: string; options?: { value: string; label: string }[] }
-const creationFields = computed<CreateField[]>(() => {
-  switch (createKind.value) {
-    case 'character': case 'group': return [
-      { key: 'name', label: '名称', required: true },
-      { key: 'impression', label: '印象', multiline: true },
-      { key: 'session_id', label: '关联会话', placeholder: createKind.value === 'character' ? '可选：private_用户ID' : '可选：group_群ID' },
-    ]
-    case 'fuzzy_role': return [
-      { key: 'name', label: '名称', required: true },
-      { key: 'content', label: '内容', required: true, multiline: true },
-      { key: 'source_session_id', label: '来源会话', required: true, placeholder: '已关联角色或群组的 private_用户ID / group_群ID' },
-    ]
-    case 'experience': return [
-      { key: 'category', label: '分类', required: true, options: EXP_GROUPS.map(group => ({ value: group.key, label: group.title })) },
-      { key: 'title', label: '标题', required: true },
-      { key: 'summary', label: '摘要', required: true, multiline: true },
-    ]
-    case 'kit': return [
-      { key: 'advice', label: '建议正文', required: true, multiline: true },
-      { key: 'dilemma', label: '作用困境', required: true, multiline: true },
-      { key: 'category', label: '困境分类', required: true },
-    ]
-    case 'observation': return [{ key: 'text', label: '见闻正文', required: true, multiline: true }]
+// 空白条目直接复用详情编辑器；未完成内容保留在本地，正式保存后替换草稿编号。
+const publishingDrafts = new Set<string>()
+const draftErrors = ref<Record<string, string>>({})
+function draftRows(id: string): EditRow[] {
+  const draft = memoryDraft(id)
+  return draft ? draftFields(draft.kind).map(field => ({ ...field, value: draft.fields[field.key] || '' })) : []
+}
+function firstDraftField(id: string) {
+  const draft = memoryDraft(id)
+  return draft ? draftFields(draft.kind).find(field => !draft.fields[field.key])?.key : undefined
+}
+const activeDraft = computed(() => memoryDraft(activeView.value === 'social' ? selectedId.value : activeView.value === 'experience' ? selectedExpId.value : selectedRecordId.value))
+async function saveDraftField(id: string, key: string, value: string | string[]) {
+  if (typeof value !== 'string') throw new Error('请填写文字')
+  updateMemoryDraft(id, key, value)
+  const draft = memoryDraft(id)!
+  // 角色/群组保留填写可选关联会话的机会；离开条目时也会自动提交。
+  if (draftComplete(draft) && (!['character', 'group'].includes(draft.kind) || 'session_id' in draft.fields)) await publishDraft(draft)
+}
+function openCreate(kind?: MemoryDraftKind) {
+  const target = kind || (activeView.value === 'social' ? 'character' : activeView.value === 'experience' ? 'experience' : activeView.value === 'kits' ? 'kit' : 'observation')
+  try {
+    const item = newMemoryDraft(target)
+    searchKeyword.value = ''; clearMatches()
+    if (['character', 'group', 'fuzzy_role'].includes(target)) {
+      selectedId.value = item.id
+      collapsedGroups.value[target === 'character' ? 'Character' : target === 'group' ? 'Group' : 'FuzzyRole'] = false
+    } else if (target === 'experience') { selectedExpId.value = item.id; expCollapsed.value.speech = false }
+    else { selectedRecordId.value = item.id; recordCollapsed.value[target === 'kit' ? '未分类' : '见闻录'] = false }
+  } catch (err: any) { ElMessage.error(err.message || '无法保存空白条目') }
+}
+async function publishDraft(draft: MemoryDraft) {
+  if (!draftComplete(draft) || publishingDrafts.has(draft.id)) return
+  publishingDrafts.add(draft.id)
+  delete draftErrors.value[draft.id]
+  try {
+    const body = Object.fromEntries(draftFields(draft.kind).map(field => [field.key, (draft.fields[field.key] || '').trim()]))
+    const paths = { experience: '/memory/experiences', kit: '/memory/kits', observation: '/memory/observations' }
+    const path = draft.kind in paths ? paths[draft.kind as keyof typeof paths] : `/memory/social/${draft.kind}`
+    const data = await memoryRequest(path, 'POST', body)
+    if (data.node) {
+      const snapshot = chat.state.memorySocialSnapshot ?? { nodes: [], edges: [], root_id: '00000000', character_count: 0, group_count: 0, fuzzy_role_count: 0 }
+      snapshot.nodes = [data.node, ...snapshot.nodes.filter(item => item.id !== data.node.id)]
+      const count = data.node.type === 'Character' ? 'character_count' : data.node.type === 'Group' ? 'group_count' : 'fuzzy_role_count'
+      snapshot[count] += 1
+      chat.state.memorySocialSnapshot = snapshot
+      if (selectedId.value === draft.id) selectedId.value = data.node.id
+    } else if (data.experience) {
+      const current = chat.state.memoryExperiences ?? { experiences: [], total: 0 }
+      current.experiences = [data.experience, ...current.experiences]; current.total++
+      chat.state.memoryExperiences = current
+      if (selectedExpId.value === draft.id) selectedExpId.value = data.experience.bequest_id
+    } else if (data.kit) {
+      kitItems.value = [data.kit, ...kitItems.value]; recordCollapsed.value[data.kit.category] = false
+      if (selectedRecordId.value === draft.id) selectedRecordId.value = data.kit.kit_id
+    } else if (data.observation) {
+      observationItems.value = [data.observation, ...observationItems.value]; observationTotal.value++
+      if (selectedRecordId.value === draft.id) selectedRecordId.value = data.observation.note_id
+    }
+    removeMemoryDraft(draft.id)
+    ElMessage.success({ message: '已保存条目', grouping: true })
+  } catch (err: any) {
+    draftErrors.value[draft.id] = err.message || String(err)
+    throw err
+  } finally { publishingDrafts.delete(draft.id) }
+}
+watch(() => [selectedId.value, selectedExpId.value, selectedRecordId.value, activeView.value, props.visible] as const, (current, previous) => {
+  for (const id of previous.slice(0, 3)) {
+    const draft = memoryDraft(typeof id === 'string' ? id : null)
+    if (draft && (current[3] !== previous[3] || !current[4] || !current.slice(0, 3).includes(id))) {
+      void publishDraft(draft).catch(() => ElMessage.error('条目暂未入库，草稿已保留，可稍后重试'))
+    }
   }
 })
-watch(createKind, () => { createDraft.value = createKind.value === 'experience' ? { category: 'speech' } : {}; createError.value = '' })
-function openCreate() {
-  createKind.value = activeView.value === 'social' ? 'character' : activeView.value === 'experience' ? 'experience' : activeView.value === 'kits' ? 'kit' : 'observation'
-  createDraft.value = createKind.value === 'experience' ? { category: 'speech' } : {}
-  createError.value = ''; createVisible.value = true
-}
-async function createMemory() {
-  if (creating.value) return
-  const missing = creationFields.value.find(field => field.required && !createDraft.value[field.key]?.trim())
-  if (missing) { createError.value = `请填写${missing.label}`; return }
-  creating.value = true; createError.value = ''
-  try {
-    const kind = createKind.value
-    const paths = { experience: '/memory/experiences', kit: '/memory/kits', observation: '/memory/observations' }
-    const url = kind in paths ? paths[kind as keyof typeof paths] : `/memory/social/${kind}`
-    const body = Object.fromEntries(creationFields.value.map(field => [field.key, (createDraft.value[field.key] || '').trim()]))
-    const data = await memoryRequest(url, 'POST', body)
-    searchKeyword.value = ''; clearMatches()
-    await reload()
-    if (data.node) selectedId.value = data.node.id
-    else if (data.experience) selectedExpId.value = data.experience.bequest_id
-    else selectedRecordId.value = data.kit?.kit_id || data.observation.note_id
-    if (data.node) collapsedGroups.value[data.node.type] = false
-    if (data.experience) expCollapsed.value[data.experience.category] = false
-    if (data.kit) recordCollapsed.value[data.kit.category] = false
-    if (data.observation) recordCollapsed.value['见闻录'] = false
-    createVisible.value = false; ElMessage.success('已添加')
-  } catch (err: any) { createError.value = err.message || String(err) }
-  finally { creating.value = false }
-}
+async function retryDraft() { if (activeDraft.value) await publishDraft(activeDraft.value).catch(() => {}) }
 
 // =====================================================================
 // 展示辅助
@@ -531,12 +627,11 @@ function colorFor(n: SocialNode): string {
 </script>
 
 <template>
-  <el-dialog
+  <AppDialog size="panel"
     :model-value="props.visible"
-    :width="'86vw'"
     :close-on-click-modal="false"
     align-center
-    :show-close="false"
+    title="记忆"
     @update:model-value="(v: boolean) => emit('update:visible', v)"
     class="memory-dialog"
   >
@@ -568,6 +663,7 @@ function colorFor(n: SocialNode): string {
             {{ snap.fuzzy_role_count }} 模糊角色 · {{ snap.edges.length }} 关系
           </span>
           <span v-else-if="activeView === 'experience'" class="memory-counts">{{ expTotal }} 条经验</span>
+          <span v-else-if="activeView === 'observations'" class="memory-counts">已显示 {{ observationItems.length }} / 共 {{ observationTotal }} 条</span>
         </div>
         <div class="memory-header-right">
           <el-input
@@ -580,13 +676,23 @@ function colorFor(n: SocialNode): string {
           >
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
-          <el-button v-if="activeView !== 'personas' && activeView !== 'maintenance'" :icon="Plus" size="small" @click="openCreate">添加</el-button>
+          <el-dropdown v-if="activeView === 'social'" split-button size="small" @click="openCreate()" @command="openCreate">
+            新建
+            <template #dropdown><el-dropdown-menu><el-dropdown-item command="character">新建角色</el-dropdown-item><el-dropdown-item command="group">新建群组</el-dropdown-item><el-dropdown-item command="fuzzy_role">新建模糊角色</el-dropdown-item></el-dropdown-menu></template>
+          </el-dropdown>
+          <el-button v-else-if="activeView !== 'personas' && activeView !== 'maintenance'" :icon="Plus" size="small" @click="openCreate()">新建</el-button>
+          <el-button v-if="activeView === 'experience'" :icon="Tools" size="small" :loading="expBatchBusy" :disabled="!expTotal" @click="reviewAllExperiences">全部维护</el-button>
           <el-button :icon="Refresh" size="small" @click="reload">刷新</el-button>
           <el-button size="small" @click="close">关闭</el-button>
         </div>
       </div>
     </template>
 
+    <div v-if="activeDraft" class="memory-draft-note">
+      <span>草稿 · 逐项编辑即可，未完成内容会保留。</span>
+      <el-button v-if="draftComplete(activeDraft)" size="small" @click="retryDraft">保存条目</el-button>
+      <span v-if="draftErrors[activeDraft.id]" role="alert">{{ draftErrors[activeDraft.id] }}</span>
+    </div>
     <div class="memory-body">
       <template v-if="activeView === 'social'">
       <!-- 左：分组实体列表 -->
@@ -642,7 +748,7 @@ function colorFor(n: SocialNode): string {
                   <span class="memory-item-dot" :style="{ background: g.def.color }"></span>
                   <div class="memory-item-main">
                     <div class="memory-item-label">
-                      <span class="memory-item-name">{{ n.label }}</span>
+                      <span class="memory-item-name">{{ n.label }}</span><span v-if="memoryDraft(n.id)" class="memory-draft-tag">草稿</span>
                       <span v-if="aliasText(n)" class="memory-item-alias">{{ aliasText(n) }}</span>
                     </div>
                     <div v-if="nodeSnippet(n)" class="memory-item-sub">{{ nodeSnippet(n) }}</div>
@@ -691,7 +797,7 @@ function colorFor(n: SocialNode): string {
             <dl class="kv">
               <dt>uuid</dt><dd><code>{{ selectedNode.uuid }}</code></dd>
 
-              <MemoryFields :record-id="selectedNode.id" :rows="editRows" :save="saveSocialField" />
+                <MemoryFields :record-id="selectedNode.id" :autofocus-key="firstDraftField(selectedNode.id)" :rows="editRows" :save="saveSocialField" />
 
               <template v-if="selectedNode.type === 'Character' || selectedNode.type === 'Group'">
                 <dt>联系方式</dt>
@@ -783,10 +889,14 @@ function colorFor(n: SocialNode): string {
                   :class="{ active: e.bequest_id === selectedExpId }"
                   @click="selectExp(e.bequest_id)"
                 >
+                  <span v-if="!memoryDraft(e.bequest_id)" class="memory-item-stats">
+                    <span class="memory-stat is-maintain" :title="`人工维护 ${e.manual_maintenance_count ?? 0} 次`">维护<span class="memory-stat-num">{{ e.manual_maintenance_count ?? 0 }}</span></span>
+                    <span class="memory-stat is-retrieval" :title="`被检索 ${e.retrieval_count ?? 0} 次`">检索<span class="memory-stat-num">{{ e.retrieval_count ?? 0 }}</span></span>
+                  </span>
                   <span class="memory-item-dot" :style="{ background: g.def.color }"></span>
                   <div class="memory-item-main">
                     <div class="memory-item-label">
-                      <span class="memory-item-name">{{ e.title || '（未命名经验）' }}</span>
+                      <span class="memory-item-name">{{ e.title || '（未命名经验）' }}</span><span v-if="memoryDraft(e.bequest_id)" class="memory-draft-tag">草稿</span>
                       <span class="memory-scenario-tag" :class="scenarioBadgeClass(e.category)">{{ scenarioName(e.category) }}</span>
                     </div>
                     <div v-if="e.summary" class="memory-item-sub">{{ e.summary }}</div>
@@ -823,9 +933,9 @@ function colorFor(n: SocialNode): string {
             </div>
             <div class="memory-detail-body">
               <dl class="kv">
-                <dt>bequest_id</dt><dd><code>{{ selectedExp.bequest_id }}</code></dd>
+                <dt>编号</dt><dd><code>{{ memoryDraft(selectedExp.bequest_id) ? '草稿' : selectedExp.bequest_id }}</code></dd>
 
-                <MemoryFields :record-id="selectedExp.bequest_id" :rows="experienceRows" :save="saveExperienceField" />
+                <MemoryFields :record-id="selectedExp.bequest_id" :autofocus-key="firstDraftField(selectedExp.bequest_id)" :rows="experienceRows" :save="saveExperienceField" />
 
                 <dt>分类</dt>
                 <dd><code>{{ selectedExp.category }}（{{ scenarioName(selectedExp.category) }}）</code></dd>
@@ -833,7 +943,7 @@ function colorFor(n: SocialNode): string {
                 <dt>开始时间</dt><dd>{{ timeShort(selectedExp.start_time) }}</dd>
                 <dt>更新时间</dt><dd>{{ timeShort(selectedExp.updated_at) }}</dd>
               </dl>
-              <MaintenanceStatus kind="experience" :item-id="selectedExp.bequest_id" :version="selectedExp.updated_at" />
+              <MaintenanceStatus v-if="!memoryDraft(selectedExp.bequest_id)" kind="experience" :item-id="selectedExp.bequest_id" :version="selectedExp.updated_at" />
             </div>
           </template>
         </section>
@@ -845,10 +955,16 @@ function colorFor(n: SocialNode): string {
             <div class="kv-edit-actions"><el-button size="small" :loading="matching" @click="findObservations">查找见闻</el-button><el-button v-if="matchedObservations !== null" size="small" @click="clearMatches">显示全部</el-button></div>
             <p v-if="matchHint" class="memory-empty-sub">{{ matchHint }}</p>
             <p v-if="matchError" class="kv-edit-error" role="alert">{{ matchError }}</p>
+            <div class="obs-filter-row">
+              <el-select v-model="obsLimit" size="small" aria-label="显示数量" style="width: 96px;" @change="changeObservationFilter">
+                <el-option v-for="n in [20, 50, 100, 200]" :key="n" :value="n" :label="`最近 ${n} 条`" />
+              </el-select>
+              <el-date-picker v-model="obsRange" size="small" type="daterange" aria-label="时间段" range-separator="至" start-placeholder="起始日期" end-placeholder="结束日期" style="flex: 1 1 auto; min-width: 200px;" @change="changeObservationFilter" />
+            </div>
           </div>
           <div v-if="recordLoading" class="memory-empty">加载中…</div>
           <div v-if="recordError" class="memory-empty error"><div class="memory-empty-sub">{{ recordError }}</div><el-button size="small" @click="loadRecords">重试</el-button></div>
-          <div v-else-if="!recordLoading && !recordGroups.length" class="memory-empty"><div class="memory-empty-title">{{ records.length ? '没有匹配的条目' : `记忆里还没有${recordLabel}` }}</div><div class="memory-empty-sub">点击“添加”创建第一条{{ recordLabel }}</div></div>
+          <div v-else-if="!recordLoading && !recordGroups.length" class="memory-empty"><div class="memory-empty-title">{{ records.length ? '没有匹配的条目' : `记忆里还没有${recordLabel}` }}</div><div class="memory-empty-sub">点击“新建”创建空白{{ recordLabel }}</div></div>
           <div v-else class="memory-groups">
             <section v-for="group in recordGroups" :key="group.category" class="memory-group">
               <button type="button" class="memory-group-head" :aria-expanded="!recordCollapsed[group.category]" @click="recordCollapsed[group.category] = !recordCollapsed[group.category]">
@@ -858,7 +974,7 @@ function colorFor(n: SocialNode): string {
               <div v-if="!recordCollapsed[group.category]" class="memory-group-items">
                 <button v-for="item in group.items" :key="item.id" class="memory-item" :class="{ active: item.id === selectedRecordId }" @click="selectedRecordId = item.id">
                   <span class="memory-item-dot" style="background: var(--tag-special);"></span>
-                  <div class="memory-item-main"><div class="memory-item-label"><span class="memory-item-name">{{ item.name }}</span></div><div class="memory-item-sub">{{ item.snippet }}</div></div>
+                  <div class="memory-item-main"><div class="memory-item-label"><span class="memory-item-name">{{ item.name }}</span><span v-if="memoryDraft(item.id)" class="memory-draft-tag">草稿</span></div><div class="memory-item-sub">{{ item.snippet }}</div></div>
                 </button>
               </div>
             </section>
@@ -869,14 +985,18 @@ function colorFor(n: SocialNode): string {
           <template v-else>
             <div class="memory-detail-head"><span class="memory-type-badge">{{ recordLabel }}</span><span class="memory-detail-name">{{ selectedRecord.name }}</span><span class="memory-edit-tip">点击字段值即可修改</span><el-button v-if="activeView !== 'personas'" class="memory-detail-delete" size="small" type="danger" plain :icon="Delete" :loading="recordDeleting" @click="deleteRecord">删除</el-button></div>
             <div class="memory-detail-body">
+              <div v-if="activeView === 'personas' && selectedRecord.raw.user_only" class="memory-system-persona-note">
+                <strong>仅用户可编辑</strong>
+                <p>{{ selectedRecord.raw.scene }}，下一次模型调用生效。留空则不追加内容。</p>
+                <p>不参与内心人格候选，也不提供给 LLM 查询或修改的工具。</p>
+              </div>
               <dl class="kv">
-                <dt>编号</dt><dd><code>{{ selectedRecord.id }}</code></dd>
-                <MemoryFields :record-id="selectedRecord.id" :rows="recordRows" :save="saveRecordField" />
-                <dt>记录时间</dt><dd>{{ timeShort(selectedRecord.raw.created_at || selectedRecord.raw.record_time) }}</dd>
+                <dt>编号</dt><dd><code>{{ memoryDraft(selectedRecord.id) ? '草稿' : selectedRecord.id }}</code></dd>
+                <MemoryFields :record-id="selectedRecord.id" :autofocus-key="firstDraftField(selectedRecord.id)" :rows="recordRows" :save="saveRecordField" />
+                <template v-if="!selectedRecord.raw.user_only"><dt>记录时间</dt><dd>{{ timeShort(selectedRecord.raw.created_at || selectedRecord.raw.record_time) }}</dd></template>
                 <dt v-if="selectedRecord.raw.updated_at">更新时间</dt><dd v-if="selectedRecord.raw.updated_at">{{ timeShort(selectedRecord.raw.updated_at) }}</dd>
                 <template v-if="activeView === 'observations'"><dt>来源</dt><dd>{{ selectedRecord.raw.source === 'human' ? '人工记录' : selectedRecord.raw.source === 'reflection' ? '反思记录' : '历史记录' }}</dd><template v-if="selectedRecord.raw.similarity != null"><dt>相似度</dt><dd>{{ selectedRecord.raw.similarity.toFixed(3) }}</dd></template></template>
               </dl>
-              <MaintenanceStatus v-if="activeView === 'kits' || activeView === 'personas'" :kind="activeView === 'kits' ? 'kit' : 'persona'" :item-id="selectedRecord.id" :version="JSON.stringify(selectedRecord.raw)" />
               <div v-if="activeView === 'kits'" class="memory-match-controls">
                 <el-input v-model="dilemmaQuery" size="small" aria-label="当前困境" placeholder="描述当前困境，查找相关见闻" @keyup.enter="findObservations" />
                 <div class="kv-edit-actions"><el-button size="small" :loading="matching" @click="findObservations">查找见闻</el-button><el-button v-if="matchedObservations !== null" size="small" @click="activeView = 'observations'; loadRecords()">查看匹配见闻（{{ matchedObservations.length }}）</el-button></div>
@@ -887,23 +1007,16 @@ function colorFor(n: SocialNode): string {
         </section>
       </template>
     </div>
-  </el-dialog>
-  <el-dialog v-model="createVisible" :title="`添加${createNames[createKind]}`" width="min(520px, 92vw)" append-to-body :close-on-click-modal="!creating" :show-close="!creating" :close-on-press-escape="!creating" class="memory-create-dialog">
-    <el-form label-position="top" @submit.prevent="createMemory">
-      <el-form-item v-if="activeView === 'social'" label="实体类型"><el-select v-model="createKind" aria-label="实体类型" :disabled="creating"><el-option value="character" label="角色" /><el-option value="group" label="群组" /><el-option value="fuzzy_role" label="模糊角色" /></el-select></el-form-item>
-      <el-form-item v-for="field in creationFields" :key="field.key" :label="field.label" :required="field.required">
-        <el-select v-if="field.options" v-model="createDraft[field.key]" :aria-label="field.label" :disabled="creating"><el-option v-for="option in field.options" :key="option.value" :value="option.value" :label="option.label" /></el-select>
-        <el-input v-else v-model="createDraft[field.key]" :aria-label="field.label" :type="field.multiline ? 'textarea' : 'text'" :autosize="field.multiline ? { minRows: 3, maxRows: 9 } : false" :placeholder="field.placeholder" :disabled="creating" />
-      </el-form-item>
-      <div v-if="createError" class="kv-edit-error" role="alert">{{ createError }}</div>
-    </el-form>
-    <template #footer><el-button :disabled="creating" @click="createVisible = false">取消</el-button><el-button type="primary" :loading="creating" @click="createMemory">添加</el-button></template>
-  </el-dialog>
+  </AppDialog>
+
 </template>
 
 <style scoped>
-.memory-dialog :deep(.el-dialog__header) { padding: 14px 20px !important; }
-.memory-dialog :deep(.el-dialog__body) { padding: 0 !important; }
+.memory-system-persona-note { margin-bottom: 18px; padding: 14px 16px; border: 1px solid var(--border-default); border-radius: 10px; background: var(--bg-surface); color: var(--text-secondary); font-size: 12px; line-height: 1.8; }
+.memory-system-persona-note strong { color: var(--text-primary); font-weight: 600; }
+.memory-system-persona-note p { margin: 5px 0 0; color: var(--text-tertiary); }
+.memory-draft-note { display: flex; align-items: center; gap: 12px; padding: 8px 20px; border-bottom: 1px solid var(--border-1); color: var(--text-2); font-size: 12px; }
+.memory-draft-tag { color: var(--text-3); border: 1px solid var(--border-1); border-radius: 4px; padding: 1px 4px; font-size: 10px; }
 
 .memory-header {
   display: flex;
@@ -985,8 +1098,8 @@ function colorFor(n: SocialNode): string {
 
 .memory-body {
   display: flex;
-  height: min(78vh, calc(100dvh - 170px));
-  min-height: min(560px, calc(100dvh - 170px));
+  flex: 1;
+  min-height: 0;
   border-top: 1px solid var(--border-1);
   border-bottom: 1px solid var(--border-1);
 }
@@ -1164,6 +1277,28 @@ function colorFor(n: SocialNode): string {
   padding: 1px 7px;
   font-variant-numeric: tabular-nums;
 }
+.memory-item-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+.memory-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  white-space: nowrap;
+}
+.memory-stat-num {
+  font-size: 12px;
+  font-weight: 700;
+}
+.memory-stat.is-maintain .memory-stat-num { color: var(--tag-warning); }
+.memory-stat.is-retrieval .memory-stat-num { color: var(--accent); }
 
 /* ---- 空态 / 错误态 ---- */
 .memory-empty {
@@ -1309,6 +1444,7 @@ function colorFor(n: SocialNode): string {
 
 .memory-edit-tip { font-size: 11px; color: var(--text-3); font-style: italic; margin-left: 4px; }
 .memory-match-controls { padding: 10px 0; }
+.obs-filter-row { display: flex; gap: 6px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
 .kv-edit-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
 .kv-edit-error { color: var(--tag-danger); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
 @media (max-width: 760px) {
@@ -1317,4 +1453,6 @@ function colorFor(n: SocialNode): string {
   .memory-detail { min-height: 0; }
   .kv { grid-template-columns: 90px minmax(0, 1fr); }
 }
+/* Keep header controls clear of the shared close button. */
+.memory-header, .memory-header-left, .memory-header-right { flex-wrap: wrap; min-width: 0; gap: 8px; }
 </style>

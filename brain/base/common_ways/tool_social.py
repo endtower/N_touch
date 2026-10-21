@@ -44,6 +44,8 @@ class ToolSocial:
                     "此时将直接查询该角色在记忆中的印象。"
                     "默认只返回各会话的联系方式与印象；如需了解某会话的近期状态"
                     "（活跃/不活跃、消息总数、最后一条消息），请将 include_status 置为 true。"
+                    "标注了「可直接用 conversation 模式进入聊天」的会话，可用 conversation_agent 直接进入；"
+                    "未标注的会话请改用 social_chat_agent。"
                 ),
                 "parameters": {
                     "type": "object",

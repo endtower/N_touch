@@ -8,7 +8,8 @@ namespace AbyssLauncher;
 /// <summary>管理服务 /v1 接口客户端（GUI 适配模块：不发控制逻辑，只发请求转提示）。</summary>
 public class ManagerClient
 {
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(60) };
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(180) };
+    private static readonly HttpClient UpdateHttp = new() { Timeout = TimeSpan.FromHours(2) };
 
     private static HttpRequestMessage Request(string method, string path, object? body = null)
     {
@@ -42,6 +43,17 @@ public class ManagerClient
         var text = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
         return doc.RootElement.Clone();
+    }
+
+    public async Task<JsonElement> UpdateAsync(string action, object body)
+    {
+        using var req = Request("POST", "/v1/updates/" + action, body);
+        using var resp = await UpdateHttp.SendAsync(req);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var result = doc.RootElement.Clone();
+        if (!resp.IsSuccessStatusCode || (result.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.False))
+            throw new InvalidOperationException(result.TryGetProperty("message", out var message) ? message.GetString() : "更新请求失败");
+        return result;
     }
 
     public async Task<JsonElement?> TryInfo()

@@ -1,39 +1,30 @@
-"""共治查询及反思专属维护申请；不提供 LLM 人工确认或处理申请的入口。"""
-from brain.hc.maintenance import MaintenanceService
+"""通用维护工具：四种临界行动统一登记。"""
+from brain.hc.critical_actions import ACTION_STATES, CriticalActions
 
 
 class ToolMaintenance:
     @staticmethod
-    def get_query_maintenance_tool_schema():
+    def get_tool_schema():
+        descriptions = {
+            "action": "效能感100：申请维护；效能感为0：尝试自修复；归属感为0：情绪宣泄；归属感100：发布关系改进任务。",
+            "title": "本次行动标题",
+            "reason": "维护理由、自身错误、不满缘由或关系现状，依据实际经历填写。",
+            "plan": "维护改进需求、期望修改方向或尝试、宣泄打算、关系改进办法。",
+            "next_occurrence": "实施事件或后续实践验证的时间：ISO 8601 文本或尽快。",
+            "notify_master": "申请维护时必填：如何提醒、如何向主人解释这次维护需求和实施时间。",
+            "verification": "尝试自修复时必填：如何实践验证修改或尝试是否有效。",
+            "event": "情绪宣泄时必填：引发不满的具体事件。",
+            "target": "情绪宣泄或关系改进时必填：对象或关系目标。",
+            "expectation": "关系改进时必填：希望关系产生什么变化。",
+        }
+        properties = {key: {"type": "string", "description": value} for key, value in descriptions.items()}
+        properties["action"]["enum"] = list(ACTION_STATES)
         return {"type": "function", "function": {
-            "name": "query_maintenance",
-            "description": "查看最近人工维护、尚未处理的专题申请、暂缓/拒绝结论、可选条目编号及使用机会统计。申请维护前必须查询；不要重复催促主人。人工确认不提高检索权重，返回次数不代表实际采用。",
-            "parameters": {"type": "object", "properties": {"topic": {"type": "string", "description": "可选，按专题筛选最近记录；不影响全局申请限制。"}}}}}
+            "name": "maintenance_action",
+            "description": "统一维护入口，四类行动严格对应四种情感临界状态。申请维护只发布申请，并把本批负面结束评价的 failure_reason 归入申请后清空缓存；其余三类自动转交 Quest 登记对应待办。成功登记后只将对应情感值重置为50，不给+30或其他补偿；登记失败不重置。",
+            "parameters": {"type": "object", "properties": properties,
+                           "required": ["action", "title", "reason", "plan", "next_occurrence"]}}}
 
     @staticmethod
-    def get_request_maintenance_tool_schema():
-        return {"type": "function", "function": {
-            "name": "request_maintenance",
-            "description": "效能感达到100且近期任务结果较好时，围绕一个具体专题邀请主人维护1至5条经验、人格或锦囊。说明实际依据和需要主人判断的问题。成功登记后效能感重置为50，归属感不变；未登记不重置。申请不是修改授权，不自动改内容，不重复申请或催促。",
-            "parameters": {"type": "object", "properties": {
-                "topic": {"type": "string", "description": "单个具体专题，最多80字"},
-                "reason": {"type": "string", "description": "真实事例、现有内容不足和希望主人检查的具体问题"},
-                "items": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "object", "properties": {
-                    "kind": {"type": "string", "enum": ["experience", "persona", "kit"]},
-                    "item_id": {"type": "string", "description": "查询工具返回的准确编号"}}, "required": ["kind", "item_id"], "additionalProperties": False}}},
-                "required": ["topic", "reason", "items"]}}}
-
-    @staticmethod
-    async def query_maintenance(topic=""):
-        if not isinstance(topic, str):
-            raise ValueError("topic 必须为文字")
-        service = MaintenanceService()
-        result = await service.query(topic.strip())
-        catalog = await service.metadata()
-        result["items"] = [{k: item[k] for k in ("kind", "item_id", "title", "maintenance", "usage")} for item in catalog[:100]]
-        result["total_items"] = len(catalog)
-        return result
-
-    @staticmethod
-    async def request_maintenance(topic, reason, items):
-        return await MaintenanceService().request(topic, reason, items)
+    async def maintenance_action(**kwargs):
+        return await CriticalActions().register(**kwargs)

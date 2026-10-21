@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppDialog from './AppDialog.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import {
   Document,
@@ -365,12 +366,11 @@ async function deleteEvent(ev: TaskInfo) {
 </script>
 
 <template>
-  <el-dialog
+  <AppDialog size="panel"
     :model-value="props.visible"
-    :width="'90vw'"
     :close-on-click-modal="false"
     align-center
-    :show-close="false"
+    title="任务管理"
     @update:model-value="(v: boolean) => emit('update:visible', v)"
     class="evlist-dialog"
   >
@@ -652,12 +652,11 @@ async function deleteEvent(ev: TaskInfo) {
     </div>
 
     <!-- ============== 创建任务弹窗 ============== -->
-    <el-dialog
+    <AppDialog
       v-model="createDialogVisible"
       width="640px"
       :close-on-click-modal="false"
       align-center
-      :show-close="false"
       class="evlist-create-dialog"
       append-to-body
     >
@@ -734,13 +733,11 @@ async function deleteEvent(ev: TaskInfo) {
           <el-button type="primary" :loading="creating" @click="submitCreate">创建</el-button>
         </div>
       </template>
-    </el-dialog>
-  </el-dialog>
+    </AppDialog>
+  </AppDialog>
 </template>
 
 <style scoped>
-.evlist-dialog :deep(.el-dialog__header) { padding: 14px 20px !important; }
-.evlist-dialog :deep(.el-dialog__body) { padding: 0 !important; }
 
 .evlist-header {
   display: flex;
@@ -774,8 +771,8 @@ async function deleteEvent(ev: TaskInfo) {
 .evlist-body {
   display: flex;
   flex-direction: column;
-  height: 80vh;
-  min-height: 600px;
+  flex: 1;
+  min-height: 0;
   border-top: 1px solid var(--border-1);
   border-bottom: 1px solid var(--border-1);
   background: var(--bg-surface);
@@ -952,8 +949,6 @@ async function deleteEvent(ev: TaskInfo) {
 @media (max-width: 700px) {
   .evlist-create-grid { grid-template-columns: 1fr; }
 }
-.evlist-create-dialog :deep(.el-dialog__header) { padding: 14px 20px !important; }
-.evlist-create-dialog :deep(.el-dialog__body) { padding: 0 20px 12px !important; }
 .evlist-create-dialog :deep(.el-dialog__footer) { padding: 12px 20px 16px !important; border-top: 1px solid var(--border-1); }
 
 .evlist-detail-row { background: var(--bg-subtle); }
@@ -1018,4 +1013,6 @@ async function deleteEvent(ev: TaskInfo) {
   font-size: 11px;
   padding-top: 2px;
 }
+/* Keep header controls clear of the shared close button. */
+.evlist-header, .evlist-title, .evlist-toolbar { flex-wrap: wrap; min-width: 0; gap: 8px; }
 </style>

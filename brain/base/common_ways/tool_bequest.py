@@ -276,6 +276,7 @@ class ToolBequest:
         hits = await bequest_ops.search_bequests_by_title(
             query, category="speech", limit=top_k,
         )
+        await bequest_ops.record_retrievals([h["bequest_id"] for h in hits])
         results = [
             {"title": h["title"], "summary": h["summary"]}
             for h in hits

@@ -9,10 +9,11 @@
 - `VisionConfig`：视觉位配置（模型名取自 `LLMSettings.VISION` + 图片预处理）
 
 等级 → 接入点路由规则（消费方见 utils/llm_client_manager.py 的 LLMBridge）：
-- flash / vision / pro：主接入点（火山方舟北京 coding 接入点 deepseek-v4.1-flash；未配置时回退 opencode 统一接入点）
-- conversation：主接入点（专属接入点配置为空即回退主接入点）
-- persona：主接入点（专属接入点配置为空即回退主接入点）
-- embedding：火山方舟 API，见 config/settings.py 的 VectorConfig
+- flash / pro：主接入点（火山方舟北京套餐接入点 /api/plan/v3，模型 DeepSeek-V4.1-Flash；未配置时回退 opencode 统一接入点）
+- conversation：专属接入点（配置为空即回退主接入点）
+- persona：专属接入点（配置为空即回退主接入点）
+- vision：专属接入点（配置为空即回退主接入点）
+- embedding：独立接入点，见 config/settings.py 的 VectorConfig（VECTOR_API_KEY / VECTOR_BASE_URL）
 
 密钥管理：**所有 API key 只存项目根 .env.dev（永不入库）**，本文件的 key 字段
 默认值为空串、仅作占位文档；接入点 URL 与模型名支持环境变量覆盖（.env.dev
@@ -20,6 +21,10 @@
 """
 
 from config.env_tools import env_str
+
+DEFAULT_COMMON_URL = "https://ark.cn-beijing.volces.com/api/plan/v3"
+DEFAULT_COMMON_MODEL = "DeepSeek-V4.1-Flash"
+DEFAULT_EMBEDDING_MODEL = "doubao-embedding-vision"
 
 
 # ==================================================
@@ -29,11 +34,11 @@ class LLMSettings:
     """全局模型注册表：以后更换模型只需修改本类，全系统自动生效。
 
     等级划分: flash / conversation / persona / pro / vision / embedding。
-    - flash 走主力专属接入点 火山方舟（北京）coding 接入点 deepseek-v4.1-flash（未配置时回退 opencode 统一接入点）
-    - conversation 走主接入点（当前模型 deepseek-v4.1-flash，与 flash 同级）
-    - persona 走主接入点（当前模型 deepseek-v4.1-flash，与 flash 同级）
-    - vision 位即 flash 等级模型（deepseek-v4.1-flash）
-    - embedding 走火山方舟 API（见 config/settings.py 的 VectorConfig）
+    - flash 走主力专属接入点 火山方舟（北京）套餐接入点 /api/plan/v3，模型 DeepSeek-V4.1-Flash（未配置时回退 opencode 统一接入点）
+    - conversation 走专属接入点（未配置时回退主接入点；当前模型 DeepSeek-V4.1-Flash）
+    - persona 走专属接入点（未配置时回退主接入点；当前模型 DeepSeek-V4.1-Flash）
+    - vision 走专属接入点（未配置时回退主接入点；当前模型 DeepSeek-V4.1-Flash）
+    - embedding 走火山方舟 API（见 config/settings.py 的 VectorConfig，独立 VECTOR_API_KEY / VECTOR_BASE_URL）
     """
 
     # ===================== opencode 统一接入点 =====================
@@ -42,20 +47,20 @@ class LLMSettings:
     BASE_URL = env_str("OPENCODE_BASE_URL", "https://opencode.ai/zen/go/v1")
 
     # ===================== 主力模型（flash）专属接入点 =====================
-    # 【套餐·主力】火山方舟（北京）coding 接入点（OpenAI 兼容，2026-09-30 新增并切为主力）；
-    # 国内直连、免梯子，实测 /models 1.7s、/chat/completions 1.1s
-    # （对比 commandcode 中转 2.5~30s）；模型 deepseek-v4.1-flash
-    # （端点内部解析为 deepseek-v4-1-flash）；flash / vision / pro 等级使用；
-    # 置空则回退 opencode 统一接入点。key 只存 .env.dev（FLASH_API_KEY=...）
+    # 【当前·主力】火山方舟（北京）套餐接入点 /api/plan/v3（OpenAI 兼容，2026-10-17 切为主力）；
+    # 国内直连、免梯子；模型 DeepSeek-V4.1-Flash；
+    # flash / vision / pro 等级使用；置空则回退 opencode 统一接入点。
+    # key 只存 .env.dev（FLASH_API_KEY=...）
+    # 注意：Anthropic 兼容端点是 /api/plan（不带 /v3），OpenAI 兼容必须用 /api/plan/v3
     FLASH_API_KEY = env_str("FLASH_API_KEY", "")
-    FLASH_BASE_URL = env_str("FLASH_BASE_URL", "https://ark.cn-beijing.volces.com/api/coding/v3")
+    FLASH_BASE_URL = env_str("FLASH_BASE_URL", DEFAULT_COMMON_URL)
 
     # 【套餐·停用】commandcode 中转（境外 Cloudflare，链路慢，2026-09-30 停用改走方舟）；
     # 需要回退时把 key/url 写进 .env.dev 的 FLASH_API_KEY / FLASH_BASE_URL 即可
     # （注意该套餐模型名带 deepseek/ 前缀；旧 key 备份在 .env.dev 注释里）
 
     # ===================== conversation 专属接入点 =====================
-    # 仅 conversation 等级使用（social_chat 也走本等级）；置空则回退主接入点（火山方舟 deepseek-v4.1-flash）。
+    # 仅 conversation 等级使用（social_chat 也走本等级）；置空则回退主接入点（火山方舟 DeepSeek-V4.1-Flash）。
     # 2026-09-23 临时置空：原中转的 gemini adapter 在「思考 + function calling」组合下会
     # 间歇性吞掉模型输出（HTTP 200、content 为空、tool_calls 字段缺失，却照计 21 个
     # candidate token），使 conversation 连续 3 次被判「未使用工具」而直接崩溃。
@@ -65,25 +70,33 @@ class LLMSettings:
 
     # ===================== persona（内心人格）专属接入点 =====================
     # 人格召唤的 LLM 独立接入点，与 conversation 分开配置（避免借用会话等级语义）；
-    # 置空则回退主接入点（火山方舟 deepseek-v4.1-flash）。
+    # 置空则回退主接入点（火山方舟 DeepSeek-V4.1-Flash）。
     # 2026-09-23 临时置空：智谱 GLM 出字太慢，人格召唤又是 PFCA 每次决策前的必经步骤，
     # 延迟被放大；改走主接入点（与 flash 同级模型）。
     # （旧接入点智谱 GLM：key/url 备份在 .env.dev 注释里）
     PERSONA_API_KEY = env_str("PERSONA_API_KEY", "")
     PERSONA_BASE_URL = env_str("PERSONA_BASE_URL", "")
 
+    # ===================== vision（视觉位）专属接入点 =====================
+    # 视觉位的 LLM 独立接入点，与主力/会话/人格分开配置；
+    # 置空则回退主接入点（火山方舟 DeepSeek-V4.1-Flash，原生支持图像理解）。
+    # key 只存 .env.dev（VISION_API_KEY=...）
+    VISION_API_KEY = env_str("VISION_API_KEY", "")
+    VISION_BASE_URL = env_str("VISION_BASE_URL", "")
+
     # ===================== 模型等级 =====================
-    FLASH = env_str("LLM_FLASH", "deepseek-v4.1-flash")   # 主力模型（火山方舟北京 coding 接入点，当前所有主力 LLM 调用统一使用）
-    CONVERSATION = env_str("LLM_CONVERSATION", "deepseek-v4.1-flash")  # conversation 会话模型（2026-09-23 临时切回主接入点，与 flash 同级；原 gemini-3.8-flash）
-    PERSONA = env_str("LLM_PERSONA", "deepseek-v4.1-flash")       # 内心人格模型（2026-09-23 临时切回主接入点，与 flash 同级；原 glm-5.3-flash）
-    PRO = env_str("LLM_PRO", "")                                  # 高阶模型，暂不设置
-    # 视觉位：deepseek-v4.1-flash 原生支持图像理解，与主力同接入点
-    VISION = env_str("LLM_VISION", "deepseek-v4.1-flash")
-    EMBEDDING = env_str("LLM_EMBEDDING", "doubao-embedding-vision")     # 向量嵌入模型（火山方舟 API 接入，2048 维）
+    FLASH = env_str("LLM_FLASH", DEFAULT_COMMON_MODEL)
+    # 可选等级逐字段继承 common；显式配置的模型名仍优先。
+    CONVERSATION = env_str("LLM_CONVERSATION", FLASH)
+    PERSONA = env_str("LLM_PERSONA", FLASH)
+    PRO = env_str("LLM_PRO", FLASH)
+    # 视觉位：DeepSeek-V4.1-Flash 原生支持图像理解，与主力同接入点
+    VISION = env_str("LLM_VISION", FLASH)
+    EMBEDDING = env_str("LLM_EMBEDDING", DEFAULT_EMBEDDING_MODEL)
 
     # ===================== 思考模式 =====================
     # 统一控制主力与视觉模型的思考开关（仅 opencode 接入点注入 thinking extra_body；
-    # 火山方舟 / commandcode 接入点走其默认值——默认即思考模式）
+    # 火山方舟接入点走其默认值——默认即思考模式）
     THINKING = True
 
 
@@ -111,7 +124,7 @@ class LLMConfig:
 # 视觉位配置
 # ==================================================
 class VisionConfig:
-    """视觉位配置 —— 模型名取自 LLMSettings.VISION（当前 = deepseek-v4.1-flash，火山方舟北京 coding 接入点）。
+    """视觉位配置 —— 模型名取自 LLMSettings.VISION（当前 = DeepSeek-V4.1-Flash，火山方舟北京套餐接入点 /api/plan/v3）。
 
     模型名与接入点统一由 LLMSettings 管理，本类只补充视觉位特有的参数。
     """

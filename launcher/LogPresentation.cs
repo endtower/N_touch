@@ -29,14 +29,26 @@ public static class LogPresentation
         }
         else if (source is "core" or "snowluma" or "ingress")
         {
-            files = [Path.Combine(folder, source + ".out.log")];
-            if (source == "core" && (!File.Exists(files[0]) || new FileInfo(files[0]).Length == 0))
+            var primary = Path.Combine(folder, source + ".out.log");
+            if (source == "core")
             {
+                // core 的 stdout 落点随启动方式变化：manager 托管时写 manager/core.out.log，
+                // 但冻结版 core.exe 会把 stdout 重定向到 logs/core_stdout.log，同时 root logger
+                // 写入 logs/app_*.log。若只认死 core.out.log，进程切换落点后这里会长期停留在旧文件
+                // （表现为日志面板显示好几天前的内容）。改为按 mtime 选取最新的真实落点。
                 var logs = Path.Combine(dataRoot, "logs");
-                var fallback = Directory.Exists(logs) ? Directory.GetFiles(logs, "app_*.log")
-                    .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault() : null;
-                if (fallback is not null) files = [fallback];
+                // 排除轮转分片（app_*.log.1/.2…）：Windows 的 *.log 通配会连带命中它们，
+                // 这里只取最新的当天主文件；分片是同一日志的旧片段，不在预览范围内。
+                var candidates = new List<string> { primary, Path.Combine(logs, "core_stdout.log") };
+                if (Directory.Exists(logs))
+                    candidates.AddRange(Directory.GetFiles(logs, "app_*.log")
+                        .Where(f => !Regex.IsMatch(Path.GetFileName(f), @"\.\d+$")));
+                var newest = candidates.Where(File.Exists)
+                    .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
+                // 全部候选都不存在时保留 primary，交由下方 File.Exists 过滤为空快照。
+                files = [newest ?? primary];
             }
+            else files = [primary];
         }
         else throw new ArgumentException("Unknown log source", nameof(source));
         var text = new StringBuilder();

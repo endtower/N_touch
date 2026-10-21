@@ -67,11 +67,12 @@ async def handle_create_social_memory(request: web.Request) -> web.Response:
     try:
         data = _create_fields(await request.json(), *fields[entity_type])
         contact = data.get("session_id") or data.get("source_session_id", "")
-        if contact and not (contact.startswith(("private_", "group_")) and contact.split("_", 1)[1]):
-            raise ValueError("会话 ID 应为 private_用户ID 或 group_群ID")
-        if entity_type == "character" and contact and not contact.startswith("private_"):
+        from adapt.session_identity import session_scope
+        if contact and session_scope(contact) not in ("private", "group"):
+            raise ValueError("会话 ID 应为已知平台的私聊或群聊会话")
+        if entity_type == "character" and contact and session_scope(contact) != "private":
             raise ValueError("角色应关联 private_ 私聊会话")
-        if entity_type == "group" and contact and not contact.startswith("group_"):
+        if entity_type == "group" and contact and session_scope(contact) != "group":
             raise ValueError("群组应关联 group_ 群聊会话")
     except (ValueError, TypeError) as error:
         return web.json_response({"error": str(error)}, status=400)
@@ -122,11 +123,10 @@ async def handle_create_experience(request: web.Request) -> web.Response:
         try:
             bequest_id = await ops.create_bequest(**data)
             conn = await get_memory_db()._ensure_connection()
-            row = await (await conn.execute("SELECT bequest_id, title, summary, category, start_time, updated_at FROM bequests WHERE bequest_id=?", (bequest_id,))).fetchone()
+            row = await (await conn.execute("SELECT bequest_id, title, summary, category, start_time, updated_at, retrieval_count, last_maintained_at, manual_maintenance_count FROM bequests WHERE bequest_id=?", (bequest_id,))).fetchone()
             from brain.hc.maintenance import MaintenanceService
             service = MaintenanceService()
-            item = await service.item("experience", bequest_id)
-            await service.review("experience", bequest_id, item["revision"], action="edit")
+            await service.review(bequest_id)
             return web.json_response({"experience": dict(row)}, status=201)
         except Exception:
             logger.exception("创建经验失败")
@@ -154,6 +154,7 @@ def _character_full(rec) -> Dict[str, Any]:
         "familiarities": [{"content": rec["familiarity"]}] if rec["familiarity"] else [],
         "contacts": json.loads(rec["contacts"] or "[]"),
         "relationships_with_default": [{"type": rec["relationship"]}] if rec["relationship"] else [],
+        "allow_conversation": bool(rec["allow_conversation"]),
         "affinity_events": json.loads(rec["affinity_events"] or "[]"),
         "usage_count": rec["usage_count"],
         "last_used_at": rec["last_used_at"],
@@ -172,6 +173,7 @@ def _group_full(rec) -> Dict[str, Any]:
         "member_impressions": [{"content": rec["member_impression"]}] if rec["member_impression"] else [],
         "contacts": json.loads(rec["contacts"] or "[]"),
         "relationships_with_default": [{"type": rec["self_image"]}] if rec["self_image"] else [],
+        "allow_conversation": bool(rec["allow_conversation"]),
         "usage_count": rec["usage_count"],
         "last_used_at": rec["last_used_at"],
         "created_at": rec["created_at"],
@@ -349,7 +351,7 @@ async def handle_get_experiences(request: web.Request) -> web.Response:
 
     try:
         cur = await conn.execute(
-            "SELECT bequest_id, title, summary, category, start_time, updated_at "
+            "SELECT bequest_id, title, summary, category, start_time, updated_at, retrieval_count, last_maintained_at, manual_maintenance_count "
             "FROM bequests ORDER BY coalesce(start_time, updated_at) DESC LIMIT ?",
             (limit,),
         )
@@ -362,6 +364,9 @@ async def handle_get_experiences(request: web.Request) -> web.Response:
                 "category": r["category"] or "",
                 "start_time": r["start_time"] or "",
                 "updated_at": r["updated_at"] or "",
+                "retrieval_count": r["retrieval_count"],
+                "last_maintained_at": r["last_maintained_at"],
+                "manual_maintenance_count": r["manual_maintenance_count"],
             }
             for r in rows
         ]
@@ -421,7 +426,7 @@ async def handle_update_experience(request: web.Request) -> web.Response:
 
         conn = await get_memory_db()._ensure_connection()
         cur = await conn.execute(
-            "SELECT bequest_id, title, summary, category, start_time, updated_at "
+            "SELECT bequest_id, title, summary, category, start_time, updated_at, retrieval_count, last_maintained_at, manual_maintenance_count "
             "FROM bequests WHERE bequest_id=?",
             (bequest_id,),
         )
@@ -436,12 +441,14 @@ async def handle_update_experience(request: web.Request) -> web.Response:
             "category": row["category"] or "",
             "start_time": row["start_time"] or "",
             "updated_at": row["updated_at"] or "",
+            "retrieval_count": row["retrieval_count"],
+            "last_maintained_at": row["last_maintained_at"],
+            "manual_maintenance_count": row["manual_maintenance_count"],
         }
         logger.debug(f"[/memory/experiences/{bequest_id}] 已更新")
         from brain.hc.maintenance import MaintenanceService
         service = MaintenanceService()
-        item = await service.item("experience", bequest_id)
-        await service.review("experience", bequest_id, item["revision"], action="edit")
+        await service.review(bequest_id)
         return web.json_response({"experience": experience, "updated": True})
     except Exception as e:
         logger.exception(f"[/memory/experiences/{bequest_id}] 更新失败")
@@ -527,10 +534,13 @@ async def handle_delete_social_memory(request: web.Request) -> web.Response:
 # ============================================================
 
 # 三种实体的可编辑字段白名单
-_CHARACTER_EDITABLE = {"name", "aliases", "impression", "familiarity", "relationship"}
+_CHARACTER_EDITABLE = {
+    "name", "aliases", "impression", "familiarity", "relationship",
+    "allow_conversation",
+}
 _GROUP_EDITABLE = {
     "name", "aliases", "impression", "familiarity",
-    "member_impression", "self_image",
+    "member_impression", "self_image", "allow_conversation",
 }
 _FUZZY_EDITABLE = {"name", "content"}
 
@@ -541,11 +551,13 @@ async def handle_update_social_memory(request: web.Request) -> web.Response:
     entity_type ∈ {character, group, fuzzy_role}
 
     body (JSON, 只提交要改的字段):
-      character: { name?, aliases?: [str], impression?, familiarity?, relationship? }
+      character: { name?, aliases?: [str], impression?, familiarity?, relationship?,
+                   allow_conversation?: bool }
       group:     { name?, aliases?: [str], impression?, familiarity?,
-                   member_impression?, self_image? }
+                   member_impression?, self_image?, allow_conversation?: bool }
       fuzzy_role:{ name?, content? }
 
+    allow_conversation 勾选后，conversation_agent 保护模式放行该实体关联的会话。
     更新成功后重新向量化，并返回完整节点（含 id/type/label）。
     """
     entity_type = request.match_info.get("entity_type", "").lower()
@@ -579,6 +591,9 @@ async def handle_update_social_memory(request: web.Request) -> web.Response:
                 if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
                     return web.json_response({"error": "aliases 必须是字符串数组"}, status=400)
                 v = [x.strip() for x in v if x.strip()]
+            elif k == "allow_conversation":
+                if type(v) is not bool:
+                    return web.json_response({"error": "allow_conversation 必须是布尔值"}, status=400)
             elif isinstance(v, str):
                 v = v.strip()
             kwargs[k] = v

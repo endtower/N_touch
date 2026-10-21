@@ -144,8 +144,8 @@ async def async_process_from_att_factory(
     - ``name``: 触发本轮 PFCA 的那条消息所属会话的人类可读名称（可选），
       例如私聊触发 → ``<master_name>``、群聊触发 → ``未定义开发社3群``。
       定义：仅由"消息类型触发的会话"提供该会话的 ``session_name``；
-      其他没有真实消息会话来源的场景（ongoing、scheduled_proactive
-      等纯事件/计划任务）须传 ``None``，不得伪造占位串，否则
+      其他没有真实消息会话来源的场景（pre_truck 判断层交过来的纯事件/计划任务）
+      须传 ``None``，不得伪造占位串，否则
       ``first_session_impression_search`` 会按错误名称误命中/新建记忆数据库节点。
       未传时 ``add_pfca_session`` 内部可从消息存储兑底。
 

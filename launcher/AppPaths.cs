@@ -16,7 +16,7 @@ public static class AppPaths
 
         var appRoot = AppRoot();
         var descriptor = Path.Combine(appRoot, "abyss-data-dir.txt");
-        if (!File.Exists(descriptor)) return appRoot;
+        if (!File.Exists(descriptor)) return Bootstrap.Available && appRoot == Bootstrap.Root ? Bootstrap.Data : appRoot;
         var configured = File.ReadAllText(descriptor).Trim();
         if (string.IsNullOrWhiteSpace(configured))
             throw new InvalidDataException("abyss-data-dir.txt 未指定数据目录");
@@ -32,6 +32,7 @@ public static class AppPaths
         var exeDir = Path.GetDirectoryName(Environment.ProcessPath ?? AppContext.BaseDirectory)
             ?? AppContext.BaseDirectory;
         if (File.Exists(Path.Combine(exeDir, "manager.exe"))) return exeDir;
+        if (Bootstrap.Available) return Bootstrap.Root;
 
         var baseDir = AppContext.BaseDirectory;
         var dir = new DirectoryInfo(baseDir);
@@ -45,7 +46,10 @@ public static class AppPaths
         return exeDir;
     }
 
-    public static string ServiceBase() => "http://127.0.0.1:49990";
+    public static int ServicePort() => int.TryParse(Environment.GetEnvironmentVariable("ABYSS_MANAGER_PORT"), out var port)
+        && port is > 0 and <= 65535 ? port : 49990;
+
+    public static string ServiceBase() => $"http://127.0.0.1:{ServicePort()}";
 
     public static string TokenFile() => Path.Combine(DataRoot(), "manager", "service_token.txt");
 

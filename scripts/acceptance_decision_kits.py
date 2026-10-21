@@ -66,7 +66,11 @@ class DecisionKitAcceptance(unittest.IsolatedAsyncioTestCase):
         app.router.add_get("/memory/experiences", handle_get_experiences)
         app.router.add_post("/memory/experiences", handle_create_experience)
         self.client = TestClient(TestServer(app)); await self.client.start_server()
-        self.vector = SimpleNamespace(generate_vector=AsyncMock(side_effect=self.embed))
+        self.vector = SimpleNamespace(
+            generate_vector=AsyncMock(side_effect=self.embed),
+            generate_vectors=AsyncMock(side_effect=self.embed_many),
+        )
+        self.embedded = []  # 已请求嵌入的文本（按条计，批量接口内部逐条记录）
         for module in ("character", "group", "bequest"):
             mock = patch(f"brain.hc.database.{module}.get_vector_store", return_value=self.vector)
             mock.start(); self.addCleanup(mock.stop)
@@ -78,7 +82,11 @@ class DecisionKitAcceptance(unittest.IsolatedAsyncioTestCase):
         await self.db.close()
 
     async def embed(self, text, target="bequest"):
+        self.embedded.append(text)
         return [1.0, float(text.rsplit("-", 1)[-1])] if text.startswith("见闻-") else [1.0, 0.0]
+
+    async def embed_many(self, texts, target="bequest"):
+        return [await self.embed(text, target) for text in texts]
 
     async def seed_notes(self, count):
         for index in range(count):
@@ -129,17 +137,17 @@ class DecisionKitAcceptance(unittest.IsolatedAsyncioTestCase):
     async def test_cache_reuses_vectors_and_invalidates_text_and_model(self):
         await self.seed_notes(6)
         await ToolJinnang.query_jinnang("问题")
-        self.assertEqual(self.vector.generate_vector.await_count, 7)
+        self.assertEqual(len(self.embedded), 7)
         await ToolJinnang.query_jinnang("另一个问题")
-        self.assertEqual(self.vector.generate_vector.await_count, 8)
+        self.assertEqual(len(self.embedded), 8)
         file = self.notepad._slot_path(SLOT_EVENT)
         payload = json.loads(file.read_text(encoding="utf-8")); payload["notes"][0]["text"] = "见闻-9"
         file.write_text(json.dumps(payload), encoding="utf-8")
         await ToolJinnang.query_jinnang("问题")
-        self.assertEqual(self.vector.generate_vector.await_count, 10)
+        self.assertEqual(len(self.embedded), 10)
         with patch.object(searchmod.vector_config, "MODEL_NAME", "test-model-changed"):
             await ToolJinnang.query_jinnang("问题")
-        self.assertEqual(self.vector.generate_vector.await_count, 17)
+        self.assertEqual(len(self.embedded), 17)
 
     async def test_small_inventory_empty_kits_and_empty_observations(self):
         result = await ToolJinnang.query_jinnang("问题")
@@ -220,13 +228,13 @@ class DecisionKitAcceptance(unittest.IsolatedAsyncioTestCase):
         note = (await response.json())["observation"]
         self.assertEqual(note["source"], "human")
         await ToolJinnang.query_jinnang("问题")
-        before = self.vector.generate_vector.await_count
+        before = len(self.embedded)
         response = await self.client.patch("/memory/observations/" + note["note_id"], json={"text": "修订后的观察"})
         edited = (await response.json())["observation"]
         self.assertEqual(edited["record_time"], note["record_time"])
         self.assertEqual(edited["source"], "human")
         await ToolJinnang.query_jinnang("问题")
-        self.assertEqual(self.vector.generate_vector.await_count, before + 2)
+        self.assertEqual(len(self.embedded), before + 2)
         self.assertEqual((await self.client.delete("/memory/observations/" + note["note_id"])).status, 200)
         self.assertEqual((await self.client.delete("/memory/observations/" + note["note_id"])).status, 404)
         conn = await self.db._ensure_connection()

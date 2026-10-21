@@ -451,7 +451,8 @@ class SocialChatToolManager(ToolManager):
                                 + '、'.join(EvaluationAct.names())
                             ),
                             "enum": EvaluationAct.names(),
-                        }
+                        },
+                        "failure_reason": {"type": "string", "description": "选择 AMY 失败评价分区时填写表现差原因；本地缓存至下次维护申请，发布后归入该申请并清空缓存。"},
                     },
                     "required": ["summary"],
                 },
@@ -657,6 +658,8 @@ class SocialChatToolManager(ToolManager):
             typing_delay_per_char=SocialChatSession.TYPING_DELAY_PER_CHAR,
             on_sent=sent_text.append,
         )
+        if not sent_text:
+            return {"status": "pending", "result": result}
         sent_at = await self._finish_target_send(tsid, sent_text[0], nature, send_mode=send_mode)
 
         return {"status": "ok", "sent_at": sent_at, "result": result}
@@ -694,6 +697,7 @@ class SocialChatToolManager(ToolManager):
         await ToolConversation.send_segments_with_typing(
             scope, target_id, [image_seg],
             typing_delay_per_char=SocialChatSession.TYPING_DELAY_PER_CHAR,
+            session_id=tsid,
         )
         sent_at = await self._finish_target_send(tsid, preview, nature, send_mode=send_mode)
 
@@ -765,6 +769,7 @@ class SocialChatToolManager(ToolManager):
         await ToolConversation.send_segments_with_typing(
             scope, target_id, [text_segment(text)],
             typing_delay_per_char=SocialChatSession.TYPING_DELAY_PER_CHAR,
+            session_id=msid,
         )
 
     async def set_send_mode(self, mode: str) -> Dict[str, Any]:
@@ -811,7 +816,7 @@ class SocialChatToolManager(ToolManager):
                 "chain_id": self._permissions.chain_id, "target_session_id": self._permission_scope[1],
                 "scope": "current_event_chain_and_target"}
 
-    async def transfer_back(self, summary: str, encounter_type: str = None) -> Dict[str, Any]:
+    async def transfer_back(self, summary: str, encounter_type: str = None, failure_reason: str = None) -> Dict[str, Any]:
         """结束本次委托，触发 social_chat_core 的退出流程。
 
         encounter_type: 本次任务中他人对我能力/表现的评价（EvaluationAct 类，可选）——
@@ -823,10 +828,15 @@ class SocialChatToolManager(ToolManager):
                 f"transfer_back encounter_type 未注册: {encounter_type!r}"
                 "（必须从 EvaluationAct 中选择）"
             )
+        from brain.amy.failure_reasons import validate_failure_reason, cache_failure_reason
+        validate_failure_reason(encounter_type, failure_reason)
         # 评价登记（conversation 同款：流转退出时顺带登记，失败直接抛错阻断，
         # 避免带着未登记的情绪状态结束任务）
         if encounter_type:
             await self.emotional_judgment(session_type="working", act=encounter_type)
+
+        await cache_failure_reason(encounter_type, failure_reason, source="social_chat",
+                                   title=summary[:80], session_id=self.social_chat_core.working_session_id or "")
 
         # 把 summary 写入 core，供 stop_session / 返回结果使用
         if self.social_chat_core is not None:
@@ -891,7 +901,8 @@ class SocialChatToolManager(ToolManager):
             session_name = self._resolve_working_session_name()
 
         # session_id 已是 type_id 格式，前缀即为 session_type（喂给 build_conversation_thought）
-        sub_session_type = core_session_id.split("_", 1)[0] if "_" in core_session_id else ""
+        from adapt.session_identity import session_scope
+        sub_session_type = session_scope(core_session_id)
 
         success, msg, _prompt = await ei.build_conversation_thought(
             act=act,
