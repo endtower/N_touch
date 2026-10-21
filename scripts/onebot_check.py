@@ -84,7 +84,7 @@ async def _run(port_override: int | None) -> int:
     channel = OneBotChannel(cfg)
     await channel.start()
     print(f"OneBotChannel 已启动: {url}")
-    print(f"token: {'<未配置(不鉴权)>' if not token else token[:6] + '...(来自 .env.dev/config)'}")
+    print(f"token: {'<未配置(不鉴权)>' if not token else '<已配置，不显示内容>'}")
 
     results = []
     ok, detail = await _connect_as_snowluma(url, token)
