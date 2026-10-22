@@ -68,7 +68,7 @@ def main(argv=None) -> int:
     log = EventLog(_fresh("events.jsonl"))
     outbox = Outbox(_fresh("outbox.jsonl"))
     mem = Recall()
-    box = build_toolbox(log, recall=mem, dry=True)  # 影子模式：cmd 一律不发
+    box = build_toolbox(log, recall=mem, dry=True, state=state)  # 影子模式：cmd 一律不发
     model = LiveModel(max_tokens=args.max_tokens)
 
     ep = Episode(

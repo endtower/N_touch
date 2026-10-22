@@ -120,6 +120,27 @@ class Experience:
                 lines.append(f"- {title}（{cat}，用过{n}次）\n  {summary}")
         return "\n".join(lines)
 
+    def recall_speech(self, query: str, k: int = 3) -> str:
+        """只取"话术"类经验（category == speech）。
+
+        和 recall 分开的理由：要开口时缺的是"这句话怎么说"，
+        不是"他是谁"——混在一起会稀释掉最该被读到的那几条。
+        """
+        if self._rows is None:
+            self._load()
+        q = (query or "").strip()
+        speech_rows = [r for r in self._rows if (r[1] or "") == "speech"]
+        hits = [r for r in speech_rows if q and (q in r[0] or q in (r[2] or ""))]
+        if not hits:
+            hits = speech_rows[:k]  # 退路：最常用的几条话术
+        hits = hits[:k]
+        if not hits:
+            return "没有对应的说话经验。"
+        lines = ["【话术经验】"]
+        for title, _cat, summary, n in hits:
+            lines.append(f"- {title}（用过{n}次）\n  {summary}")
+        return "\n".join(lines)
+
     def count(self) -> int:
         if self._rows is None:
             self._load()

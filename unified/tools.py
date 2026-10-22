@@ -21,6 +21,13 @@ from .history import Recall
 from .qq_cli import run_command
 
 
+def _acts():
+    """可认定的行为清单（来自主仓 act 表，排除系统内置类）。"""
+    from .feelings import available_acts
+
+    return available_acts()
+
+
 @dataclass
 class Tool:
     name: str
@@ -29,8 +36,14 @@ class Tool:
     params: Dict[str, str]
     handler: Callable[..., str]
     required: List[str] = field(default_factory=list)
+    enum_field: str = ""
+    enum_values: List[str] = field(default_factory=list)
 
     def schema(self) -> Dict[str, Any]:
+        props = {k: {"type": "string", "description": v} for k, v in self.params.items()}
+        if self.enum_field and self.enum_values:
+            props.setdefault(self.enum_field, {"type": "string"})
+            props[self.enum_field]["enum"] = list(self.enum_values)
         return {
             "type": "function",
             "function": {
@@ -38,7 +51,7 @@ class Tool:
                 "description": f"[{self.authority}] {self.summary}",
                 "parameters": {
                     "type": "object",
-                    "properties": {k: {"type": "string", "description": v} for k, v in self.params.items()},
+                    "properties": props,
                     "required": self.required or list(self.params),
                 },
             },
@@ -66,12 +79,22 @@ class ToolBox:
         return result
 
 
-def build_toolbox(log=None, recall: Recall | None = None, dry: bool = False) -> ToolBox:
+def build_toolbox(log=None, recall: Recall | None = None, dry: bool = False, state=None) -> ToolBox:
     box = ToolBox(log=log)
     mem = recall or Recall()
 
     def do_recall(query: str, k: str = "3") -> str:
         return mem.search(query, int(k))
+
+    def do_recall_speech(query: str, k: str = "3") -> str:
+        return mem.exp.recall_speech(query, int(k))
+
+    def do_feel(act: str) -> str:
+        if state is None:
+            raise RuntimeError("feel 需要 state（情绪落在她自己的状态里）")
+        from .feelings import feel
+
+        return feel(state, log, act)
 
     def do_cmd(command: str) -> str:
         return run_command(command, dry=dry)
@@ -101,6 +124,32 @@ def build_toolbox(log=None, recall: Recall | None = None, dry: bool = False) -> 
             {"command": "例如 qq text group_123 在呢"},
             do_cmd,
             required=["command"],
+        )
+    )
+    box.register(
+        Tool(
+            "recall_speech",
+            "capability",
+            "只查“话术”经验：这种情况该怎么开口、这句话怎么说才不像机器。"
+            "被说生硬、不知道第一句怎么接、想开玩笑/哄人/拒绝时先查它。",
+            {"query": "当前处境或关键词", "k": "取几条"},
+            do_recall_speech,
+            required=["query"],
+        )
+    )
+    box.register(
+        Tool(
+            "feel",
+            "capability",
+            "认定一件已经发生的事，从而改变你的情绪。\n"
+            "注意：你不是直接拨 DA/NE 的数值，而是认定“发生了什么”——"
+            "对方攻击你、夸奖你、晾着你、你自己推进顺利或搞砸，都在这张表里。\n"
+            "调用后系统会自动返回你当前的情绪状态和描述。",
+            {"act": "从可认定的行为表里选一个"},
+            do_feel,
+            required=["act"],
+            enum_field="act",
+            enum_values=_acts(),
         )
     )
     box.register(

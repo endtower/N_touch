@@ -85,8 +85,8 @@ def run(
         leak = leak_check(inner, speech)
 
         self_effects: Dict[str, Any] = {}
-        if speech:
-            self_effects["mood_da"] = 1
+        # 说话本身不再改情绪。情绪只由 feel（认定发生了什么）和 end_episode（收尾结算）驱动。
+        # 原来这里有一句"说了一句 DA+1"，那是在情绪还是仪表的时候顺手加的，现在不成立了。
         log.append(
             "cycle",
             {

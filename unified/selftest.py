@@ -74,14 +74,34 @@ def main() -> int:
         p = RUN_DIR / f
         if p.exists():
             p.unlink()
-    box = build_toolbox(EventLog(RUN_DIR / "events.jsonl"), recall=Recall(), dry=True)
+    st_e2e = State()
+    log_e2e = EventLog(RUN_DIR / "events.jsonl")
+    box = build_toolbox(log_e2e, recall=Recall(), dry=True, state=st_e2e)
     check("conversation_agent 已消失", "conversation_agent" not in box.tools, str(list(box.tools)))
-    check("只留三个工具", len(box.tools) == 3, str(list(box.tools)))
+    check("五个工具", len(box.tools) == 5, str(list(box.tools)))
+    for need in ("recall", "recall_speech", "feel", "cmd", "end_episode"):
+        check(f"{need} 在册", need in box.tools)
     for gone in ("wait", "note", "look_up", "look_up_group", "recall_experience", "send_message", "send_image"):
         check(f"{gone} 已删", gone not in box.tools)
-    check("cmd 在册", "cmd" in box.tools)
 
-    print("[5] 命令式发送")
+    print("[5] 认定情绪")
+    from .feelings import available_acts, feel
+    acts = available_acts()
+    check("认得到主仓行为表", len(acts) >= 10, str(len(acts)))
+    out = box.call("feel", {"act": acts[0]})
+    check("返回当前情绪", "【当前情绪】" in out and "DA" in out, out[:60])
+    try:
+        box.call("feel", {"act": acts[0]})
+        check("同拍重复认定应拒绝", False)
+    except ValueError:
+        check("同拍重复认定应拒绝", True)
+    try:
+        box.call("feel", {"act": "不存在的判定"})
+        check("未知认定应拒绝", False)
+    except ValueError:
+        check("未知认定应拒绝", True)
+
+    print("[6] 命令式发送")
     from .qq_cli import run_command
     out = run_command("qq text group_123 在呢", dry=True)
     check("text 命令可解析", "[dry]" in out and "在呢" in out, out)
@@ -97,7 +117,7 @@ def main() -> int:
     res = run(
         Episode(session="group_selftest", trigger="他在群里一直说客套话"),
         MockModel(list(DEMO_SCRIPT)),
-        State(),
+        st_e2e,
         box,
         Outbox(RUN_DIR / "outbox.jsonl"),
         EventLog(RUN_DIR / "events.jsonl"),

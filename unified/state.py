@@ -32,6 +32,8 @@ class State:
     relations: Dict[str, Dict[str, int]] = field(default_factory=dict)
     threads: List[Dict[str, Any]] = field(default_factory=list)
     seq: int = 0
+    # 上一次认定的行为（防同一件事连拍重复认定，把情绪打满）
+    last_feel: str = ""
 
     # ---------- 命名事务 ----------
 
