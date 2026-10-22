@@ -117,7 +117,7 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
         return feel(state, log, act)
 
     def do_enter_session(session_id: str, reason: str = "") -> str:
-        """准入申请：必须先获准，才能在该会话发言。"""
+        """准入申请：确认一次，之后长期有效。"""
         sid = (session_id or "").strip()
         if not sid:
             raise ValueError("要给 session_id（从 query_address_book 拿）")
@@ -125,13 +125,14 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
             raise ValueError(
                 f"「{sid}」不在放行名单里，不能进。\n当前可以进的会话：\n{permits.allowed_list_text()}"
             )
+        fresh = permits.confirm(sid)
         if state is not None and sid not in state.grants:
             state.grants.append(sid)
         name = permits.lookup_name(sid)
-        return (
-            f"已获准进入 {name or sid}（{sid}）。\n"
-            "现在可以在这里用 cmd 发言了；只在这一轮里有效。"
-        )
+        head = f"已获准进入 {name or sid}（{sid}）。"
+        if not fresh:
+            return head + "之前已经申请过，一直有效。"
+        return head + "\n从现在起你可以在那里用 cmd 发言，这条授权不会过期。"
 
     def _require_grant(target: str) -> None:
         sid = (target or "").strip()
@@ -139,7 +140,7 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
             raise ValueError(
                 f"「{sid}」不在放行名单里，不能发言。\n当前可以进的会话：\n{permits.allowed_list_text()}"
             )
-        if state is not None and sid not in state.grants:
+        if not permits.is_confirmed(sid) and (state is None or sid not in state.grants):
             raise ValueError(
                 f"你还没进入 {sid}。先 enter_session 申请（session_id={sid}），获批后才能在这里发言。"
             )
@@ -191,6 +192,7 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
     box.register(Tool("enter_session", "permission",
                       "【权限申请】进入一个会话、获得在这里发言的资格。\n"
                       "没有这一步，cmd 发到任何会话都会被拒。\n"
+                      "**申请一次就长期有效**，不用每轮都申请。\n"
                       "只有放行名单里的会话能进；不在名单里的会被拒并列出可进的会话。\n"
                       "session_id 从 query_address_book 拿。",
                       {"session_id": "要进入的会话，如 group_123 / private_456",

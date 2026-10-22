@@ -138,6 +138,10 @@ def main() -> int:
 
     print("[7] 准入（防越权）")
     from . import permits
+    _real_grants = permits.GRANTS_FILE
+    permits.GRANTS_FILE = RUN_DIR / "_selftest_grants.json"
+    if permits.GRANTS_FILE.exists():
+        permits.GRANTS_FILE.unlink()
     allowed = permits.allowed()
     check("读到了放行名单", len(allowed) >= 1, f"{len(allowed)} 个")
     try:
@@ -156,9 +160,16 @@ def main() -> int:
             check("未申请的会话不能发言", "还没进入" in str(exc), str(exc)[:50])
         out = box.call("cmd", {"command": "qq text group_879819183 在呢"})
         check("获批后可以发言", "[dry]" in out, out)
+        out = box.call("enter_session", {"session_id": "group_879819183"})
+        check("重复申请是幂等的", "已经申请过" in out, out[:40])
+        # 换一套全新的 toolbox + 空 state：授权应当仍在（申请一次长期有效）
+        box2 = build_toolbox(None, dry=True, state=State())
+        out = box2.call("cmd", {"command": "qq text group_879819183 还在不在"})
+        check("授权跨轮次仍然有效", "[dry]" in out, out)
     if "group_673890898" in allowed:  # 瑞文8888：settings 白名单
         out = box.call("enter_session", {"session_id": "group_673890898"})
         check("白名单会话也能进", "已获准进入" in out, out[:40])
+    permits.GRANTS_FILE = _real_grants
 
     print("[8] 命令式发送")
     from .qq_cli import run_command

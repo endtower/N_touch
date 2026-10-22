@@ -23,6 +23,38 @@ MEMORY_DB = Path(r"E:\ABYSS\N_Touch\memory\memory.db")
 CHAT_DB = Path(r"E:\ABYSS\N_Touch\memory\chat_history\chat_history.db")
 SETTINGS = Path(r"E:\ABYSS\N_Touch\config\settings.py")
 
+# 已经"确认过一遍"的会话：申请一次，永久有效。
+# 它本质不是限时令牌，而是一个明确的确认动作——告诉模型"这条规矩你答应了"。
+GRANTS_FILE = Path(__file__).resolve().parent / "_run" / "grants.json"
+
+
+def confirmed() -> List[str]:
+    if not GRANTS_FILE.exists():
+        return []
+    try:
+        data = json.loads(GRANTS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return [s for s in data if isinstance(s, str)] if isinstance(data, list) else []
+
+
+def confirm(session_id: str) -> bool:
+    """记下"已获准进入"。幂等：重复申请不会重复写。返回是否新写入。"""
+    sid = (session_id or "").strip()
+    if not sid:
+        raise ValueError("session_id 不能为空")
+    current = confirmed()
+    if sid in current:
+        return False
+    current.append(sid)
+    GRANTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    GRANTS_FILE.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
+
+
+def is_confirmed(session_id: str) -> bool:
+    return (session_id or "").strip() in confirmed()
+
 
 def _from_memory_db() -> Dict[str, str]:
     """allow_conversation=1 的实体 → 它的 contacts 里的 session_id。"""
