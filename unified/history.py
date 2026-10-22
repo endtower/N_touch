@@ -38,7 +38,7 @@ class Feed:
         last = self._last_ts.get(session, 0.0)
         rows = con.execute(
             """
-            select user_name, content_text, timestamp from messages
+            select user_id, user_name, content_text, timestamp from messages
             where session_id = ? and timestamp > ? and coalesce(content_text,'') <> ''
             order by seq asc limit ?
             """,
@@ -46,8 +46,8 @@ class Feed:
         ).fetchall()
         con.close()
         out = []
-        for name, text, ts in rows:
-            out.append({"speaker": name or "", "text": text, "ts": ts})
+        for uid, name, text, ts in rows:
+            out.append({"user_id": uid or "", "speaker": name or "", "text": text, "ts": ts})
             self._last_ts[session] = max(self._last_ts.get(session, 0.0), ts)
         return out
 
@@ -58,7 +58,7 @@ class Feed:
             return []
         rows = con.execute(
             """
-            select user_name, content_text, timestamp from messages
+            select user_id, user_name, content_text, timestamp from messages
             where session_id = ? and coalesce(content_text,'') <> ''
             order by seq desc limit ?
             """,
@@ -66,7 +66,7 @@ class Feed:
         ).fetchall()
         con.close()
         rows.reverse()
-        return [{"speaker": r[0] or "", "text": r[1], "ts": r[2]} for r in rows]
+        return [{"user_id": r[0] or "", "speaker": r[1] or "", "text": r[2], "ts": r[3]} for r in rows]
 
     def seek_end(self, session: str) -> None:
         """把游标推到最新一条：之后只推真正新到的消息。"""
@@ -195,9 +195,14 @@ class People:
 
 
 def render_messages(msgs: List[Dict[str, Any]], limit: int = 20) -> str:
+    """渲染现场。她自己发过的消息标成「我」，否则她会把自己的话当成别人说的。"""
     if not msgs:
         return "（暂时没有新消息）"
-    return "\n".join(f"{m['speaker']}: {m['text']}" for m in msgs[-limit:])
+    lines = []
+    for m in msgs[-limit:]:
+        who = "我" if m.get("user_id") == "system" else m["speaker"]
+        lines.append(f"{who}: {m['text']}")
+    return "\n".join(lines)
 
 
 def as_json(obj: Any) -> str:

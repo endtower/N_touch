@@ -72,7 +72,7 @@ def demo() -> int:
     outbox = Outbox(_fresh("outbox.jsonl"))
     state = State()
     mem = Recall()
-    box = build_toolbox(log, recall=mem)
+    box = build_toolbox(log, recall=mem, dry=True)
     model = MockModel(list(DEMO_SCRIPT))
     ep = Episode(session="group_demo", trigger="【群消息】有人：你说话怎么这么像机器人")
     res = run(ep, model, state, box, outbox, log, name="她")
@@ -86,7 +86,7 @@ def live(session: str, limit: int) -> int:
     log = EventLog(_fresh("events.jsonl"))
     outbox = Outbox(_fresh("outbox.jsonl"))
     state = State()
-    box = build_toolbox(log, recall=mem)
+    box = build_toolbox(log, recall=mem, dry=True)
 
     recent = feed.recent(session, limit)
     if not recent:
@@ -136,7 +136,7 @@ def replay_jsonl(path: Path) -> int:
     log = EventLog(_fresh("events.jsonl"))
     outbox = Outbox(_fresh("outbox.jsonl"))
     state = State()
-    box = build_toolbox(log)
+    box = build_toolbox(log, dry=True)
     model = MockModel([])  # 无剧本：每轮沉默，只验证链路
     n = 0
     with path.open(encoding="utf-8") as fh:

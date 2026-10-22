@@ -74,11 +74,26 @@ def main() -> int:
         p = RUN_DIR / f
         if p.exists():
             p.unlink()
-    box = build_toolbox(EventLog(RUN_DIR / "events.jsonl"), recall=Recall())
+    box = build_toolbox(EventLog(RUN_DIR / "events.jsonl"), recall=Recall(), dry=True)
     check("conversation_agent 已消失", "conversation_agent" not in box.tools, str(list(box.tools)))
-    check("只留两个工具", len(box.tools) == 2, str(list(box.tools)))
-    for gone in ("wait", "note", "look_up", "look_up_group", "recall_experience"):
+    check("只留三个工具", len(box.tools) == 3, str(list(box.tools)))
+    for gone in ("wait", "note", "look_up", "look_up_group", "recall_experience", "send_message", "send_image"):
         check(f"{gone} 已删", gone not in box.tools)
+    check("cmd 在册", "cmd" in box.tools)
+
+    print("[5] 命令式发送")
+    from .qq_cli import run_command
+    out = run_command("qq text group_123 在呢", dry=True)
+    check("text 命令可解析", "[dry]" in out and "在呢" in out, out)
+    out = run_command("qq poke group_123 456", dry=True)
+    check("群戳走 group_poke", "group_poke" in out and "456" in out, out)
+    out = run_command("qq poke private_789", dry=True)
+    check("私聊戳走 friend_poke", "friend_poke" in out, out)
+    try:
+        run_command("qq fly group_123", dry=True)
+        check("未知动作应报错", False)
+    except ValueError:
+        check("未知动作应报错", True)
     res = run(
         Episode(session="group_selftest", trigger="他在群里一直说客套话"),
         MockModel(list(DEMO_SCRIPT)),

@@ -1,20 +1,15 @@
 # -*- coding: utf-8 -*-
-"""统一工具注册表：两个工具。
+"""三个工具：查、命令、收尾。
 
-  recall        —— 查。经验、锦囊、人、群，一个入口。
-  end_episode   —— 定。这轮到底有没有用。
+  recall        capability  查经验 / 人 / 群
+  cmd           capability  跑一条命令行（发文字、发图片、戳一戳）
+  end_episode   decision    收尾并给效益分档
 
-为什么只剩两个（从 6 个精简下来的）：
+`cmd` 是"把对外动作收成一个入口"：她不再有一堆 send_xxx 工具，只有一条命令行。
+发什么、发给谁、发图还是戳人，全在那一行里，一眼能看懂，也一眼能查账。
 
-- `look_up` / `look_up_group` 合成 `recall`：人不会先判断"我要查的是做法还是某个人"。
-  分区是数据库的事，不是她的事。
-- `wait` 删掉：它就是 Conversation 时代的遗物。那时候有个"说话的人"在等对方回复；
-  现在消息每拍由 Feed 推过来，没有什么可等的，留着只会让她空转。
-- `note` 删掉：它写进一个没人读的列表，等于有出口没去处。要么接真持久化，要么不留。
-
-为什么不合成一个：`recall` 是 capability（查了不留结论），`end_episode` 是 decision
-（一旦调用就是定性）。这两类的 authority 不同，混进一个工具就等于把权限藏进参数里，
-和我们保留的那唯一一条边界冲突。
+authority 不合并的理由没变：查和跑是 capability（留着不留结论），
+end_episode 是 decision（一旦调用就是定性）。混进一个工具等于把权藏进参数。
 """
 
 from __future__ import annotations
@@ -23,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List
 
 from .history import Recall
+from .qq_cli import run_command
 
 
 @dataclass
@@ -66,16 +62,19 @@ class ToolBox:
             raise ValueError(f"没有这个工具: {name}")
         result = tool.handler(**{k: v for k, v in args.items() if k in tool.params})
         if self.log is not None:
-            self.log.append("tool", {"tool": name, "authority": tool.authority, "args": args, "result": result[:240]})
+            self.log.append("tool", {"tool": name, "authority": tool.authority, "args": args, "result": str(result)[:240]})
         return result
 
 
-def build_toolbox(log=None, recall: Recall | None = None) -> ToolBox:
+def build_toolbox(log=None, recall: Recall | None = None, dry: bool = False) -> ToolBox:
     box = ToolBox(log=log)
     mem = recall or Recall()
 
     def do_recall(query: str, k: str = "3") -> str:
         return mem.search(query, int(k))
+
+    def do_cmd(command: str) -> str:
+        return run_command(command, dry=dry)
 
     def end_episode(benefit: str, reason: str) -> str:
         return f"本轮收尾。效益={benefit}；依据={reason}。"
@@ -84,11 +83,24 @@ def build_toolbox(log=None, recall: Recall | None = None) -> ToolBox:
         Tool(
             "recall",
             "capability",
-            "查你过去的记录：经验与锦囊（该怎么应对）、某个人（印象与关系）、某个群（印象与自我定位）。"
-            "不知道怎么做、被说生硬、想开口找不到由头、不确定对方是谁时用它。",
+            "查你过去的记录：经验与锦囊（怎么应对）、某个人（印象与关系）、某个群（印象与自我定位）。",
             {"query": "人名、群名或当前困境", "k": "取几条"},
             do_recall,
             required=["query"],
+        )
+    )
+    box.register(
+        Tool(
+            "cmd",
+            "capability",
+            "执行一条命令行，用来对外做事。只有三种：\n"
+            "  qq text  <目标> <内容>      —— 发一句话\n"
+            "  qq image <目标> <文件名>    —— 发一张图\n"
+            "  qq poke  <目标> [QQ号]      —— 戳一戳（群戳要 QQ 号，私聊不用）\n"
+            "目标写法：group_群号 / private_QQ号。一次只写一条命令。",
+            {"command": "例如 qq text group_123 在呢"},
+            do_cmd,
+            required=["command"],
         )
     )
     box.register(
