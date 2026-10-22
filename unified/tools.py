@@ -1,25 +1,23 @@
 # -*- coding: utf-8 -*-
-"""工具表（新内核）。
+"""工具表（新内核）：常驻 7 + 冷库 3。
 
-12 个上限，分成两类：
+常驻
+  lookup        通讯录：这个人/这个群是谁、什么印象、什么关系
+  browse        「我这儿有什么」：话术经验 / 锦囊 / 见闻录 / 笔记 / 表情包
+  feel          认定发生了什么 → 改情绪
+  cmd           qq text / image / poke 一行命令
+  sticker_view  把一张图读进上下文（多模态，不用 Vision Agent）
+  fetch_tool    取冷库工具的要义
+  end_episode   收尾 + 效益分档
 
-常驻（一直在上下文里，她随时能用）
-  recall          查经验/人/群
-  recall_speech   只查话术
-  feel            认定发生了什么 → 改情绪
-  cmd             qq text / image / poke 一行命令
-  sticker_list    看库里有什么
-  sticker_view    把一张图读进上下文（多模态，不需要 Vision Agent）
-  note_query      查记事本
-  fetch_tool      拉取冷库工具的要义
-  end_episode     收尾 + 效益分档
+冷库（先 fetch_tool 取要义，再执行）
+  note_record   写记事本
+  sticker_save  存表情包
+  sticker_adjust 改表情包
 
-冷库（不在上下文里，先 fetch_tool 取要义再执行）
-  note_record     写记事本
-  sticker_save    把一张图存成表情包
-  sticker_adjust  改表情包的标题/情绪/描述
-
-为什么要冷库：写操作一周用不了几次，占着上下文只会稀释真正高频的那几个。
+两条硬约束：
+1. 决策经验不启用——browse 只查 bequests 里 category='speech' 的。
+2. “这人是谁”（lookup）和“这事该怎么办”（browse）不是一种查询，不合并。
 """
 
 from __future__ import annotations
@@ -27,8 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List
 
-from . import media, notepad
-from .history import Recall
+from . import archive, media, notepad
 from .qq_cli import run_command
 
 
@@ -85,7 +82,6 @@ class ToolBox:
             self.active.add(tool.name)
 
     def schemas(self) -> List[Dict[str, Any]]:
-        """只发常驻 + 已被 fetch 的。"""
         return [t.schema() for name, t in self.tools.items() if name in self.active]
 
     def lazy_index(self) -> List[str]:
@@ -104,17 +100,14 @@ class ToolBox:
         return result
 
 
-def build_toolbox(log=None, recall: Recall | None = None, dry: bool = False, state=None) -> ToolBox:
+def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
     box = ToolBox(log=log)
-    mem = recall or Recall()
 
-    # ---------- 常驻 ----------
+    def do_lookup(target: str) -> str:
+        return archive.lookup(target)
 
-    def do_recall(query: str, k: str = "3") -> str:
-        return mem.search(query, int(k))
-
-    def do_recall_speech(query: str, k: str = "3") -> str:
-        return mem.exp.recall_speech(query, int(k))
+    def do_browse(query: str = "", kind: str = "all", k: str = "3") -> str:
+        return archive.browse(query, kind, int(k))
 
     def do_feel(act: str) -> str:
         if state is None:
@@ -126,14 +119,8 @@ def build_toolbox(log=None, recall: Recall | None = None, dry: bool = False, sta
     def do_cmd(command: str) -> str:
         return run_command(command, dry=dry)
 
-    def do_sticker_list(kind: str = "stickers", query: str = "", limit: str = "20") -> str:
-        return media.list_items(kind or "stickers", query, int(limit))
-
     def do_sticker_view(ref: str) -> Any:
         return media.read_image(ref)
-
-    def do_note_query(keyword: str = "", limit: str = "5") -> str:
-        return notepad.query(keyword, int(limit))
 
     def do_fetch(name: str) -> str:
         tool = box.tools.get(name)
@@ -145,8 +132,6 @@ def build_toolbox(log=None, recall: Recall | None = None, dry: bool = False, sta
     def end_episode(benefit: str, reason: str) -> str:
         return f"本轮收尾。效益={benefit}；依据={reason}。"
 
-    # ---------- 冷库 ----------
-
     def do_note_record(text: str, category: str = "general", title: str = "") -> str:
         return notepad.record(text, category, title)
 
@@ -156,10 +141,15 @@ def build_toolbox(log=None, recall: Recall | None = None, dry: bool = False, sta
     def do_sticker_adjust(ref: str, title: str = "", mood: str = "", description: str = "") -> str:
         return media.adjust_sticker(ref, title, mood, description)
 
-    box.register(Tool("recall", "capability", "查你过去的记录：经验与锦囊、某个人、某个群。",
-                      {"query": "人名、群名或当前困境", "k": "取几条"}, do_recall, required=["query"]))
-    box.register(Tool("recall_speech", "capability", "只查“话术”经验：这种话该怎么说、怎么开口才不像机器。",
-                      {"query": "当前处境或关键词", "k": "取几条"}, do_recall_speech, required=["query"]))
+    box.register(Tool("lookup", "capability",
+                      "通讯录：查一个人或一个群——这是谁、什么印象、什么关系、熟悉度。",
+                      {"target": "人名或群名"}, do_lookup, required=["target"]))
+    box.register(Tool("browse", "capability",
+                      "查你手上都有什么：话术经验（这么说对不对）、锦囊（这种局面怎么办）、"
+                      "见闻录（经历过的事）、笔记本、表情包。不带 kind 就全查一遍。",
+                      {"query": "关键词，可空", "kind": "all / speech / kit / observation / note / sticker",
+                       "k": "每类几条"},
+                      do_browse))
     box.register(Tool("feel", "capability",
                       "认定一件已经发生的事，从而改变你的情绪。你不是直接拨数值，而是认定“发生了什么”。"
                       "调用后系统会自动返回你当前的情绪状态。",
@@ -172,14 +162,9 @@ def build_toolbox(log=None, recall: Recall | None = None, dry: bool = False, sta
                       "  qq poke  <目标> [QQ号]    戳一戳（群戳要 QQ 号）\n"
                       "目标写法：group_群号 / private_QQ号。一次只写一条。",
                       {"command": "例如 qq text group_123 在呢"}, do_cmd, required=["command"]))
-    box.register(Tool("sticker_list", "capability", "看表情包/图片库里有什么（可按关键词筛）。",
-                      {"kind": "stickers 或 images", "query": "关键词，可空", "limit": "最多几条"},
-                      do_sticker_list))
     box.register(Tool("sticker_view", "capability",
-                      "把库里的一张图读进你的上下文，你自己看。文件名从 sticker_list 拿。",
+                      "把库里的一张图读进你的上下文，你自己看。文件名从 browse(kind=sticker) 拿。",
                       {"ref": "文件名或标题关键词"}, do_sticker_view, required=["ref"]))
-    box.register(Tool("note_query", "capability", "查记事本里记过什么。",
-                      {"keyword": "关键词，可空", "limit": "几条"}, do_note_query))
     box.register(Tool("fetch_tool", "capability",
                       "冷库工具不在你手上。想看某个冷库工具怎么用，先用它取要义，取完就能直接调。",
                       {"name": "工具名"}, do_fetch, required=["name"]))
@@ -189,7 +174,7 @@ def build_toolbox(log=None, recall: Recall | None = None, dry: bool = False, sta
     box.register(Tool("note_record", "capability", "往记事本里记一笔。",
                       {"text": "要记的内容", "category": "分类，可空", "title": "短标题，可空"},
                       do_note_record, required=["text"], lazy=True))
-    box.register(Tool("sticker_save", "capability", "把一张图存成表情包（会写到 stickers 目录）。",
+    box.register(Tool("sticker_save", "capability", "把一张图存成表情包（写到 stickers 目录）。",
                       {"src": "源文件名", "title": "起个标题", "mood": "什么情绪下用", "description": "画面描述"},
                       do_sticker_save, required=["src", "title"], lazy=True))
     box.register(Tool("sticker_adjust", "capability", "改一张已有表情包的标题/情绪/描述。",

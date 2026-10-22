@@ -76,28 +76,43 @@ def main() -> int:
             p.unlink()
     st_e2e = State()
     log_e2e = EventLog(RUN_DIR / "events.jsonl")
-    box = build_toolbox(log_e2e, recall=Recall(), dry=True, state=st_e2e)
+    box = build_toolbox(log_e2e, dry=True, state=st_e2e)
     check("conversation_agent 已消失", "conversation_agent" not in box.tools, str(list(box.tools)))
-    check("十二个工具", len(box.tools) == 12, str(list(box.tools)))
+    check("十个工具", len(box.tools) == 10, str(list(box.tools)))
     resident = [n for n, t in box.tools.items() if not t.lazy]
     lazy = sorted(n for n, t in box.tools.items() if t.lazy)
-    check("常驻九个", len(resident) == 9, str(resident))
+    check("常驻七个", len(resident) == 7, str(resident))
     check("冷库三个", lazy == ["note_record", "sticker_adjust", "sticker_save"], str(lazy))
     sent = [s["function"]["name"] for s in box.schemas()]
     check("冷库不进上下文", all(n not in sent for n in lazy), str(sent))
-    for gone in ("wait", "note", "look_up", "look_up_group", "recall_experience", "send_message", "send_image"):
-        check(f"{gone} 已删", gone not in box.tools)
+    for gone in ("recall", "recall_speech", "sticker_list", "note_query", "wait", "note"):
+        check(f"{gone} 已并走", gone not in box.tools)
 
-    print("[5] 冷库与媒体")
-    box.call("fetch_tool", {"name": "note_record"})
-    check("fetch 后进上下文", "note_record" in [s["function"]["name"] for s in box.schemas()])
-    box.call("note_record", {"text": "自检写入的一条", "category": "selftest"})
-    out = box.call("note_query", {"keyword": "自检"})
-    check("记事本能取回", "自检写入的一条" in out, out[:60])
-    out = box.call("sticker_list", {"limit": "3"})
-    check("表情包库能列", "张" in out or "空" in out, out[:60])
+    print("[5] 通讯录与杂项查询")
+    out = box.call("lookup", {"target": "大湿"})
+    check("通讯录查得到人", "名字" in out, out[:60])
+    out = box.call("browse", {"query": "生硬", "kind": "speech", "k": "2"})
+    check("话术查得到", "话术经验" in out, out[:60])
+    out = box.call("browse", {"query": "", "kind": "kit"})
+    check("锦囊查得到", "锦囊" in out, out[:60])
+    out = box.call("browse", {"query": "", "kind": "observation", "k": "2"})
+    check("见闻录查得到", "见闻录" in out or "没找到" in out, out[:60])
+
+    # 决策经验必须被排除：只应返回 category='speech' 的那些
+    import sqlite3
+
+    from . import archive
+    con = sqlite3.connect(f"file:{archive.MEMORY_DB}?mode=ro", uri=True)
+    expect = con.execute("select count(*) from bequests where category='speech'").fetchone()[0]
+    total = con.execute("select count(*) from bequests").fetchone()[0]
+    con.close()
+    rows = archive._speech("", 10000)
+    check("只查 speech，排除决策经验", len(rows) == expect and expect < total,
+          f"返回{len(rows)} 期望{expect} 全库{total}")
     viewer = box.call("sticker_view", {"ref": "粉发萌宠精灵"})
     check("读图返回图片包", isinstance(viewer, dict) and viewer.get("__image__"), str(viewer)[:60])
+    box.call("fetch_tool", {"name": "note_record"})
+    check("fetch 后进上下文", "note_record" in [s["function"]["name"] for s in box.schemas()])
 
     print("[6] 认定情绪")
     from .feelings import available_acts, feel

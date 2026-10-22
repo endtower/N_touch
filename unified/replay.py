@@ -34,7 +34,7 @@ DEMO_SCRIPT = [
             "confidence": "medium",
         },
         "speech": "",
-        "act": {"tool": "recall", "args": {"query": "生硬", "k": "2"}},
+        "act": {"tool": "browse", "args": {"query": "生硬", "kind": "speech", "k": "2"}},
     },
     {
         "inner": {
@@ -72,7 +72,7 @@ def demo() -> int:
     outbox = Outbox(_fresh("outbox.jsonl"))
     state = State()
     mem = Recall()
-    box = build_toolbox(log, recall=mem, dry=True, state=state)
+    box = build_toolbox(log, dry=True, state=state)
     model = MockModel(list(DEMO_SCRIPT))
     ep = Episode(session="group_demo", trigger="【群消息】有人：你说话怎么这么像机器人")
     res = run(ep, model, state, box, outbox, log, name="她")
@@ -86,7 +86,7 @@ def live(session: str, limit: int) -> int:
     log = EventLog(_fresh("events.jsonl"))
     outbox = Outbox(_fresh("outbox.jsonl"))
     state = State()
-    box = build_toolbox(log, recall=mem, dry=True, state=state)
+    box = build_toolbox(log, dry=True, state=state)
 
     recent = feed.recent(session, limit)
     if not recent:
