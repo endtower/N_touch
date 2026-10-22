@@ -78,10 +78,10 @@ def main() -> int:
     log_e2e = EventLog(RUN_DIR / "events.jsonl")
     box = build_toolbox(log_e2e, dry=True, state=st_e2e)
     check("conversation_agent 已消失", "conversation_agent" not in box.tools, str(list(box.tools)))
-    check("十一个工具", len(box.tools) == 11, str(list(box.tools)))
+    check("十二个工具", len(box.tools) == 12, str(list(box.tools)))
     resident = [n for n, t in box.tools.items() if not t.lazy]
     lazy = sorted(n for n, t in box.tools.items() if t.lazy)
-    check("常驻八个", len(resident) == 8, str(resident))
+    check("常驻九个", len(resident) == 9, str(resident))
     check("冷库三个", lazy == ["note_record", "sticker_adjust", "sticker_save"], str(lazy))
     sent = [s["function"]["name"] for s in box.schemas()]
     check("冷库不进上下文", all(n not in sent for n in lazy), str(sent))
@@ -139,9 +139,12 @@ def main() -> int:
     print("[7] 准入（防越权）")
     from . import permits
     _real_grants = permits.GRANTS_FILE
+    _real_appr = permits.APPROVALS_FILE
     permits.GRANTS_FILE = RUN_DIR / "_selftest_grants.json"
-    if permits.GRANTS_FILE.exists():
-        permits.GRANTS_FILE.unlink()
+    permits.APPROVALS_FILE = RUN_DIR / "_selftest_approvals.json"
+    for f in (permits.GRANTS_FILE, permits.APPROVALS_FILE):
+        if f.exists():
+            f.unlink()
     allowed = permits.allowed()
     check("读到了放行名单", len(allowed) >= 1, f"{len(allowed)} 个")
     try:
@@ -151,7 +154,7 @@ def main() -> int:
         check("未放行会话应被拒", "不在放行名单" in str(exc), str(exc)[:50])
     if "group_879819183" in allowed:  # 劝人方：memory.db 放行
         out = box.call("enter_session", {"session_id": "group_879819183"})
-        check("放行会话可进入", "已获准进入" in out, out[:40])
+        check("放行会话可进入", "已进入" in out, out[:40])
         try:
             # 放行但没申请过的另一个会话 → 应该卡在"还没进入"
             box.call("cmd", {"command": "qq text private_1136523089 你好"})
@@ -168,8 +171,32 @@ def main() -> int:
         check("授权跨轮次仍然有效", "[dry]" in out, out)
     if "group_673890898" in allowed:  # 瑞文8888：settings 白名单
         out = box.call("enter_session", {"session_id": "group_673890898"})
-        check("白名单会话也能进", "已获准进入" in out, out[:40])
+        check("白名单会话也能进", "已获准进入" in out or "已进入" in out, out[:40])
+
+    # 名单外 → 自动挂审批，主人批了才能进
+    try:
+        box.call("enter_session", {"session_id": "private_1000000"})
+        check("名单外应被拒", False)
+    except ValueError as exc:
+        check("名单外自动挂审批", "已经" in str(exc) or "审批" in str(exc), str(exc)[:60])
+    pend = permits.pending()
+    check("进了待批队列", any(r["session_id"] == "private_1000000" for r in pend), str(len(pend)))
+    permits.approve("private_1000000")
+    check("批准后进名单", permits.is_confirmed("private_1000000"))
+    check("批准后不在待批", not any(r["session_id"] == "private_1000000" for r in permits.pending()))
+
+    # 退出会话：撤订阅与发言资格
+    if permits.is_confirmed("group_879819183"):
+        out = box.call("leave_session", {"session_id": "group_879819183"})
+        check("可以退出会话", "已退出" in out, out[:40])
+        check("退出后不再订阅", "group_879819183" not in permits.confirmed())
+        try:
+            box.call("cmd", {"command": "qq text group_879819183 还在吗"})
+            check("退出后不能发言", False)
+        except ValueError:
+            check("退出后不能发言", True)
     permits.GRANTS_FILE = _real_grants
+    permits.APPROVALS_FILE = _real_appr
 
     print("[8] 开启会话 = 订阅（消息以 user 身份进上下文）")
 

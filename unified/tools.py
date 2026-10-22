@@ -117,33 +117,49 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
         return feel(state, log, act)
 
     def do_enter_session(session_id: str, reason: str = "") -> str:
-        """准入申请：确认一次，之后长期有效。"""
+        """进入会话：订阅 + 发言资格。名单外的自动挂审批。"""
         sid = (session_id or "").strip()
         if not sid:
             raise ValueError("要给 session_id（从 query_address_book 拿）")
         if not permits.is_allowed(sid):
+            note = permits.request(sid, reason, "")
             raise ValueError(
-                f"「{sid}」不在放行名单里，不能进。\n当前可以进的会话：\n{permits.allowed_list_text()}"
+                f"「{sid}」不在放行名单里，进不去。{note}\n"
+                f"批之前你既听不到也说不了。当前能进的会话：\n{permits.allowed_list_text()}"
             )
         fresh = permits.confirm(sid)
         if state is not None and sid not in state.grants:
             state.grants.append(sid)
         name = permits.lookup_name(sid)
-        head = f"已获准进入 {name or sid}（{sid}）。"
+        head = f"已进入 {name or sid}（{sid}）：能听也能说。"
         if not fresh:
             return head + "之前已经开启过，一直有效。"
-        return head + "\n从现在起：你可以在那里用 cmd 发言，那里的人说的话也会一直自动进到你的上下文里。"
+        return head + "\n那里的人说话会自动出现在你的上下文里，直到你 leave_session 退出。"
+
+    def do_leave_session(session_id: str, reason: str = "") -> str:
+        """退出会话：撤掉订阅与发言资格，防止无止境订阅。"""
+        sid = (session_id or "").strip()
+        if not sid:
+            raise ValueError("要给 session_id")
+        if state is not None and sid in state.grants:
+            state.grants.remove(sid)
+        if not permits.revoke(sid):
+            return f"你本来就不在 {sid} 里。"
+        return f"已退出 {sid}。那里的人再说话不会进你的上下文了，也不能在那儿发言。"
 
     def _require_grant(target: str) -> None:
         sid = (target or "").strip()
+        if permits.is_confirmed(sid) or (state is not None and sid in state.grants):
+            return
         if not permits.is_allowed(sid):
+            note = permits.request(sid, "", "")
             raise ValueError(
-                f"「{sid}」不在放行名单里，不能发言。\n当前可以进的会话：\n{permits.allowed_list_text()}"
+                f"「{sid}」不在放行名单里，不能发言。{note}\n"
+                f"当前能进的会话：\n{permits.allowed_list_text()}"
             )
-        if not permits.is_confirmed(sid) and (state is None or sid not in state.grants):
-            raise ValueError(
-                f"你还没进入 {sid}。先 enter_session 申请（session_id={sid}），获批后才能在这里发言。"
-            )
+        raise ValueError(
+            f"你还没进入 {sid}。先 enter_session（session_id={sid}），进去之后才能发言。"
+        )
 
     def do_cmd(command: str) -> str:
         return run_command(command, dry=dry, guard=_require_grant)
@@ -200,6 +216,11 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
                       {"session_id": "要进入的会话，如 group_123 / private_456",
                        "reason": "为什么想进去，可空"},
                       do_enter_session, required=["session_id"]))
+    box.register(Tool("leave_session", "permission",
+                      "【退出会话】撤掉这个会话的订阅和发言资格。\n"
+                      "群聊尤其要用：听完、说完就退，别一直挂着——挂着就会一直往你上下文里灌消息。",
+                      {"session_id": "要退出的会话", "reason": "为什么退，可空"},
+                      do_leave_session, required=["session_id"]))
     box.register(Tool("cmd", "capability",
                       "执行一条命令行，用来对外做事：\n"
                       "  qq text  <目标> <内容>    发一句话\n"

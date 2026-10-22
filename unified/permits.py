@@ -17,15 +17,17 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 MEMORY_DB = Path(r"E:\ABYSS\N_Touch\memory\memory.db")
 CHAT_DB = Path(r"E:\ABYSS\N_Touch\memory\chat_history\chat_history.db")
 SETTINGS = Path(r"E:\ABYSS\N_Touch\config\settings.py")
 
-# 已经"确认过一遍"的会话：申请一次，永久有效。
-# 它本质不是限时令牌，而是一个明确的确认动作——告诉模型"这条规矩你答应了"。
+# 已开启的会话：能听也能说，长期有效，直到 leave_session 或主人收回。
+# 它不是一个限时令牌，而是一次明确的确认动作。
 GRANTS_FILE = Path(__file__).resolve().parent / "_run" / "grants.json"
+# 待批队列：她自己批不了自己，只有主人（或主人的命令）能推进。
+APPROVALS_FILE = Path(__file__).resolve().parent / "_run" / "approvals.json"
 
 
 def confirmed() -> List[str]:
@@ -36,6 +38,96 @@ def confirmed() -> List[str]:
     except (json.JSONDecodeError, OSError):
         return []
     return [s for s in data if isinstance(s, str)] if isinstance(data, list) else []
+
+
+def revoke(session_id: str) -> bool:
+    """退出会话：撤掉订阅与发言授权。"""
+    sid = (session_id or "").strip()
+    current = confirmed()
+    if sid not in current:
+        return False
+    current.remove(sid)
+    GRANTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    GRANTS_FILE.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
+
+
+# ---------- 待批队列 ----------
+
+def _load_approvals() -> List[Dict[str, Any]]:
+    if not APPROVALS_FILE.exists():
+        return []
+    try:
+        data = json.loads(APPROVALS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _save_approvals(rows: List[Dict[str, Any]]) -> None:
+    APPROVALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    APPROVALS_FILE.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def pending() -> List[Dict[str, Any]]:
+    return [r for r in _load_approvals() if r.get("status") == "pending"]
+
+
+def request(session_id: str, reason: str = "", text: str = "") -> str:
+    """把一次被拦下的动作挂进待批队列。已挂过就不重复挂。"""
+    sid = (session_id or "").strip()
+    if not sid:
+        raise ValueError("session_id 不能为空")
+    rows = _load_approvals()
+    for r in rows:
+        if r.get("session_id") == sid and r.get("status") == "pending":
+            return "这个会话的申请已经在队列里等主人批了，不用重复提。"
+    rows.append({
+        "session_id": sid,
+        "session_name": lookup_name(sid),
+        "reason": (reason or "").strip(),
+        "blocked_text": (text or "").strip(),
+        "status": "pending",
+        "ts": __import__("time").time(),
+    })
+    _save_approvals(rows)
+    return "已提交给主人审批。批之前你进不去也说不了。"
+
+
+def approve(session_id: str) -> str:
+    """主人批：该会话长期可听可说。注意这只能由主人侧调用。"""
+    sid = (session_id or "").strip()
+    rows = _load_approvals()
+    hit = None
+    for r in rows:
+        if r.get("session_id") == sid and r.get("status") == "pending":
+            hit = r
+            break
+    if hit is None:
+        return f"没有待批的 {sid}"
+    hit["status"] = "approved"
+    _save_approvals(rows)
+    current = confirmed()
+    if sid not in current:
+        current.append(sid)
+        GRANTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        GRANTS_FILE.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    return f"已批准 {sid}（{hit.get('session_name') or ''}）；被拦下的那句话作废，不会补发。"
+
+
+def reject(session_id: str) -> str:
+    sid = (session_id or "").strip()
+    rows = _load_approvals()
+    hit = None
+    for r in rows:
+        if r.get("session_id") == sid and r.get("status") == "pending":
+            hit = r
+            break
+    if hit is None:
+        return f"没有待批的 {sid}"
+    hit["status"] = "rejected"
+    _save_approvals(rows)
+    return f"已驳回 {sid}"
 
 
 def confirm(session_id: str) -> bool:
