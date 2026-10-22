@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
-"""回放与演示。没有网络也能跑完整链路（MockModel）。
+"""回放 / 演示。
 
-用法：
-  python -m unified.replay --demo
-  python -m unified.replay --jsonl msgs.jsonl     # 每行一条 {"session":..,"text":..}
+  python -m unified.replay --demo                          # 离线假数据，验证链路
+  python -m unified.replay --session group_xxx --limit 20  # 真会话：自动拉消息 + 真经验库
+  python -m unified.replay --jsonl msgs.jsonl              # 纯消息回放
+
+三种都不需要网络：模型用 MockModel 按剧本产出协议输出。换成真模型只需替换 model。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,100 +20,123 @@ from .state import State, EventLog, Outbox
 from .tools import build_toolbox
 from .model import MockModel
 from .loop import run, Episode
+from .history import Feed, Experience, People, render_messages
 
 RUN_DIR = Path(__file__).resolve().parent / "_run"
 
+# 离线剧本：用 recall_experience 取经验，然后自己开口
 DEMO_SCRIPT = [
     {
         "inner": {
-            "read": "主人今晚说话很僵，像在背稿，不像他平时那样",
-            "want": "想确认一下是不是我多心",
-            "fear": "直接点破会让他更难堪",
+            "read": "群里有人说我说话生硬、人机味重",
+            "want": "先别辩解，认一句，再给个当下的动作",
+            "fear": "越解释越像在自证",
             "confidence": "medium",
         },
-        "speech": "他今天怎么这么客气",
-        "act": {"tool": "look_up", "args": {"person": "主人"}},
+        "speech": "",
+        "act": {"tool": "recall_experience", "args": {"query": "生硬", "k": "2"}},
     },
     {
         "inner": {
-            "read": "通讯录里写着最近两周他话变少了。可能是累，不是装",
-            "want": "把话递给他，但不逼他解释",
-            "fear": "问得太直接，他会觉得被监视",
-            "confidence": "low",
+            "read": "经验说：别堆甜话自证，认一句+给当下动作",
+            "want": "照着一句认下来，然后停在那儿",
+            "fear": "话说多了又变成表演",
+            "confidence": "high",
         },
-        "speech": "有点不像你平时说话的样子。是累了吗",
+        "speech": "是我没顾上你的感觉。现在我不走，你说",
         "act": None,
     },
     {
         "inner": {
-            "read": "他没接。再问就是追问了",
-            "want": "收手，留个台阶",
-            "fear": "把气氛弄成审问",
+            "read": "话递出去了，剩下的等对方",
+            "want": "收手",
+            "fear": "追一句就成催了",
             "confidence": "high",
         },
-        "speech": "算了，你们聊，我去吃饭了",
-        "act": {
-            "tool": "end_episode",
-            "args": {"benefit": "0", "reason": "递了话但对方没回应，没有可指认的实际价值"},
-        },
+        "speech": "",
+        "act": {"tool": "end_episode", "args": {"benefit": "0", "reason": "递了话，对方还没回应，无可指认的实际价值"}},
     },
 ]
 
 
-def _setup(seed_memory: bool = True):
+def _fresh(name: str) -> Path:
     RUN_DIR.mkdir(parents=True, exist_ok=True)
-    for name in ("events.jsonl", "outbox.jsonl"):
-        p = RUN_DIR / name
-        if p.exists():
-            p.unlink()
-    log = EventLog(RUN_DIR / "events.jsonl")
-    outbox = Outbox(RUN_DIR / "outbox.jsonl")
-    state = State()
-    box = build_toolbox(log)
-    if seed_memory:
-        box.memory.extend(
-            [
-                {"speaker": "主人", "text": "今晚群里那个活动我不太想去"},
-                {"speaker": "阿远", "text": "他最近好像挺忙"},
-            ]
-        )
-        box.people["主人"] = {"印象": "话不多，怕麻烦别人", "最近": "两周内说话变少"}
-        box.people["阿远"] = {"印象": "爱开玩笑，容易接住话"}
-    return state, box, log, outbox
+    p = RUN_DIR / name
+    if p.exists():
+        p.unlink()
+    return p
 
 
 def demo() -> int:
-    state, box, log, outbox = _setup()
+    log = EventLog(_fresh("events.jsonl"))
+    outbox = Outbox(_fresh("outbox.jsonl"))
+    state = State()
+    box = build_toolbox(log, experience=Experience(), people=People())
     model = MockModel(list(DEMO_SCRIPT))
-    ep = Episode(session="group_demo", trigger="【群消息】阿远：他在群里一直说客套话，不太像他")
-    result = run(ep, model, state, box, outbox, log, name="她")
+    ep = Episode(session="group_demo", trigger="【群消息】有人：你说话怎么这么像机器人")
+    res = run(ep, model, state, box, outbox, log, name="她")
+    print(f"经验库载入：{Experience().count()} 条（0 说明 memory.db 不在预期位置）")
+    return _report(ep, res, model, box, state)
 
+
+def live(session: str, limit: int) -> int:
+    feed = Feed()
+    exp = Experience()
+    log = EventLog(_fresh("events.jsonl"))
+    outbox = Outbox(_fresh("outbox.jsonl"))
+    state = State()
+    box = build_toolbox(log, experience=exp, people=People())
+
+    recent = feed.recent(session, limit)
+    if not recent:
+        print(f"会话 {session} 没有消息（或 db 路径不对）")
+        return 1
+    # 回到温暖点之前，让 warmup 段成为"现场"
+    os.environ.setdefault("UNIFIED_LIVE", "1")
+    print(f"会话 {session}：最近 {len(recent)} 条，末尾 3 条：")
+    print(render_messages(recent[-3:], 3))
+    print(f"经验库：{exp.count()} 条\n")
+
+    # 把游标退回到倒数第 3 条之前，模拟"她正在说话时又进来几条"——
+    # 这样第一拍的自动拉取能真的拉到东西，而不是只走一遍空分支。
+    if len(recent) >= 4:
+        feed._last_ts[session] = float(recent[-4]["ts"]) - 0.001
+
+    model = MockModel(list(DEMO_SCRIPT))
+    ep = Episode(session=session, trigger=f"【现场】{recent[-1]['speaker']}: {recent[-1]['text']}")
+    res = run(ep, model, state, box, outbox, log, name="她", feed=feed, warmup=limit)
+    return _report(ep, res, model, box, state)
+
+
+def _report(ep, res, model, box, state) -> int:
     print("=" * 62)
-    print(f"会话 {ep.session}  停止原因：{result['stop_reason']}")
+    print(f"会话 {ep.session}  停止原因：{res['stop_reason']}")
     print("=" * 62)
-    for i, c in enumerate(result["cycles"], 1):
+    for i, c in enumerate(res["cycles"], 1):
         inner = c["inner"]
-        print(f"\n[第{i}拍]")
+        pull = f"  (自动拉到 {c['pulled']} 条)" if c.get("pulled") else ""
+        print(f"\n[第{i}拍]{pull}")
         print(f"  内心 · 读  : {inner.get('read')}")
         print(f"  内心 · 要  : {inner.get('want')}   (把握 {inner.get('confidence')})")
         print(f"  内心 · 怕  : {inner.get('fear')}")
         flag = "  ⚠ 疑似泄露" if c["leak"]["suspicious"] else ""
         print(f"  正文       : {c['speech'] or '（沉默）'}{flag}")
         if c["act"]:
-            print(f"  动作       : {c['act']['tool']} → {str(c['tool_result'])[:60]}")
+            print(f"  动作       : {c['act']['tool']} → {str(c['tool_result'])[:90]}")
         else:
             print("  动作       : 无")
     print("\n" + "-" * 62)
     print("终态：" + state.summary())
-    print(f"模型调用次数：{len(model.calls)}（每次带 {len(box.schemas())} 个工具）")
-    print(f"账本：{RUN_DIR / 'events.jsonl'}")
-    print(f"出话：{RUN_DIR / 'outbox.jsonl'}")
+    print(f"模型调用 {len(model.calls)} 次，每次带 {len(box.schemas())} 个工具")
     return 0
 
 
-def replay(path: Path) -> int:
-    state, box, log, outbox = _setup(seed_memory=False)
-    model = MockModel([])  # 无剧本时每轮返回沉默，用于验证链路
+def replay_jsonl(path: Path) -> int:
+    log = EventLog(_fresh("events.jsonl"))
+    outbox = Outbox(_fresh("outbox.jsonl"))
+    state = State()
+    box = build_toolbox(log)
+    model = MockModel([])  # 无剧本：每轮沉默，只验证链路
     n = 0
     with path.open(encoding="utf-8") as fh:
         for line in fh:
@@ -118,9 +144,10 @@ def replay(path: Path) -> int:
             if not line:
                 continue
             rec = json.loads(line)
-            box.memory.append({"speaker": rec.get("speaker", "?"), "text": rec.get("text", "")})
+            feed = Feed()
+            feed._last_ts[rec.get("session", "unknown")] = float(rec.get("ts") or 0) - 1
             ep = Episode(session=rec.get("session", "unknown"), trigger=rec.get("text", ""))
-            run(ep, model, state, box, outbox, log)
+            run(ep, model, state, box, outbox, log, feed=feed, warmup=1)
             n += 1
     print(f"回放 {n} 条，终态：{state.summary()}")
     return 0
@@ -130,9 +157,13 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="unified.replay")
     ap.add_argument("--demo", action="store_true")
     ap.add_argument("--jsonl", type=Path)
+    ap.add_argument("--session", help="真实会话 id，例如 group_1095799561")
+    ap.add_argument("--limit", type=int, default=20)
     args = ap.parse_args(argv)
     if args.jsonl:
-        return replay(args.jsonl)
+        return replay_jsonl(args.jsonl)
+    if args.session:
+        return live(args.session, args.limit)
     return demo()
 
 

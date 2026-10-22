@@ -1,24 +1,29 @@
 # -*- coding: utf-8 -*-
-"""统一工具注册表：全部工具对一个 agent 可见，但按 authority 分层。
+"""统一工具注册表（PFC-only 版）。
+
+关键改动：**没有 conversation_agent 这个工具了。**
+
+原来它是"派一个说话的人去一段会话"，现在是：
+  - 该会话的最新消息由 loop 每拍自动拉给你（Feed）
+  - 缺的是"怎么应对这类局面"，用 recall_experience 自己取（Experience）
 
 authority:
   capability  —— 看、查、记、等。随便用，不留结论。
   decision    —— 给人下结论、结束本轮、结算效益。必须产出结算记录。
-
-分工取消之后，"我能做"和"我有权定性"这条线是唯一剩下的边界。
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
+
+from .history import Experience, People, as_json
 
 
 @dataclass
 class Tool:
     name: str
-    authority: str  # capability | decision
+    authority: str
     summary: str
     params: Dict[str, str]
     handler: Callable[..., str]
@@ -39,12 +44,9 @@ class Tool:
 
 @dataclass
 class ToolBox:
-    """一个 agent 的工具集——不再有"谁的工具"，只有"谁的权限"。"""
-
     tools: Dict[str, Tool] = field(default_factory=dict)
     log: Any = None
-    memory: List[Dict[str, str]] = field(default_factory=list)
-    people: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    notes: List[str] = field(default_factory=list)
 
     def register(self, tool: Tool) -> None:
         self.tools[tool.name] = tool
@@ -58,49 +60,54 @@ class ToolBox:
             raise ValueError(f"没有这个工具: {name}")
         result = tool.handler(**{k: v for k, v in args.items() if k in tool.params})
         if self.log is not None:
-            self.log.append(
-                "tool",
-                {"tool": name, "authority": tool.authority, "args": args, "result": result[:200]},
-            )
+            self.log.append("tool", {"tool": name, "authority": tool.authority, "args": args, "result": result[:240]})
         return result
 
 
-# ---------------- 具体工具 ----------------
-
-
-def build_toolbox(log=None) -> ToolBox:
+def build_toolbox(log=None, experience: Experience | None = None, people: People | None = None) -> ToolBox:
     box = ToolBox(log=log)
+    exp = experience or Experience()
+    ppl = people or People()
 
-    def recall(query: str, limit: str = "5") -> str:
-        hits = [m for m in box.memory if query and query in m["text"]][: int(limit)]
-        if not hits:
-            return f"没有找到和「{query}」相关的记录。"
-        return "\n".join(f"- {h['speaker']}: {h['text']}" for h in hits)
-
-    def note(text: str) -> str:
-        box.memory.append({"speaker": "note", "text": text})
-        return "已记下。"
+    def recall_experience(query: str, k: str = "3") -> str:
+        return exp.recall(query, int(k))
 
     def look_up(person: str) -> str:
-        p = box.people.get(person)
-        return json.dumps(p, ensure_ascii=False) if p else f"通讯录里没有「{person}」。"
+        hit = ppl.get(person)
+        return as_json(hit) if hit else f"通讯录里没有「{person}」。"
+
+    def look_up_group(name: str) -> str:
+        hit = ppl.get_group(name)
+        return as_json(hit) if hit else f"没有关于这个群的记录：{name}"
+
+    def note(text: str) -> str:
+        box.notes.append(text)
+        return "已记下。"
 
     def wait(seconds: str = "20") -> str:
-        return f"等待 {seconds} 秒后没有新消息。"
+        return f"等待 {seconds} 秒。"
 
     def end_episode(benefit: str, reason: str) -> str:
-        # decision 型：必须留下结算记录，否则这一步不算完成
-        return f"本轮已收尾。效益={benefit}；依据={reason}。"
+        return f"本轮收尾。效益={benefit}；依据={reason}。"
 
-    box.register(Tool("recall", "capability", "按关键词检索历史消息与笔记。", {"query": "关键词", "limit": "条数"}, recall))
-    box.register(Tool("note", "capability", "把一件事写进笔记，供以后检索。", {"text": "要记的内容"}, note))
-    box.register(Tool("look_up", "capability", "查通讯录里某个人的印象与关系。", {"person": "人名"}, look_up))
-    box.register(Tool("wait", "capability", "在当前会话等一会儿，看对方有没有补充。", {"seconds": "秒数"}, wait))
+    box.register(
+        Tool(
+            "recall_experience",
+            "capability",
+            "取和你当前处境相关的经验与锦囊。不知道怎么做、被说生硬、想开口却找不到话时用它。",
+            {"query": "当前困境或关键词", "k": "取几条"},
+            recall_experience,
+        )
+    )
+    box.register(Tool("look_up", "capability", "查某个人在你这里的印象与关系。", {"person": "人名"}, look_up))
+    box.register(Tool("look_up_group", "capability", "查这个群给你的印象和你在群里的自我定位。", {"name": "群名"}, look_up_group))
+    box.register(Tool("note", "capability", "把一件事记下来，以后能取到。", {"text": "要记的内容"}, note))
+    box.register(Tool("wait", "capability", "等一会儿再看，别急着补话。", {"seconds": "秒数"}, wait))
     box.register(
         Tool(
             "end_episode",
             "decision",
-            "结束本轮。必须同时给出效益分档和依据，否则不算完成。",
+            "结束本轮。必须给出效益分档和依据，否则不算完成。",
             {"benefit": "+10|0|-5|-10|-20|-30", "reason": "依据"},
             end_episode,
         )
