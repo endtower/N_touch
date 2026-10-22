@@ -173,14 +173,24 @@ def main() -> int:
         out = box.call("enter_session", {"session_id": "group_673890898"})
         check("白名单会话也能进", "已获准进入" in out or "已进入" in out, out[:40])
 
-    # 名单外 → 自动挂审批，主人批了才能进
+    # 名单外 → 自动弹审批（重定向到临时文件，不真发）
     try:
         box.call("enter_session", {"session_id": "private_1000000"})
         check("名单外应被拒", False)
     except ValueError as exc:
-        check("名单外自动挂审批", "已经" in str(exc) or "审批" in str(exc), str(exc)[:60])
+        check("名单外自动挂审批", "审批" in str(exc) or "已经" in str(exc), str(exc)[:60])
     pend = permits.pending()
     check("进了待批队列", any(r["session_id"] == "private_1000000" for r in pend), str(len(pend)))
+    # 超时：把时间戳往前拨，poll 应判为过期并给出明确状态
+    rows = permits._load_approvals()
+    for r in rows:
+        if r["session_id"] == "private_1000000":
+            r["ts"] = 0.0
+    permits._save_approvals(rows)
+    lines = permits.poll()
+    check("超时给明确结论", any("没批" in x for x in lines), str(lines)[:80])
+    check("超时后不再待批", not any(r["session_id"] == "private_1000000" for r in permits.pending()))
+    permits.request("private_1000000", "再申请一次")
     permits.approve("private_1000000")
     check("批准后进名单", permits.is_confirmed("private_1000000"))
     check("批准后不在待批", not any(r["session_id"] == "private_1000000" for r in permits.pending()))

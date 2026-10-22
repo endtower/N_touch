@@ -78,9 +78,9 @@ def main(argv=None) -> int:
     log = EventLog(RUN_DIR / "events.jsonl")
     outbox = Outbox(RUN_DIR / "outbox.jsonl")
     mem = Recall()
-    box = build_toolbox(log, dry=not args.send, state=state)
-    model = LiveModel(max_tokens=args.max_tokens)
     sender = Sender(dry=not args.send)
+    box = build_toolbox(log, dry=not args.send, state=state, sender=sender)
+    model = LiveModel(max_tokens=args.max_tokens)
     name = _her_name(feed, args.session)
 
     def speaker(text: str) -> str:

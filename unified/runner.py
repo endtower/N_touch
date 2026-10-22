@@ -18,6 +18,7 @@ from .tools import build_toolbox
 from .loop import run, Episode
 from .history import Feed, Recall
 from .live_model import LiveModel
+from .sender import Sender
 from .replay import _report, _fresh, RUN_DIR
 
 STATE_FILE = RUN_DIR / "state.json"
@@ -70,7 +71,7 @@ def main(argv=None) -> int:
     log = EventLog(_fresh("events.jsonl"))
     outbox = Outbox(_fresh("outbox.jsonl"))
     mem = Recall()
-    box = build_toolbox(log, dry=True, state=state)  # 影子模式：cmd 一律不发
+    box = build_toolbox(log, dry=True, state=state, sender=Sender(dry=True))  # 影子模式：cmd 一律不发
     model = LiveModel(max_tokens=args.max_tokens)
 
     ep = Episode(

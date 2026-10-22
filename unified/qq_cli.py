@@ -113,7 +113,7 @@ def run_command(line: str, dry: bool = False, guard=None) -> str:
     if guard is not None:
         if not args:
             raise ValueError("缺少目标会话")
-        guard(args[0])
+        guard(args[0], line.strip())
     return VERBS[verb](*args, dry=dry)
 
 

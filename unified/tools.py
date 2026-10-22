@@ -100,7 +100,7 @@ class ToolBox:
         return result
 
 
-def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
+def build_toolbox(log=None, dry: bool = False, state=None, sender=None) -> ToolBox:
     box = ToolBox(log=log)
 
     def do_address_book(search_range: str = "全部", include_status: str = "") -> str:
@@ -122,7 +122,7 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
         if not sid:
             raise ValueError("要给 session_id（从 query_address_book 拿）")
         if not permits.is_allowed(sid):
-            note = permits.request(sid, reason, "")
+            note = permits.request(sid, reason, "", sender)
             raise ValueError(
                 f"「{sid}」不在放行名单里，进不去。{note}\n"
                 f"批之前你既听不到也说不了。当前能进的会话：\n{permits.allowed_list_text()}"
@@ -147,12 +147,12 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
             return f"你本来就不在 {sid} 里。"
         return f"已退出 {sid}。那里的人再说话不会进你的上下文了，也不能在那儿发言。"
 
-    def _require_grant(target: str) -> None:
+    def _require_grant(target: str, line: str = "") -> None:
         sid = (target or "").strip()
         if permits.is_confirmed(sid) or (state is not None and sid in state.grants):
             return
         if not permits.is_allowed(sid):
-            note = permits.request(sid, "", "")
+            note = permits.request(sid, "", line, sender)
             raise ValueError(
                 f"「{sid}」不在放行名单里，不能发言。{note}\n"
                 f"当前能进的会话：\n{permits.allowed_list_text()}"
