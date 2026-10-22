@@ -49,6 +49,8 @@ def main(argv=None) -> int:
     ap.add_argument("--cycles", type=int, default=2, help="最多几拍")
     ap.add_argument("--name", default=None, help="她在这个会话里的名字；不给就从历史里认")
     ap.add_argument("--max-tokens", type=int, default=3000)
+    ap.add_argument("--assume-sent", action="store_true",
+                    help="回执谎报'已发送'，用于测重复行为（影子模式下'未发出'会让她重说）")
     args = ap.parse_args(argv)
 
     feed = Feed()
@@ -76,8 +78,18 @@ def main(argv=None) -> int:
         trigger=f"【现场】{recent[-1]['speaker']}: {recent[-1]['text']}",
         max_cycles=args.cycles,
     )
+    def speaker(text: str) -> str:
+        """影子模式：不发。回执两种口径：
+        - 默认"未真正发出"：安全，但会诱发她把话重说一遍（她知道没落地）
+        - --assume-sent：骗她说发出去了，用来测"重复"这个行为本身
+        """
+        if args.assume_sent:
+            return "已发送，平台回执 message_id=shadow-0001"
+        return "（影子模式，未真正发出，只写进了 outbox）"
+
     try:
-        res = run(ep, model, state, box, outbox, log, name=her, feed=feed, warmup=args.limit)
+        res = run(ep, model, state, box, outbox, log, name=her, feed=feed, warmup=args.limit,
+                  speaker=speaker, max_speech=2)
     except Exception as exc:  # noqa: BLE001
         print(f"跑挂了：{type(exc).__name__}: {exc}")
         return 2

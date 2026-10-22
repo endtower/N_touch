@@ -51,10 +51,13 @@ def _her_name(feed: Feed, session: str) -> str:
     return "她"
 
 
-def _episode(session: str, new: List[Dict[str, Any]], feed: Feed, state: State, box, outbox, log, model, name: str, cycles: int):
+def _episode(session: str, new: List[Dict[str, Any]], feed: Feed, state: State, box, outbox, log, model, name: str, cycles: int, speaker=None, max_speech: int = 2):
     lines = "\n".join(f"{m['speaker']}: {m['text']}" for m in new[-6:])
     ep = Episode(session=session, trigger=f"【新消息】\n{lines}", max_cycles=cycles)
-    return run(ep, model, state, box, outbox, log, name=name, feed=None)
+    return run(
+        ep, model, state, box, outbox, log,
+        name=name, feed=None, speaker=speaker, max_speech=max_speech,
+    )
 
 
 def main(argv=None) -> int:
@@ -80,6 +83,14 @@ def main(argv=None) -> int:
     sender = Sender(dry=not args.send)
     name = _her_name(feed, args.session)
 
+    def speaker(text: str) -> str:
+        """真发一句，返回回执——回执会回灌给她，让她知道这句到底出去了没有。"""
+        result = sender.send(args.session, text)
+        if sender.dry:
+            return "（干跑，未真正发出）"
+        mid = (result or {}).get("message_id", "?")
+        return f"已发送，平台回执 message_id={mid}"
+
     print(f"[watch] 会话 {args.session}  她={name}  模型={model.model}")
     print(f"[watch] 发送={'真发' if args.send else '干跑'}  ingress={'ok' if sender.health() else '连不上'}")
     print(f"[watch] 冷却 {args.cooldown}s  每轮最多 {args.max_speech} 条  轮次 {args.cycles}")
@@ -90,8 +101,9 @@ def main(argv=None) -> int:
         if not humans:
             print("[watch] 没有真人消息")
             return 1
-        res = _episode(args.session, humans[-2:], feed, state, box, outbox, log, model, name, args.cycles)
-        _print(res, sender, args)
+        res = _episode(args.session, humans[-2:], feed, state, box, outbox, log, model, name, args.cycles,
+                       speaker=speaker, max_speech=args.max_speech)
+        _print(res)
         meta["state"] = state.dump()
         _save(meta)
         return 0
@@ -110,8 +122,9 @@ def main(argv=None) -> int:
         meta["last_ts"] = max(float(r["ts"]) for r in rows)
         print(f"\n[watch] {time.strftime('%H:%M:%S')} 收到 {len(new)} 条：{new[-1]['speaker']}: {new[-1]['text'][:40]}")
         try:
-            res = _episode(args.session, new, feed, state, box, outbox, log, model, name, args.cycles)
-            _print(res, sender, args)
+            res = _episode(args.session, new, feed, state, box, outbox, log, model, name, args.cycles,
+                           speaker=speaker, max_speech=args.max_speech)
+            _print(res)
             meta["state"] = state.dump()
         except Exception as exc:  # noqa: BLE001
             print(f"[watch] 本轮失败：{type(exc).__name__}: {exc}")
@@ -120,22 +133,15 @@ def main(argv=None) -> int:
         time.sleep(args.interval)
 
 
-def _print(res, sender: Sender, args) -> None:
-    spoken = 0
+def _print(res) -> None:
+    """只负责显示。发送已经在 loop 里做完了（带回调执）。"""
     for c in res["cycles"]:
         print(f"  内心: {c['inner'].get('want')}  ({c['inner'].get('confidence')})")
         if not c["speech"]:
             print("  正文: （沉默）")
             continue
-        if spoken >= args.max_speech:
-            print(f"  正文: [超出上限丢弃] {c['speech']}")
-            continue
-        try:
-            sender.send(args.session, c["speech"])
-            spoken += 1
-            print(f"  正文: {c['speech']}   {'已发送' if args.send else '（干跑，未发）'}")
-        except Exception as exc:  # noqa: BLE001
-            print(f"  正文: {c['speech']}   发送失败：{exc}")
+        receipt = c.get("receipt") or "（无回执）"
+        print(f"  正文: {c['speech']}   ← {receipt}")
     if res["stop_reason"]:
         print(f"  停止：{res['stop_reason']}")
 

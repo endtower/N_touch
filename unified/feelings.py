@@ -23,8 +23,7 @@ _CONSTANTS = Path(__file__).resolve().parents[1] / "brain" / "amy" / "constants.
 _BLOCKED_CATEGORIES = {"system"}
 
 # DA：动力/活力/行为方向
-_DA_BANDS = [
-    (20, "提不起劲，什么都不想做"),
+_DA_BANDS = [    (20, "提不起劲，什么都不想做"),
     (40, "有点闷，不太想动"),
     (60, "平稳，能做但不兴奋"),
     (80, "有精神，愿意往前推"),
@@ -53,6 +52,48 @@ def _load_constants():
 
 _MOD = _load_constants()
 ACTEFFECTS = getattr(_MOD, "ACTEffects", None)
+
+# ============================================================
+# 效果覆盖表（只在本内核生效，主仓 brain/amy/constants.py 不动）
+#
+# 主仓那张表是历史堆积出来的，跟"两轴"的语义有冲突：
+#   - 被夸只降 NE，不涨 DA —— "开心"根本没被编码
+#   - 冷静下来降的是 DA(动力)，不是 NE(锋利) —— 冷却变成没劲
+#   - 主动嘲讽 NE -10 —— 开火反而更不冲，方向反了
+#
+# 这里按两轴重新对齐：
+#   NE = 语言锋利度 / 生气 / 戒备（越高越冲，越低越软）
+#   DA = 动力 / 开心（越高越有劲越想动手，越低越蔫）
+#
+# 三条规则：
+#   1) 别人的行为：越伤人的越涨 NE、越掉 DA；越暖的越降 NE、越涨 DA
+#   2) 自己的成败：只动 DA，不动 NE（成败不该让人变凶）
+#   3) 自我调节：冷静压火(NE↓)不压劲，共情变软(NE↓)，提气加劲(DA↑)
+# ============================================================
+_OVERRIDES: Dict[str, Dict[str, int]] = {
+    # —— 别人对我：伤人 ——
+    "被攻击/被羞辱/被挑衅": {"da": -10, "ne": +20},
+    "被质疑/被挑剔": {"da": -5, "ne": +8},
+    "被冷漠对待/消息被晾置": {"da": -8, "ne": +5},
+    # —— 别人对我：暖 ——
+    "被示好/被亲近": {"da": +8, "ne": -8},
+    "被夸奖/被善意支持/被希望": {"da": +12, "ne": -15},
+    "被真诚道歉/对方妥协安抚/被祈求": {"da": +5, "ne": -22},
+    # —— 我做得怎么样：只动 DA ——
+    "策略卓越/超预期达成": {"da": +25, "ne": 0},
+    "策略有效/推进顺利": {"da": +15, "ne": 0},
+    "收获新启发/有价值经验": {"da": +8, "ne": 0},
+    "表现平淡/未达预期": {"da": -6, "ne": 0},
+    "策略受挫/陷入被动": {"da": -15, "ne": +3},
+    "严重失败/全盘搞砸": {"da": -25, "ne": +5},
+    # —— 我的做法 ——
+    "主动嘲讽/开火回怼": {"da": +5, "ne": +12},
+    "主动退让/低头道歉": {"da": -5, "ne": -10},
+    # —— 自我调节（保底） ——
+    "冷静下来": {"da": -5, "ne": -20},
+    "共情对方": {"da": 0, "ne": -25},
+    "提起劲头": {"da": +25, "ne": -3},
+}
 
 
 def _band(value: int, bands) -> str:
@@ -87,12 +128,16 @@ def describe_act(act: str) -> Optional[Dict[str, Any]]:
     entry = ACTEFFECTS.lookup(act)
     if entry is None:
         return None
+    ov = _OVERRIDES.get(act)
+    da = ov["da"] if ov else int(entry.get("da_delta", 0) or 0)
+    ne = ov["ne"] if ov else int(entry.get("ne_delta", 0) or 0)
     return {
         "name": act,
         "category": ACTEFFECTS.category_of(act),
-        "da_delta": int(entry.get("da_delta", 0) or 0),
-        "ne_delta": int(entry.get("ne_delta", 0) or 0),
+        "da_delta": da,
+        "ne_delta": ne,
         "desc": entry.get("desc", "") or "",
+        "source": "override" if ov else "main",
     }
 
 

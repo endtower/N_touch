@@ -38,11 +38,16 @@ def run(
     recycle_inner: bool = False,
     feed=None,
     warmup: int = 30,
+    speaker=None,
+    max_speech: int = 2,
 ) -> Dict[str, Any]:
     """跑一轮。
 
     feed：给了就每拍自动拉新消息；不给就用 episode.trigger 当全部现场（离线演示用）。
     recycle_inner=False（默认）：inner 永不回到上下文——这是"过滤"的硬实现。
+    speaker：把一句话真的发出去，返回回执文本。**回执必须回灌上下文**——
+        否则她不知道自己上一句到底发出去没有，下一拍就会重说一遍。
+    max_speech：一轮最多说几条，超出的不再发。
     """
     context: List[Dict[str, str]] = [
         {"role": "system", "content": build_prompt(name, state.summary(), episode.trigger)}
@@ -63,6 +68,7 @@ def run(
         context.append({"role": "user", "content": f"【现场】{episode.trigger}"})
 
     budget = episode.max_cycles
+    spoken = 0
 
     while budget > 0:
         budget -= 1
@@ -85,6 +91,7 @@ def run(
         leak = leak_check(inner, speech)
 
         self_effects: Dict[str, Any] = {}
+        receipt = None
         # 说话本身不再改情绪。情绪只由 feel（认定发生了什么）和 end_episode（收尾结算）驱动。
         # 原来这里有一句"说了一句 DA+1"，那是在情绪还是仪表的时候顺手加的，现在不成立了。
         log.append(
@@ -96,12 +103,27 @@ def run(
                 "speech": speech,
                 "act": act,
                 "leak": leak,
+                "receipt": receipt,
             },
         )
 
         if speech:
-            outbox.emit(episode.session, speech)
+            spoken += 1
+            if spoken > max_speech:
+                # 超出上限：不发，但要告诉她"没发出去"，否则她会以为说了
+                receipt = f"未发送：本轮已达 {max_speech} 条上限，这条没有发出去"
+            else:
+                outbox.emit(episode.session, speech)
+                if speaker is not None:
+                    try:
+                        receipt = str(speaker(speech))
+                    except Exception as exc:  # noqa: BLE001
+                        receipt = f"发送失败：{type(exc).__name__}: {exc}"
+                else:
+                    receipt = "（演示模式，未真正发送）"
             context.append({"role": "assistant", "content": speech})
+            # 回执必须回灌：她需要知道这句到底出去了没有
+            context.append({"role": "user", "content": f"【发送回执】{receipt}"})
         if recycle_inner and inner.get("want"):
             context.append({"role": "assistant", "content": f"（我刚才想要：{inner['want']}）"})
 
