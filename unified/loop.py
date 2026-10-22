@@ -100,10 +100,6 @@ def run(
     while budget > 0:
         budget -= 1
 
-        # 审批状态回灌：她永远知道自己站在哪一步
-        for line in permits.poll():
-            context.append({"role": "user", "content": line})
-
         # 自动同步：订阅会话的新消息，逐条以 user 身份进上下文
         pulled = 0
         if feed is not None:

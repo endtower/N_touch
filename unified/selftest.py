@@ -147,64 +147,42 @@ def main() -> int:
             f.unlink()
     allowed = permits.allowed()
     check("读到了放行名单", len(allowed) >= 1, f"{len(allowed)} 个")
-    try:
-        box.call("enter_session", {"session_id": "private_1000000"})
-        check("未放行会话应被拒", False)
-    except ValueError as exc:
-        check("未放行会话应被拒", "不在放行名单" in str(exc), str(exc)[:50])
-    if "group_879819183" in allowed:  # 劝人方：memory.db 放行
+    _real_timeout = permits.APPROVAL_TIMEOUT
+    permits.APPROVAL_TIMEOUT = 0.0  # 自检不真的等 30 秒
+
+    # 名单内：进入后就自由发言
+    if "group_879819183" in allowed:  # 劝人方
         out = box.call("enter_session", {"session_id": "group_879819183"})
-        check("放行会话可进入", "已进入" in out, out[:40])
-        try:
-            # 放行但没申请过的另一个会话 → 应该卡在"还没进入"
-            box.call("cmd", {"command": "qq text private_1136523089 你好"})
-            check("未申请的会话不能发言", False)
-        except ValueError as exc:
-            check("未申请的会话不能发言", "还没进入" in str(exc), str(exc)[:50])
+        check("名单内进入即自由", "自由" in out and "已进入" in out, out[:60])
         out = box.call("cmd", {"command": "qq text group_879819183 在呢"})
-        check("获批后可以发言", "[dry]" in out, out)
-        out = box.call("enter_session", {"session_id": "group_879819183"})
-        check("重复申请是幂等的", "已经开启过" in out, out[:40])
-        # 换一套全新的 toolbox + 空 state：授权应当仍在（申请一次长期有效）
-        box2 = build_toolbox(None, dry=True, state=State())
-        out = box2.call("cmd", {"command": "qq text group_879819183 还在不在"})
-        check("授权跨轮次仍然有效", "[dry]" in out, out)
-    if "group_673890898" in allowed:  # 瑞文8888：settings 白名单
-        out = box.call("enter_session", {"session_id": "group_673890898"})
-        check("白名单会话也能进", "已获准进入" in out or "已进入" in out, out[:40])
+        check("名单内直接发", "[dry]" in out, out)
 
-    # 名单外 → 自动弹审批（重定向到临时文件，不真发）
+    # 名单外：进入仍然成功（只订阅），但发言逐条审批
+    out = box.call("enter_session", {"session_id": "private_1000000"})
+    check("名单外也能进（只订阅）", "逐条审批" in out, out[:60])
     try:
-        box.call("enter_session", {"session_id": "private_1000000"})
-        check("名单外应被拒", False)
+        box.call("cmd", {"command": "qq text private_1000000 你好"})
+        check("名单外发言要审批", False)
     except ValueError as exc:
-        check("名单外自动挂审批", "审批" in str(exc) or "已经" in str(exc), str(exc)[:60])
-    pend = permits.pending()
-    check("进了待批队列", any(r["session_id"] == "private_1000000" for r in pend), str(len(pend)))
-    # 超时：把时间戳往前拨，poll 应判为过期并给出明确状态
-    rows = permits._load_approvals()
-    for r in rows:
-        if r["session_id"] == "private_1000000":
-            r["ts"] = 0.0
-    permits._save_approvals(rows)
-    lines = permits.poll()
-    check("超时给明确结论", any("没批" in x for x in lines), str(lines)[:80])
-    check("超时后不再待批", not any(r["session_id"] == "private_1000000" for r in permits.pending()))
-    permits.request("private_1000000", "再申请一次")
-    permits.approve("private_1000000")
-    check("批准后进名单", permits.is_confirmed("private_1000000"))
-    check("批准后不在待批", not any(r["session_id"] == "private_1000000" for r in permits.pending()))
+        check("名单外发言要审批", "没发出去" in str(exc), str(exc)[:60])
+    check("审批记录落了账", len(permits._load_approvals()) >= 1)
 
-    # 退出会话：撤订阅与发言资格
+    # 审批判定：同意 / 非同意 / 超时
+    seq, verdicts = permits._max_seq(permits.MASTER_SESSION), []
+    permits._replies_after = lambda *a, **k: [{"who": "主人", "text": "同意"}]  # type: ignore
+    verdicts.append(permits.wait_reply(seq, timeout=0.01))
+    permits._replies_after = lambda *a, **k: [{"who": "主人", "text": "不行"}]  # type: ignore
+    verdicts.append(permits.wait_reply(seq, timeout=0.01))
+    permits._replies_after = lambda *a, **k: []  # type: ignore
+    verdicts.append(permits.wait_reply(seq, timeout=0.01))
+    check("审批判定三种结果", verdicts == ["approved", "rejected", "timeout"], str(verdicts))
+
+    # 退出会话：撤订阅
     if permits.is_confirmed("group_879819183"):
         out = box.call("leave_session", {"session_id": "group_879819183"})
         check("可以退出会话", "已退出" in out, out[:40])
         check("退出后不再订阅", "group_879819183" not in permits.confirmed())
-        try:
-            box.call("cmd", {"command": "qq text group_879819183 还在吗"})
-            check("退出后不能发言", False)
-        except ValueError:
-            check("退出后不能发言", True)
+    permits.APPROVAL_TIMEOUT = _real_timeout
     permits.GRANTS_FILE = _real_grants
     permits.APPROVALS_FILE = _real_appr
 

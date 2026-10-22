@@ -17,7 +17,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 MEMORY_DB = Path(r"E:\ABYSS\N_Touch\memory\memory.db")
 CHAT_DB = Path(r"E:\ABYSS\N_Touch\memory\chat_history\chat_history.db")
@@ -110,23 +110,23 @@ def _replies_after(session_id: str, seq: int, limit: int = 3) -> List[Dict[str, 
     return [{"who": r[0] or "", "text": (r[1] or "").strip()} for r in rows]
 
 
-def request(session_id: str, reason: str = "", text: str = "", sender=None) -> str:
-    """把一次被拦下的动作弹给主人私聊，并挂进待批队列。"""
+def ask_master(session_id: str, reason: str = "", text: str = "", sender=None) -> Tuple[str, int]:
+    """为「一条要发出去的消息」弹一次审批，返回 (提示, 起始 seq)。
+
+    这就是主仓 Social Chat 的做法：把整句发给主人，等他回「同意」；
+    回别的算拒绝，超时算没批。调用方拿到 seq 后原地等结果。
+    """
     sid = (session_id or "").strip()
     if not sid:
         raise ValueError("session_id 不能为空")
-    rows = _load_approvals()
-    for r in rows:
-        if r.get("session_id") == sid and r.get("status") == "pending":
-            return "这个会话的申请已经在等主人回了，别重复提。"
     seq = _max_seq(MASTER_SESSION)
     name = lookup_name(sid)
+    label = f"{name}（{sid}）" if name and name != sid else sid
     body = (
-        f"【审批】她请求进入 {lookup_name(sid) + '（' + sid + '）' if lookup_name(sid) and lookup_name(sid) != sid else sid}。\n"
-        f"理由：{(reason or '没写').strip() if (reason or '').strip() else '没写'}\n"
-        f"{('想发的话：' + text.strip()) if (text or '').strip() else ''}\n"
-        f"回『同意』放行，回别的算拒绝；{int(APPROVAL_TIMEOUT)} 秒内没回就算了。"
-    ).strip()
+        f"【审批】她想在 {label} 说：\n"
+        f"{text.strip() if (text or '').strip() else '（没带内容）'}\n"
+        f"回『同意』就发，回别的算拒绝；{int(APPROVAL_TIMEOUT)} 秒内没回就不发了。"
+    )
     sent = False
     if sender is not None:
         try:
@@ -134,6 +134,7 @@ def request(session_id: str, reason: str = "", text: str = "", sender=None) -> s
             sent = True
         except Exception:  # noqa: BLE001
             sent = False
+    rows = _load_approvals()
     rows.append({
         "session_id": sid,
         "session_name": name,
@@ -145,8 +146,30 @@ def request(session_id: str, reason: str = "", text: str = "", sender=None) -> s
         "sent": sent,
     })
     _save_approvals(rows)
-    tail = "已经弹到主人私聊了。" if sent else "（没连上发送通道，只记下来了）"
-    return f"已提交审批，{tail}你现在进不去，等结果。"
+    return ("已弹到主人私聊。" if sent else "（发送通道没连上，只在本地记了一笔）"), seq
+
+
+def wait_reply(seq: int, timeout: float = APPROVAL_TIMEOUT, interval: float = 0.5) -> str:
+    """原地等主人回话：approved / rejected / timeout。"""
+    import time as _t
+
+    end = _t.time() + max(0.0, timeout)
+    while True:
+        replies = _replies_after(MASTER_SESSION, seq, 1)
+        if replies:
+            return "approved" if "同意" in replies[0]["text"] else "rejected"
+        if _t.time() >= end:
+            return "timeout"
+        _t.sleep(interval)
+
+
+def settle(session_id: str, verdict: str) -> None:
+    rows = _load_approvals()
+    status = {"approved": "approved", "rejected": "rejected", "timeout": "expired"}.get(verdict, verdict)
+    for r in rows:
+        if r.get("session_id") == session_id and r.get("status") == "pending":
+            r["status"] = status
+    _save_approvals(rows)
 
 
 def _set_status(session_id: str, status: str) -> None:
@@ -200,39 +223,14 @@ def poll() -> List[str]:
 
 
 def approve(session_id: str) -> str:
-    """主人批：该会话长期可听可说。注意这只能由主人侧调用。"""
-    sid = (session_id or "").strip()
-    rows = _load_approvals()
-    hit = None
-    for r in rows:
-        if r.get("session_id") == sid and r.get("status") == "pending":
-            hit = r
-            break
-    if hit is None:
-        return f"没有待批的 {sid}"
-    hit["status"] = "approved"
-    _save_approvals(rows)
-    current = confirmed()
-    if sid not in current:
-        current.append(sid)
-        GRANTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        GRANTS_FILE.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
-    return f"已批准 {sid}（{hit.get('session_name') or ''}）；被拦下的那句话作废，不会补发。"
+    """在命令行手工标记为已同意（只改账，不动名单）。"""
+    settle(session_id, "approved")
+    return f"已把 {session_id} 的待批标记为同意。"
 
 
 def reject(session_id: str) -> str:
-    sid = (session_id or "").strip()
-    rows = _load_approvals()
-    hit = None
-    for r in rows:
-        if r.get("session_id") == sid and r.get("status") == "pending":
-            hit = r
-            break
-    if hit is None:
-        return f"没有待批的 {sid}"
-    hit["status"] = "rejected"
-    _save_approvals(rows)
-    return f"已驳回 {sid}"
+    settle(session_id, "rejected")
+    return f"已把 {session_id} 的待批标记为拒绝。"
 
 
 def confirm(session_id: str) -> bool:

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """工具表（新内核）：常驻 7 + 冷库 3。
 
 常驻
@@ -117,27 +117,30 @@ def build_toolbox(log=None, dry: bool = False, state=None, sender=None) -> ToolB
         return feel(state, log, act)
 
     def do_enter_session(session_id: str, reason: str = "") -> str:
-        """进入会话：订阅 + 发言资格。名单外的自动挂审批。"""
+        """进入会话：订阅消息，并当场告知这个会话的发言权限档位。"""
         sid = (session_id or "").strip()
         if not sid:
             raise ValueError("要给 session_id（从 query_address_book 拿）")
-        if not permits.is_allowed(sid):
-            note = permits.request(sid, reason, "", sender)
-            raise ValueError(
-                f"「{sid}」不在放行名单里，进不去。{note}\n"
-                f"批之前你既听不到也说不了。当前能进的会话：\n{permits.allowed_list_text()}"
-            )
-        fresh = permits.confirm(sid)
+        permits.confirm(sid)
         if state is not None and sid not in state.grants:
             state.grants.append(sid)
-        name = permits.lookup_name(sid)
-        head = f"已进入 {name or sid}（{sid}）：能听也能说。"
-        if not fresh:
-            return head + "之前已经开启过，一直有效。"
-        return head + "\n那里的人说话会自动出现在你的上下文里，直到你 leave_session 退出。"
+        name = permits.lookup_name(sid) or sid
+        label = f"{name}（{sid}）" if name != sid else sid
+        if permits.is_allowed(sid):
+            perm = "【发言：自由】这个会话在放行名单里，你想说什么直接 cmd 发，不用审批。"
+        else:
+            perm = (
+                "【发言：逐条审批】这个会话不在放行名单里。你每发一句，系统都会把整句\n"
+                f"弹给主人私聊等『同意』，最多等 {int(permits.APPROVAL_TIMEOUT)} 秒；没回或回别的，这句就发不出去。\n"
+                "想少被拦，就少说废话；想彻底放开，让主人把它加进名单。"
+            )
+        return (
+            f"已进入 {label}。那里别人说的话会自动出现在你的上下文里。\n"
+            f"{perm}\n离开时说 leave_session。"
+        )
 
     def do_leave_session(session_id: str, reason: str = "") -> str:
-        """退出会话：撤掉订阅与发言资格，防止无止境订阅。"""
+        """退出会话：撤掉订阅，防止无止境订阅。"""
         sid = (session_id or "").strip()
         if not sid:
             raise ValueError("要给 session_id")
@@ -145,24 +148,34 @@ def build_toolbox(log=None, dry: bool = False, state=None, sender=None) -> ToolB
             state.grants.remove(sid)
         if not permits.revoke(sid):
             return f"你本来就不在 {sid} 里。"
-        return f"已退出 {sid}。那里的人再说话不会进你的上下文了，也不能在那儿发言。"
+        return f"已退出 {sid}。那里的人再说话不会进你的上下文了。"
 
-    def _require_grant(target: str, line: str = "") -> None:
+    def _gate(target: str, line: str = "") -> None:
+        """发言闸：名单内直接放行；名单外弹一条审批并原地等结果。"""
         sid = (target or "").strip()
-        if permits.is_confirmed(sid) or (state is not None and sid in state.grants):
+        if permits.is_allowed(sid):
             return
-        if not permits.is_allowed(sid):
-            note = permits.request(sid, "", line, sender)
-            raise ValueError(
-                f"「{sid}」不在放行名单里，不能发言。{note}\n"
-                f"当前能进的会话：\n{permits.allowed_list_text()}"
-            )
+        # 只把"要说的那句"弹给主人，不要把整条命令行甩过去
+        import shlex
+
+        parts = shlex.split(line.strip())
+        if parts and parts[0] == "qq":
+            parts = parts[1:]
+        said = parts[-1] if len(parts) >= 3 else (parts[-1] if parts else line)
+        note, seq = permits.ask_master(sid, "", said, sender)
+        verdict = permits.wait_reply(seq)
+        permits.settle(sid, verdict)
+        if verdict == "approved":
+            return
+        if verdict == "rejected":
+            raise ValueError(f"主人没同意，这句没发出去（{note}）。别再重复发同一句。")
         raise ValueError(
-            f"你还没进入 {sid}。先 enter_session（session_id={sid}），进去之后才能发言。"
+            f"主人 {int(permits.APPROVAL_TIMEOUT)} 秒内没回，这句没发出去（{note}）。"
+            "别反复重试，换个时间或者说点别的。"
         )
 
     def do_cmd(command: str) -> str:
-        return run_command(command, dry=dry, guard=_require_grant)
+        return run_command(command, dry=dry, guard=_gate)
 
     def do_sticker_view(ref: str) -> Any:
         return media.read_image(ref)
