@@ -20,7 +20,7 @@ from .state import State, EventLog, Outbox
 from .tools import build_toolbox
 from .model import MockModel
 from .loop import run, Episode
-from .history import Feed, Experience, People, render_messages
+from .history import Feed, Recall, render_messages
 
 RUN_DIR = Path(__file__).resolve().parent / "_run"
 
@@ -34,7 +34,7 @@ DEMO_SCRIPT = [
             "confidence": "medium",
         },
         "speech": "",
-        "act": {"tool": "recall_experience", "args": {"query": "生硬", "k": "2"}},
+        "act": {"tool": "recall", "args": {"query": "生硬", "k": "2"}},
     },
     {
         "inner": {
@@ -71,21 +71,22 @@ def demo() -> int:
     log = EventLog(_fresh("events.jsonl"))
     outbox = Outbox(_fresh("outbox.jsonl"))
     state = State()
-    box = build_toolbox(log, experience=Experience(), people=People())
+    mem = Recall()
+    box = build_toolbox(log, recall=mem)
     model = MockModel(list(DEMO_SCRIPT))
     ep = Episode(session="group_demo", trigger="【群消息】有人：你说话怎么这么像机器人")
     res = run(ep, model, state, box, outbox, log, name="她")
-    print(f"经验库载入：{Experience().count()} 条（0 说明 memory.db 不在预期位置）")
+    print(f"经验库载入：{mem.exp.count()} 条（0 说明 memory.db 不在预期位置）")
     return _report(ep, res, model, box, state)
 
 
 def live(session: str, limit: int) -> int:
     feed = Feed()
-    exp = Experience()
+    mem = Recall()
     log = EventLog(_fresh("events.jsonl"))
     outbox = Outbox(_fresh("outbox.jsonl"))
     state = State()
-    box = build_toolbox(log, experience=exp, people=People())
+    box = build_toolbox(log, recall=mem)
 
     recent = feed.recent(session, limit)
     if not recent:
@@ -95,7 +96,7 @@ def live(session: str, limit: int) -> int:
     os.environ.setdefault("UNIFIED_LIVE", "1")
     print(f"会话 {session}：最近 {len(recent)} 条，末尾 3 条：")
     print(render_messages(recent[-3:], 3))
-    print(f"经验库：{exp.count()} 条\n")
+    print(f"经验库：{mem.exp.count()} 条\n")
 
     # 把游标退回到倒数第 3 条之前，模拟"她正在说话时又进来几条"——
     # 这样第一拍的自动拉取能真的拉到东西，而不是只走一遍空分支。

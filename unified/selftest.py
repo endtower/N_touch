@@ -18,7 +18,7 @@ from .state import State, EventLog, Outbox
 from .tools import build_toolbox
 from .model import MockModel
 from .loop import run, Episode
-from .history import Experience, People
+from .history import Recall
 from .replay import DEMO_SCRIPT
 
 RUN_DIR = Path(__file__).resolve().parent / "_selftest"
@@ -74,9 +74,11 @@ def main() -> int:
         p = RUN_DIR / f
         if p.exists():
             p.unlink()
-    box = build_toolbox(EventLog(RUN_DIR / "events.jsonl"), experience=Experience(), people=People())
+    box = build_toolbox(EventLog(RUN_DIR / "events.jsonl"), recall=Recall())
     check("conversation_agent 已消失", "conversation_agent" not in box.tools, str(list(box.tools)))
-    check("recall_experience 在册", "recall_experience" in box.tools)
+    check("只留两个工具", len(box.tools) == 2, str(list(box.tools)))
+    for gone in ("wait", "note", "look_up", "look_up_group", "recall_experience"):
+        check(f"{gone} 已删", gone not in box.tools)
     res = run(
         Episode(session="group_selftest", trigger="他在群里一直说客套话"),
         MockModel(list(DEMO_SCRIPT)),

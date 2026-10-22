@@ -158,6 +158,41 @@ class People:
             return {}
         return {"name": row[0], "impression": row[1], "members": row[2], "self_image": row[3]}
 
+    def search(self, query: str, k: int = 3) -> List[str]:
+        """按名字/别名模糊找人。"""
+        con = _con(self.db)
+        if con is None or not (query or "").strip():
+            return []
+        like = f"%{query.strip()}%"
+        rows = con.execute(
+            "select name, aliases, impression, relationship from characters "
+            "where name like ? or aliases like ? limit ?",
+            (like, like, k),
+        ).fetchall()
+        con.close()
+        out = []
+        for name, aliases, impression, rel in rows:
+            head = name + (f"（{aliases}）" if aliases else "")
+            body = " / ".join(x for x in (impression, rel) if x)
+            out.append(f"{head}：{body}" if body else head)
+        return out
+
+    def search_groups(self, query: str, k: int = 3) -> List[str]:
+        con = _con(self.db)
+        if con is None or not (query or "").strip():
+            return []
+        like = f"%{query.strip()}%"
+        rows = con.execute(
+            "select name, impression, self_image from groups where name like ? or aliases like ? limit ?",
+            (like, like, k),
+        ).fetchall()
+        con.close()
+        out = []
+        for name, impression, self_image in rows:
+            body = " / ".join(x for x in (impression, self_image) if x)
+            out.append(f"{name}：{body}" if body else name)
+        return out
+
 
 def render_messages(msgs: List[Dict[str, Any]], limit: int = 20) -> str:
     if not msgs:
@@ -167,3 +202,35 @@ def render_messages(msgs: List[Dict[str, Any]], limit: int = 20) -> str:
 
 def as_json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False)
+
+
+class Recall:
+    """一个入口查三样东西：经验（含锦囊）、人、群。
+
+    为什么不分成三个工具：人不会先判断"我要查的是做法还是某个人"。
+    分区是数据库的事，不是她的事。分节返回，让她自己看哪节有用。
+    """
+
+    def __init__(self, db: Path = MEMORY_DB):
+        self.exp = Experience(db)
+        self.ppl = People(db)
+
+    def search(self, query: str, k: int = 3) -> str:
+        q = (query or "").strip()
+        sections: List[str] = []
+
+        exp_text = self.exp.recall(q, k)
+        if exp_text and "没有相关" not in exp_text:
+            sections.append(exp_text)
+
+        people = self.ppl.search(q, k)
+        if people:
+            sections.append("【人】\n" + "\n".join(f"- {p}" for p in people))
+
+        groups = self.ppl.search_groups(q, k)
+        if groups:
+            sections.append("【群】\n" + "\n".join(f"- {g}" for g in groups))
+
+        if not sections:
+            return f"关于「{q}」没有记录。"
+        return "\n".join(sections)
