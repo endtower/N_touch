@@ -67,8 +67,9 @@ def main(argv=None) -> int:
     print()
 
     state = load_state()
-    log = EventLog(_fresh("events.jsonl"))
-    outbox = Outbox(_fresh("outbox.jsonl"))
+    # 影子跑要留痕：账本追加而不是清空，反思才有材料可读
+    log = EventLog(RUN_DIR / "events.jsonl")
+    outbox = Outbox(RUN_DIR / "outbox.jsonl")
     mem = Recall()
     box = build_toolbox(log, dry=True, state=state)  # 影子模式：cmd 一律不发
     model = LiveModel(max_tokens=args.max_tokens)

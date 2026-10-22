@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List
 
-from . import archive, media, notepad
+from . import archive, media, notepad, reflect_store
 from .qq_cli import run_command
 
 
@@ -100,8 +100,60 @@ class ToolBox:
         return result
 
 
-def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
+def render_tools(box: "ToolBox") -> str:
+    """把工具的名字和参数名摊成文字，塞进提示词。
+
+    因为这一版不走 function calling（模型直接输出 JSON 里的 act），
+    模型看不到 schema；不告诉它参数名叫什么，它就会自己编（实测编成中文）。
+    """
+    lines = []
+    for name, tool in box.tools.items():  # 按注册顺序，稳定
+        if name not in box.active:
+            continue
+        params = "；".join(f"{k}（{v}）" for k, v in tool.params.items())
+        lines.append(f"- {name}：{params}")
+    cold = box.lazy_index()
+    if cold:
+        lines.append("冷库（先 fetch_tool）：" + "、".join(
+            f"{n}（{'；'.join(f'{k}（{v}）' for k, v in box.tools[n].params.items())}）" for n in cold
+        ))
+    return "\n".join(lines)
+
+
+def build_toolbox(log=None, dry: bool = False, state=None, mode: str = "talk") -> ToolBox:
     box = ToolBox(log=log)
+
+    if mode == "reflect":
+        # 复盘的工具箱：只有"留下什么"，没有"对外做什么"
+        def do_obs(text: str, topic: str = "") -> str:
+            return reflect_store.add_observation(text, topic)
+
+        def do_beq(title: str, summary: str, quote: str = "") -> str:
+            return reflect_store.add_speech_bequest(title, summary, quote)
+
+        def do_note(text: str, category: str = "general", title: str = "") -> str:
+            return notepad.record(text, category, title)
+
+        def end_ep(benefit: str, reason: str) -> str:
+            return f"复盘收尾。效益={benefit}；依据={reason}。"
+
+        box.register(Tool("record_observation", "capability",
+                          "记一条见闻录：从实际交互里发现的、以后能参考的现象/行为模式/认识变化。"
+                          "只记梗概和结论，不抄具体发言。",
+                          {"text": "梗概+结论，8-400字", "topic": "归类，可空"},
+                          do_obs, required=["text"]))
+        box.register(Tool("record_speech_bequest", "capability",
+                          "记一条话术经验。只收别人的原话——不录思路，不录你自己的总结。",
+                          {"title": "一句话标题，如「被嫌生硬时怎么接」",
+                           "summary": "可直接照做的做法",
+                           "quote": "别人的原话（附上是谁说的）"},
+                          do_beq, required=["title", "summary"]))
+        box.register(Tool("note_record", "capability", "记一笔别的杂项。",
+                          {"text": "内容", "category": "分类", "title": "短标题"},
+                          do_note, required=["text"]))
+        box.register(Tool("end_episode", "decision", "结束这轮复盘。必须给效益分档和依据。",
+                          {"benefit": "+10|0|-5|-10|-20|-30", "reason": "依据"}, end_ep))
+        return box
 
     def do_address_book(search_range: str = "全部", include_status: str = "") -> str:
         return archive.address_book(search_range, str(include_status).lower() in ("true", "1", "是"))

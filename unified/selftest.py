@@ -39,7 +39,6 @@ def main() -> int:
     print("[1] 协议校验")
     bad_cases = [
         '{"speech":"x"}',
-        '{"inner":{"read":"a","want":"b","confidence":"sure"}}',
         "not json",
         '{"inner":{"want":"b","confidence":"low"}}',
     ]
@@ -51,6 +50,11 @@ def main() -> int:
             check(f"应拒绝: {c[:36]}", True)
     good = '{"inner":{"read":"a","want":"b","confidence":"low"},"speech":""}'
     check("应接受合法输出", parse_output(good)["speech"] == "")
+    # 把握度只影响预算，不认识就当中等，不让整轮失败
+    check("未知把握度归为 medium",
+          parse_output('{"inner":{"read":"a","want":"b","confidence":"sure"},"speech":""}')["inner"]["confidence"] == "medium")
+    check("中文把握度可识别",
+          parse_output('{"inner":{"read":"a","want":"b","confidence":"中"},"speech":""}')["inner"]["confidence"] == "medium")
 
     print("[2] 泄露检测")
     r1 = leak_check({"read": "先试探他", "want": "套话", "fear": "被看穿", "confidence": "medium"}, "我准备先问问他最近怎么样")
@@ -136,7 +140,22 @@ def main() -> int:
     except ValueError:
         check("未知认定应拒绝", True)
 
-    print("[7] 命令式发送")
+    print("[8] 反思")
+    rb = build_toolbox(log_e2e, dry=True, state=st_e2e, mode="reflect")
+    check("复盘工具四个", sorted(rb.tools) == ["end_episode", "note_record", "record_observation", "record_speech_bequest"], str(list(rb.tools)))
+    check("复盘没有发言通道", "cmd" not in rb.tools and "feel" not in rb.tools)
+    try:
+        rb.call("record_observation", {"text": "短"})
+        check("过短的见闻应拒绝", False)
+    except ValueError:
+        check("过短的见闻应拒绝", True)
+    from .prompt import build_reflection_prompt
+    text = build_reflection_prompt("我", "DA 50", "材料", "- record_observation：text（x）")
+    check("复盘提示词禁自证", "禁止从自己身上取经验" in text)
+    check("复盘提示词带参数名", "text（x）" in text)
+    check("复盘提示词不外发", "复盘不对外" in text)
+
+    print("[9] 命令式发送")
     from .qq_cli import run_command
     out = run_command("qq text group_123 在呢", dry=True)
     check("text 命令可解析", "[dry]" in out and "在呢" in out, out)

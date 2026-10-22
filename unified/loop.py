@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from .model import parse_output, leak_check, ProtocolError
 from .prompt import build_prompt
 from .history import render_messages
+from .tools import render_tools
 
 # 效益分档 → 效能感增量（沿用 main 的六档口径）
 BENEFIT_DELTA = {"+10": 10, "0": 0, "-5": -5, "-10": -10, "-20": -20, "-30": -30}
@@ -40,6 +41,8 @@ def run(
     warmup: int = 30,
     speaker=None,
     max_speech: int = 2,
+    prompt_builder=None,
+    silent: bool = False,
 ) -> Dict[str, Any]:
     """跑一轮。
 
@@ -50,7 +53,8 @@ def run(
     max_speech：一轮最多说几条，超出的不再发。
     """
     context: List[Dict[str, str]] = [
-        {"role": "system", "content": build_prompt(name, state.summary(), episode.trigger)}
+        {"role": "system", "content": (prompt_builder or build_prompt)(
+            name, state.summary(), episode.trigger, render_tools(toolbox))}
     ]
 
     if feed is not None:
@@ -88,6 +92,10 @@ def run(
             raise  # 硬约定：协议不合格不静默容错
 
         inner, speech, act = out["inner"], out["speech"], out["act"]
+        dropped = ""
+        if silent and speech:
+            # 复盘不对外：她若写了话，一律丢弃，只记进账本
+            dropped, speech = speech, ""
         leak = leak_check(inner, speech)
 
         self_effects: Dict[str, Any] = {}
@@ -104,6 +112,7 @@ def run(
                 "act": act,
                 "leak": leak,
                 "receipt": receipt,
+                "dropped": dropped,
             },
         )
 

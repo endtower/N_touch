@@ -16,7 +16,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import media, notepad
+from . import media, notepad, reflect_store
 
 MEMORY_DB = Path(r"E:\ABYSS\N_Touch\memory\memory.db")
 OBSERVATION_FILE = Path(r"E:\ABYSS\N_Touch\brain\hc\shortlight\notes\slots\见闻录.json")
@@ -185,18 +185,30 @@ def lookup(target: str) -> str:
 # ==================== 杂项查询 ====================
 
 def _speech(query: str, k: int) -> List[str]:
+    q = (query or "").strip()
+    out: List[str] = []
+
+    # 本地（反思新增的）在前
+    for r in reversed(reflect_store.load_bequests()):
+        title = r.get("title", "")
+        summary = r.get("summary", "")
+        if q and q not in title and q not in summary:
+            continue
+        out.append(f"- {title}（反思新记）\n  {summary}")
+        if len(out) >= k:
+            return out
+
     con = _con()
     if con is None:
-        return []
-    q = (query or "").strip()
-    # 只取 speech：决策经验不启用
+        return out
     rows = con.execute(
         "select title, summary, retrieval_count from bequests "
         "where category = 'speech' order by retrieval_count desc"
     ).fetchall()
     con.close()
     hits = [r for r in rows if q and (q in r[0] or q in (r[1] or ""))] or rows
-    return [f"- {t}（用过{n}次）\n  {s}" for t, s, n in hits[:k]] if hits else []
+    out += [f"- {t}（用过{n}次）\n  {s}" for t, s, n in hits[:k]]
+    return out[:k]
 
 
 def _kits(query: str, k: int) -> List[str]:
@@ -211,25 +223,33 @@ def _kits(query: str, k: int) -> List[str]:
 
 
 def _observations(query: str, k: int) -> List[str]:
+    q = (query or "").strip()
+    out: List[str] = []
+    # 本地（反思新增的）在前，新的在上面
+    for r in reversed(reflect_store.load_observations()):
+        text = (r.get("text") or "").strip()
+        if not text or (q and q not in text):
+            continue
+        out.append(f"- {text}")
+        if len(out) >= k:
+            return out
     if not OBSERVATION_FILE.exists():
-        return []
+        return out
     try:
         data = json.loads(OBSERVATION_FILE.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
-        return []
+        return out
     notes = data.get("notes") or []
-    q = (query or "").strip()
-    hits = []
     for n in reversed(notes):
         text = (n.get("text") or n.get("content") or "").strip()
         if not text:
             continue
         if q and q not in text:
             continue
-        hits.append(text)
-        if len(hits) >= k:
+        out.append(f"- {text}")
+        if len(out) >= k:
             break
-    return [f"- {t}" for t in hits]
+    return out[:k]
 
 
 def browse(query: str = "", kind: str = "all", k: int = 3) -> str:

@@ -36,8 +36,13 @@ def parse_output(raw: str) -> Dict[str, Any]:
     for key in ("read", "want"):
         if not str(inner.get(key, "")).strip():
             raise ProtocolError(f"inner.{key} 不能为空")
-    if inner.get("confidence") not in _CONFIDENCE:
-        raise ProtocolError("inner.confidence 必须是 high/medium/low")
+    # 中文档位是同一件事的常见写法，归一化而不是报错
+    conf = str(inner.get("confidence", "")).strip().lower()
+    conf = {"高": "high", "中": "medium", "低": "low", "中等": "medium", "较高": "high", "较低": "low"}.get(conf, conf)
+    if conf not in _CONFIDENCE:
+        # 把握度只用来调预算，不值得让整轮失败；不明就当中等
+        conf = "medium"
+    inner["confidence"] = conf
 
     speech = data.get("speech", "")
     if speech is None:

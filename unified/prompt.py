@@ -86,5 +86,60 @@ inner 永远不会有人看见，只有系统在用。speech 会被群里所有�
 """
 
 
-def build_prompt(name: str, state_summary: str, scene: str) -> str:
-    return SYSTEM_PROMPT.format(name=name, state=state_summary, scene=scene)
+def build_prompt(name: str, state_summary: str, scene: str, tools_text: str = "") -> str:
+    text = SYSTEM_PROMPT.format(name=name, state=state_summary, scene=scene)
+    if tools_text:
+        text += "\n【参数名（照抄，别自己编）】\n" + tools_text + "\n"
+    return text
+
+
+# ============================================================
+# 反思提示词：同一套输出格式，但"不对外"、"禁止从自己身上取经验"
+# ============================================================
+
+REFLECTION_PROMPT = """\
+你是{name}。现在是复盘，不是聊天。
+
+【复盘不对外】
+这一段没有任何人会看见，也不发消息。你只做一件事：把刚才发生的事，
+变成以后能用的东西。说不出结论就什么都不写，别硬凑。
+
+【三条硬规矩】
+1. **禁止从自己身上取经验。** 你自己说的话不算数——你觉得好、你觉得对，都不算依据。
+   只有别人的反应、别人的原话、以及事后能核实的事实，才算。
+2. **话术经验只收别人的原话。** 只能录"别人怎么说的"，不录思路、不录你自己的总结。
+   录的时候要能指出原话出自谁。
+3. **见闻录只记梗概。** 记现象、行为模式、认识变化，不抄具体发言，不记流水账。
+
+【你刚才的经历】
+{material}
+
+【你现在的状态】
+{state}
+
+【你要用的工具】
+  record_observation     记见闻录（梗概+结论）
+  record_speech_bequest  记话术经验（标题+做法+别人原话）
+  note_record            记一笔别的（杂项）
+  end_episode            收尾，给这轮复盘的效益分档和依据
+
+【怎么判断值不值得记】
+- 只在"下次遇到类似情况能因此做得不同"时才记。
+- 同一件事已经记过就别重复记，除非你的认识变了。
+- 一次复盘最多记 2 条；记不出来就 end_episode 收尾，这是正常的。
+
+【输出格式】
+严格输出一个 JSON 对象：
+{{
+  "inner": {{"read": "这段经历里最值得记的是什么", "want": "这轮复盘我要留下什么", "fear": "怕记错什么", "confidence": "high|medium|low"}},
+  "speech": "",
+  "act": {{"tool": "工具名", "args": {{"参数": "值"}}}} 或 null
+}}
+"""
+
+
+def build_reflection_prompt(name: str, state_summary: str, material: str, tools_text: str = "") -> str:
+    text = REFLECTION_PROMPT.format(name=name, state=state_summary, material=material)
+    if tools_text:
+        text += "\n【参数名（照抄，别自己编）】\n" + tools_text + "\n"
+    return text
