@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List
 
-from . import archive, media, notepad
+from . import archive, media, notepad, permits
 from .qq_cli import run_command
 
 
@@ -116,8 +116,36 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
 
         return feel(state, log, act)
 
+    def do_enter_session(session_id: str, reason: str = "") -> str:
+        """准入申请：必须先获准，才能在该会话发言。"""
+        sid = (session_id or "").strip()
+        if not sid:
+            raise ValueError("要给 session_id（从 query_address_book 拿）")
+        if not permits.is_allowed(sid):
+            raise ValueError(
+                f"「{sid}」不在放行名单里，不能进。\n当前可以进的会话：\n{permits.allowed_list_text()}"
+            )
+        if state is not None and sid not in state.grants:
+            state.grants.append(sid)
+        name = permits.lookup_name(sid)
+        return (
+            f"已获准进入 {name or sid}（{sid}）。\n"
+            "现在可以在这里用 cmd 发言了；只在这一轮里有效。"
+        )
+
+    def _require_grant(target: str) -> None:
+        sid = (target or "").strip()
+        if not permits.is_allowed(sid):
+            raise ValueError(
+                f"「{sid}」不在放行名单里，不能发言。\n当前可以进的会话：\n{permits.allowed_list_text()}"
+            )
+        if state is not None and sid not in state.grants:
+            raise ValueError(
+                f"你还没进入 {sid}。先 enter_session 申请（session_id={sid}），获批后才能在这里发言。"
+            )
+
     def do_cmd(command: str) -> str:
-        return run_command(command, dry=dry)
+        return run_command(command, dry=dry, guard=_require_grant)
 
     def do_sticker_view(ref: str) -> Any:
         return media.read_image(ref)
@@ -160,6 +188,14 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
                       "调用后系统会自动返回你当前的情绪状态。",
                       {"act": "从可认定的行为表里选一个"}, do_feel, required=["act"],
                       enum_field="act", enum_values=_acts()))
+    box.register(Tool("enter_session", "permission",
+                      "【权限申请】进入一个会话、获得在这里发言的资格。\n"
+                      "没有这一步，cmd 发到任何会话都会被拒。\n"
+                      "只有放行名单里的会话能进；不在名单里的会被拒并列出可进的会话。\n"
+                      "session_id 从 query_address_book 拿。",
+                      {"session_id": "要进入的会话，如 group_123 / private_456",
+                       "reason": "为什么想进去，可空"},
+                      do_enter_session, required=["session_id"]))
     box.register(Tool("cmd", "capability",
                       "执行一条命令行，用来对外做事：\n"
                       "  qq text  <目标> <内容>    发一句话\n"

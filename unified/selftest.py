@@ -78,10 +78,10 @@ def main() -> int:
     log_e2e = EventLog(RUN_DIR / "events.jsonl")
     box = build_toolbox(log_e2e, dry=True, state=st_e2e)
     check("conversation_agent 已消失", "conversation_agent" not in box.tools, str(list(box.tools)))
-    check("十个工具", len(box.tools) == 10, str(list(box.tools)))
+    check("十一个工具", len(box.tools) == 11, str(list(box.tools)))
     resident = [n for n, t in box.tools.items() if not t.lazy]
     lazy = sorted(n for n, t in box.tools.items() if t.lazy)
-    check("常驻七个", len(resident) == 7, str(resident))
+    check("常驻八个", len(resident) == 8, str(resident))
     check("冷库三个", lazy == ["note_record", "sticker_adjust", "sticker_save"], str(lazy))
     sent = [s["function"]["name"] for s in box.schemas()]
     check("冷库不进上下文", all(n not in sent for n in lazy), str(sent))
@@ -136,7 +136,31 @@ def main() -> int:
     except ValueError:
         check("未知认定应拒绝", True)
 
-    print("[7] 命令式发送")
+    print("[7] 准入（防越权）")
+    from . import permits
+    allowed = permits.allowed()
+    check("读到了放行名单", len(allowed) >= 1, f"{len(allowed)} 个")
+    try:
+        box.call("enter_session", {"session_id": "private_1000000"})
+        check("未放行会话应被拒", False)
+    except ValueError as exc:
+        check("未放行会话应被拒", "不在放行名单" in str(exc), str(exc)[:50])
+    if "group_879819183" in allowed:  # 劝人方：memory.db 放行
+        out = box.call("enter_session", {"session_id": "group_879819183"})
+        check("放行会话可进入", "已获准进入" in out, out[:40])
+        try:
+            # 放行但没申请过的另一个会话 → 应该卡在"还没进入"
+            box.call("cmd", {"command": "qq text private_1136523089 你好"})
+            check("未申请的会话不能发言", False)
+        except ValueError as exc:
+            check("未申请的会话不能发言", "还没进入" in str(exc), str(exc)[:50])
+        out = box.call("cmd", {"command": "qq text group_879819183 在呢"})
+        check("获批后可以发言", "[dry]" in out, out)
+    if "group_673890898" in allowed:  # 瑞文8888：settings 白名单
+        out = box.call("enter_session", {"session_id": "group_673890898"})
+        check("白名单会话也能进", "已获准进入" in out, out[:40])
+
+    print("[8] 命令式发送")
     from .qq_cli import run_command
     out = run_command("qq text group_123 在呢", dry=True)
     check("text 命令可解析", "[dry]" in out and "在呢" in out, out)

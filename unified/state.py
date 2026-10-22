@@ -34,6 +34,8 @@ class State:
     seq: int = 0
     # 上一次认定的行为（防同一件事连拍重复认定，把情绪打满）
     last_feel: str = ""
+    # 已获准进入、可以发言的会话（必须经 enter_session 申请）
+    grants: List[str] = field(default_factory=list)
 
     # ---------- 命名事务 ----------
 

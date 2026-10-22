@@ -97,8 +97,11 @@ def poke(target: str, user_id: str = "", dry: bool = False) -> str:
 VERBS = {"text": send_text, "image": send_image, "poke": poke}
 
 
-def run_command(line: str, dry: bool = False) -> str:
-    """给 LLM 用：把 'qq text group_1 你好' 这种一行命令执行掉。"""
+def run_command(line: str, dry: bool = False, guard=None) -> str:
+    """给 LLM 用：把 'qq text group_1 你好' 这种一行命令执行掉。
+
+    guard：发送前的准入检查，接到目标 session_id；不放行就由它抛错。
+    """
     parts = shlex.split(line.strip())
     if parts and parts[0] == "qq":
         parts = parts[1:]
@@ -107,6 +110,10 @@ def run_command(line: str, dry: bool = False) -> str:
     verb, args = parts[0], parts[1:]
     if verb not in VERBS:
         raise ValueError(f"不认识的动作：{verb}（可用：text / image / poke）")
+    if guard is not None:
+        if not args:
+            raise ValueError("缺少目标会话")
+        guard(args[0])
     return VERBS[verb](*args, dry=dry)
 
 
