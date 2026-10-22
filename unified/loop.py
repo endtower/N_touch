@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from .model import parse_output, leak_check, ProtocolError
 from .prompt import build_prompt
 from .history import render_messages
+from . import permits
 
 # 效益分档 → 效能感增量（沿用 main 的六档口径）
 BENEFIT_DELTA = {"+10": 10, "0": 0, "-5": -5, "-10": -10, "-20": -20, "-30": -30}
@@ -70,16 +71,43 @@ def run(
     budget = episode.max_cycles
     spoken = 0
 
+    def _subscriptions() -> List[str]:
+        """已开启（enter_session）的会话：授权即订阅，一直有效。"""
+        subs: List[str] = []
+        for sid in list(permits.confirmed()) + list(getattr(state, "grants", []) or []):
+            if sid and sid not in subs:
+                subs.append(sid)
+        return subs
+
+    def _pull() -> List[Dict[str, Any]]:
+        """拉新消息：场景会话 + 所有已开启的会话。
+
+        逐条以 user 输入进上下文——这是 Conversation 那个特殊能力：
+        开了哪个会话，那个会话的人说的话就一直往你眼前送。
+        """
+        fresh: List[Dict[str, Any]] = []
+        streams = [episode.session] + [s for s in _subscriptions() if s != episode.session]
+        for sid in streams:
+            if sid not in feed._last_ts:
+                # 刚开启：从此刻开始听，不把历史一次性灌进来
+                feed.seek_end(sid)
+            for m in feed.drain(sid):
+                if m.get("user_id") == "system":
+                    continue  # 她自己说的不进（已由 speech + 回执体现）
+                fresh.append(m)
+        return fresh
+
     while budget > 0:
         budget -= 1
 
-        # 自动拉取：这一段取代了 Conversation 的"把消息汇报回去"
+        # 自动同步：订阅会话的新消息，逐条以 user 身份进上下文
         pulled = 0
         if feed is not None:
-            fresh = feed.drain(episode.session)
+            fresh = _pull()
             pulled = len(fresh)
-            if fresh:
-                context.append({"role": "user", "content": "【新消息】\n" + render_messages(fresh)})
+            for m in fresh:
+                who = m.get("speaker") or "对方"
+                context.append({"role": "user", "content": f"{who}: {m['text']}"})
 
         raw = model.complete(context, toolbox.schemas())
         try:

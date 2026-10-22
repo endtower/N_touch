@@ -131,8 +131,8 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
         name = permits.lookup_name(sid)
         head = f"已获准进入 {name or sid}（{sid}）。"
         if not fresh:
-            return head + "之前已经申请过，一直有效。"
-        return head + "\n从现在起你可以在那里用 cmd 发言，这条授权不会过期。"
+            return head + "之前已经开启过，一直有效。"
+        return head + "\n从现在起：你可以在那里用 cmd 发言，那里的人说的话也会一直自动进到你的上下文里。"
 
     def _require_grant(target: str) -> None:
         sid = (target or "").strip()
@@ -190,9 +190,11 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
                       {"act": "从可认定的行为表里选一个"}, do_feel, required=["act"],
                       enum_field="act", enum_values=_acts()))
     box.register(Tool("enter_session", "permission",
-                      "【权限申请】进入一个会话、获得在这里发言的资格。\n"
-                      "没有这一步，cmd 发到任何会话都会被拒。\n"
-                      "**申请一次就长期有效**，不用每轮都申请。\n"
+                      "【权限申请 + 开启会话】进入一个会话。\n"
+                      "**这一步有两个作用**：\n"
+                      "  1. 拿到在这里发言的资格——没申请，cmd 发过去会被拒；\n"
+                      "  2. 订阅这个会话——之后那里的人说的话，会一直以「对方: 内容」的形式自动进到你的上下文里。\n"
+                      "**申请一次就长期有效**，不需要结束，也不用每轮重复申请。\n"
                       "只有放行名单里的会话能进；不在名单里的会被拒并列出可进的会话。\n"
                       "session_id 从 query_address_book 拿。",
                       {"session_id": "要进入的会话，如 group_123 / private_456",

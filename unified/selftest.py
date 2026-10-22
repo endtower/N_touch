@@ -161,7 +161,7 @@ def main() -> int:
         out = box.call("cmd", {"command": "qq text group_879819183 在呢"})
         check("获批后可以发言", "[dry]" in out, out)
         out = box.call("enter_session", {"session_id": "group_879819183"})
-        check("重复申请是幂等的", "已经申请过" in out, out[:40])
+        check("重复申请是幂等的", "已经开启过" in out, out[:40])
         # 换一套全新的 toolbox + 空 state：授权应当仍在（申请一次长期有效）
         box2 = build_toolbox(None, dry=True, state=State())
         out = box2.call("cmd", {"command": "qq text group_879819183 还在不在"})
@@ -171,7 +171,49 @@ def main() -> int:
         check("白名单会话也能进", "已获准进入" in out, out[:40])
     permits.GRANTS_FILE = _real_grants
 
-    print("[8] 命令式发送")
+    print("[8] 开启会话 = 订阅（消息以 user 身份进上下文）")
+
+    class FakeFeed:
+        """只喂一条新消息，验证它是不是以 user 输入进上下文。"""
+
+        def __init__(self, sid, text):
+            self._last_ts = {sid: 1.0}  # 预置游标：不触发 seek_end
+            self.pending = [{"session_id": sid, "user_id": "u1", "speaker": "张三",
+                             "text": text, "ts": 2.0}]
+
+        def seek_end(self, sid):
+            # 只丢这个会话的积压，别把别的会话的消息也抹了
+            self.pending = [m for m in self.pending if m["session_id"] != sid]
+
+        def recent(self, sid, n):
+            return []
+
+        def drain(self, sid):
+            out = [m for m in self.pending if m["session_id"] == sid]
+            self.pending = [m for m in self.pending if m["session_id"] != sid]
+            return out
+
+    subs_state = State()
+    subs_state.grants = ["group_subtest"]
+    script = [
+        {"inner": {"read": "看到有人说话了", "want": "接一句", "fear": "", "confidence": "high"},
+         "speech": "在呢", "act": None},
+    ]
+    m2 = MockModel(script)
+    run(
+        Episode(session="group_other", trigger="【场景】", max_cycles=1),
+        m2, subs_state, build_toolbox(None, dry=True, state=subs_state),
+        Outbox(RUN_DIR / "outbox.jsonl"), EventLog(RUN_DIR / "events.jsonl"),
+        feed=FakeFeed("group_subtest", "在吗"),
+    )
+    msgs = m2.calls[0]["messages"]
+    bodies = [m["content"] if isinstance(m["content"], str) else "" for m in msgs]
+    check("订阅会话的消息以 user 进上下文", any(b == "张三: 在吗" for b in bodies), str(bodies[-2:]))
+    check("不再包成【新消息】块", not any("【新消息】" in b for b in bodies))
+    check("进上下文的是 user 角色",
+          any(m["role"] == "user" and m["content"] == "张三: 在吗" for m in msgs))
+
+    print("[9] 命令式发送")
     from .qq_cli import run_command
     out = run_command("qq text group_123 在呢", dry=True)
     check("text 命令可解析", "[dry]" in out and "在呢" in out, out)
