@@ -78,13 +78,28 @@ def main() -> int:
     log_e2e = EventLog(RUN_DIR / "events.jsonl")
     box = build_toolbox(log_e2e, recall=Recall(), dry=True, state=st_e2e)
     check("conversation_agent 已消失", "conversation_agent" not in box.tools, str(list(box.tools)))
-    check("五个工具", len(box.tools) == 5, str(list(box.tools)))
-    for need in ("recall", "recall_speech", "feel", "cmd", "end_episode"):
-        check(f"{need} 在册", need in box.tools)
+    check("十二个工具", len(box.tools) == 12, str(list(box.tools)))
+    resident = [n for n, t in box.tools.items() if not t.lazy]
+    lazy = sorted(n for n, t in box.tools.items() if t.lazy)
+    check("常驻九个", len(resident) == 9, str(resident))
+    check("冷库三个", lazy == ["note_record", "sticker_adjust", "sticker_save"], str(lazy))
+    sent = [s["function"]["name"] for s in box.schemas()]
+    check("冷库不进上下文", all(n not in sent for n in lazy), str(sent))
     for gone in ("wait", "note", "look_up", "look_up_group", "recall_experience", "send_message", "send_image"):
         check(f"{gone} 已删", gone not in box.tools)
 
-    print("[5] 认定情绪")
+    print("[5] 冷库与媒体")
+    box.call("fetch_tool", {"name": "note_record"})
+    check("fetch 后进上下文", "note_record" in [s["function"]["name"] for s in box.schemas()])
+    box.call("note_record", {"text": "自检写入的一条", "category": "selftest"})
+    out = box.call("note_query", {"keyword": "自检"})
+    check("记事本能取回", "自检写入的一条" in out, out[:60])
+    out = box.call("sticker_list", {"limit": "3"})
+    check("表情包库能列", "张" in out or "空" in out, out[:60])
+    viewer = box.call("sticker_view", {"ref": "粉发萌宠精灵"})
+    check("读图返回图片包", isinstance(viewer, dict) and viewer.get("__image__"), str(viewer)[:60])
+
+    print("[6] 认定情绪")
     from .feelings import available_acts, feel
     acts = available_acts()
     check("认得到主仓行为表", len(acts) >= 10, str(len(acts)))
@@ -101,7 +116,7 @@ def main() -> int:
     except ValueError:
         check("未知认定应拒绝", True)
 
-    print("[6] 命令式发送")
+    print("[7] 命令式发送")
     from .qq_cli import run_command
     out = run_command("qq text group_123 在呢", dry=True)
     check("text 命令可解析", "[dry]" in out and "在呢" in out, out)

@@ -129,8 +129,32 @@ def run(
 
         tool_result = None
         if act:
-            tool_result = toolbox.call(act["tool"], act.get("args") or {})
-            context.append({"role": "user", "content": f"【工具结果】{tool_result}"})
+            try:
+                tool_result = toolbox.call(act["tool"], act.get("args") or {})
+            except Exception as exc:  # noqa: BLE001
+                # 参数错/工具在冷库没取要义 → 回给模型自纠，别整轮崩掉
+                tool_result = f"调用失败：{type(exc).__name__}: {exc}"
+                context.append(
+                    {"role": "user", "content": f"【工具结果】{tool_result}\n改一下再试，或者这次别用这个工具。"}
+                )
+            else:
+                if isinstance(tool_result, dict) and tool_result.get("__image__"):
+                    # 多模态：直接把图塞进上下文，她自己看
+                    context.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": f"【工具结果】{tool_result.get('text', '')}"},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{tool_result['mime']};base64,{tool_result['b64']}"},
+                                },
+                            ],
+                        }
+                    )
+                    tool_result = tool_result.get("text", "")
+                else:
+                    context.append({"role": "user", "content": f"【工具结果】{tool_result}"})
 
         episode.cycles.append(
             {
