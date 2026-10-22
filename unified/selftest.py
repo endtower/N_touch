@@ -85,12 +85,17 @@ def main() -> int:
     check("冷库三个", lazy == ["note_record", "sticker_adjust", "sticker_save"], str(lazy))
     sent = [s["function"]["name"] for s in box.schemas()]
     check("冷库不进上下文", all(n not in sent for n in lazy), str(sent))
-    for gone in ("recall", "recall_speech", "sticker_list", "note_query", "wait", "note"):
+    for gone in ("lookup", "recall", "recall_speech", "sticker_list", "note_query", "wait", "note"):
         check(f"{gone} 已并走", gone not in box.tools)
 
     print("[5] 通讯录与杂项查询")
-    out = box.call("lookup", {"target": "大湿"})
-    check("通讯录查得到人", "名字" in out, out[:60])
+    out = box.call("query_address_book", {"search_range": "全部"})
+    check("通讯录列出会话", "可联系的会话" in out, out[:60])
+    check("通讯录带 session_id", "session_id=" in out)
+    out = box.call("query_address_book", {"search_range": "私聊"})
+    check("能只看私聊", "私聊" in out and "群聊" not in out.split("要发消息")[0], out[:80])
+    out = box.call("query_address_book", {"search_range": "大湿"})
+    check("按名字查印象", "开源社群" in out or "印象" in out or "【人】" in out, out[:60])
     out = box.call("browse", {"query": "生硬", "kind": "speech", "k": "2"})
     check("话术查得到", "话术经验" in out, out[:60])
     out = box.call("browse", {"query": "", "kind": "kit"})

@@ -103,8 +103,8 @@ class ToolBox:
 def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
     box = ToolBox(log=log)
 
-    def do_lookup(target: str) -> str:
-        return archive.lookup(target)
+    def do_address_book(search_range: str = "全部", include_status: str = "") -> str:
+        return archive.address_book(search_range, str(include_status).lower() in ("true", "1", "是"))
 
     def do_browse(query: str = "", kind: str = "all", k: str = "3") -> str:
         return archive.browse(query, kind, int(k))
@@ -141,9 +141,14 @@ def build_toolbox(log=None, dry: bool = False, state=None) -> ToolBox:
     def do_sticker_adjust(ref: str, title: str = "", mood: str = "", description: str = "") -> str:
         return media.adjust_sticker(ref, title, mood, description)
 
-    box.register(Tool("lookup", "capability",
-                      "通讯录：查一个人或一个群——这是谁、什么印象、什么关系、熟悉度。",
-                      {"target": "人名或群名"}, do_lookup, required=["target"]))
+    box.register(Tool("query_address_book", "capability",
+                      "通讯录：你现在能跟谁联系。\n"
+                      "  search_range 传「私聊」「群聊」「全部」→ 列出可联系的会话（带 session_id 与印象）；\n"
+                      "  search_range 传具体的人名或群名 → 直接查你对他的印象。\n"
+                      "发消息要用 cmd（qq text <session_id> <内容>），session_id 从这里拿。",
+                      {"search_range": "私聊 / 群聊 / 全部，或具体人名群名",
+                       "include_status": "填 true 会附带消息数与最后一条"},
+                      do_address_book, required=["search_range"]))
     box.register(Tool("browse", "capability",
                       "查你手上都有什么：话术经验（这么说对不对）、锦囊（这种局面怎么办）、"
                       "见闻录（经历过的事）、笔记本、表情包。不带 kind 就全查一遍。",

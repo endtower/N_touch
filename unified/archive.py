@@ -32,6 +32,107 @@ def _con() -> Optional[sqlite3.Connection]:
 
 # ==================== 通讯录 ====================
 
+CHAT_DB = Path(r"E:\ABYSS\N_Touch\memory\chat_history\chat_history.db")
+RANGES = ("私聊", "群聊", "全部")
+
+
+def _scope_of(session_id: str) -> str:
+    if session_id.startswith("group_") or session_id.startswith("wechat_group_"):
+        return "group"
+    return "private"
+
+
+def _impression_of(name: str, scope: str) -> str:
+    con = _con()
+    if con is None or not name:
+        return ""
+    try:
+        if scope == "group":
+            row = con.execute(
+                "select impression, self_image from groups where name like ? limit 1", (f"%{name}%",)
+            ).fetchone()
+            if row:
+                bits = [b for b in row if b]
+                return " / ".join(bits)
+        row = con.execute(
+            "select impression, relationship from characters where name like ? or aliases like ? limit 1",
+            (f"%{name}%", f"%{name}%"),
+        ).fetchone()
+        if row:
+            bits = [b for b in row if b]
+            return " / ".join(bits)
+    except sqlite3.Error:
+        return ""
+    finally:
+        con.close()
+    return ""
+
+
+def _contacts(scope: str, include_status: bool) -> List[Dict[str, Any]]:
+    """从消息库读会话表 → 能联系谁。"""
+    if not CHAT_DB.exists():
+        return []
+    con = sqlite3.connect(f"file:{CHAT_DB}?mode=ro", uri=True)
+    rows = con.execute(
+        """
+        select s.session_id, s.session_name, count(m.seq) as n, max(m.timestamp) as last_ts
+        from sessions s left join messages m on m.session_id = s.session_id
+        group by s.session_id order by n desc
+        """
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for sid, sname, n, last_ts in rows:
+        sc = _scope_of(sid)
+        if scope != "all" and sc != scope:
+            continue
+        item: Dict[str, Any] = {
+            "session_id": sid,
+            "name": sname or sid,
+            "scope": sc,
+            "impression": _impression_of(sname or "", sc),
+        }
+        if include_status:
+            last = con.execute(
+                "select user_name, content_text from messages where session_id=? order by seq desc limit 1",
+                (sid,),
+            ).fetchone()
+            item["count"] = n
+            item["last"] = f"{last[0]}: {last[1][:40]}" if last and last[1] else ""
+        out.append(item)
+    con.close()
+    return out
+
+
+def address_book(search_range: str = "全部", include_status: bool = False) -> str:
+    """通讯录：能跟谁联系。也可以直接给一个名字，查对那个人的印象。"""
+    rng = (search_range or "全部").strip()
+    if rng not in RANGES:
+        # 不是范围 → 当成具体名字，先查人再查群
+        person = _impression_of(rng, "private")
+        group = _impression_of(rng, "group")
+        if person:
+            return f"【人】{rng}\n  {person}"
+        if group:
+            return f"【群】{rng}\n  {group}"
+        return f"通讯录里没有「{rng}」，也查不到对他的印象。"
+
+    scope = {"私聊": "private", "群聊": "group", "全部": "all"}[rng]
+    items = _contacts(scope, include_status)
+    if not items:
+        return "通讯录为空。"
+    lines = [f"通讯录（{rng}）：共 {len(items)} 个可联系的会话"]
+    for i, c in enumerate(items, 1):
+        tag = "群聊" if c["scope"] == "group" else "私聊"
+        entry = f"{i}. {c['name']}（{tag}），session_id={c['session_id']}"
+        if c["impression"]:
+            entry += f"\n   印象：{c['impression']}"
+        if include_status:
+            entry += f"\n   共{c.get('count', 0)}条；最后一条 {c.get('last', '')}"
+        lines.append(entry)
+    lines.append("\n要发消息用 cmd：qq text <session_id> <内容>；想细看某人用本工具直接传他的名字。")
+    return "\n".join(lines)
+
+
 def lookup(target: str) -> str:
     """查一个人或一个群：印象、关系、熟悉度、别名。"""
     q = (target or "").strip()
