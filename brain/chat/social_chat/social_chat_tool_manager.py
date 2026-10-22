@@ -189,13 +189,14 @@ class SocialChatToolManager(ToolManager):
     # 通用工具（common_ways）：与 conversation 平级，直接委托共享实现
     # ============================================================
 
-    async def vision_agent(self, type: str, context: str = "") -> str:
+    async def vision_agent(self, type: str, context: str = "", requirement: str = "") -> str:
         """视觉查询工具，委托通用 ToolVision.vision_agent。
 
-        type 取「向量比对」（context=期望用途的表情包描述）/「识别图片」（context=图片标题/名称）。
+        type 取「向量比对」（context=期望用途的表情包描述）/「识别图片」（context=图片标题/名称，
+        requirement=可选识别要求）。
         """
         from brain.base import ToolVision
-        return await ToolVision.vision_agent(type=type, context=context)
+        return await ToolVision.vision_agent(type=type, context=context, requirement=requirement)
 
     async def vision_agent_adjust(
         self,

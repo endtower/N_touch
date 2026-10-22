@@ -202,7 +202,7 @@ class PrivateTruck(BaseTruck):
                 await store.advance_cursor(session_id, "pfca", latest_seq)
                 logger.info(f"PrivateTruck 触发后推进 pfca 游标 {current_cursor} -> {latest_seq} ({session_id})")
 
-        return "\n".join(result_lines)
+        return f"会话 ID：{session_id}\n" + "\n".join(result_lines)
 
 
 

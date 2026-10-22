@@ -177,7 +177,8 @@
                             <RowDefinition Height="Auto"/>   <!-- 主题切换 -->
                         </Grid.RowDefinitions>
 
-                        <StackPanel Grid.Row="0" Margin="0,10,0,0">
+                        <ScrollViewer Grid.Row="0" Grid.RowSpan="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel Margin="0,10,0,0">
                             <RadioButton x:Name="NavOverview" GroupName="Rail" Style="{StaticResource RailNavButton}"
                                          Tag="overview" ToolTip="总览与控制" Click="Nav_Click">
                                 <Path Width="20" Height="20" Stretch="Uniform" Data="{StaticResource IconHome}"
@@ -193,8 +194,9 @@
                                       StrokeThickness="1.6"
                                       StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
                             </RadioButton>
-                            <RadioButton x:Name="NavSnowluma" GroupName="Rail" Style="{StaticResource RailNavButton}"
-                                         Tag="snowluma" ToolTip="SnowLuma 页面" Click="Nav_Click">
+                            <StackPanel x:Name="ConnectionNav"/>
+                            <RadioButton x:Name="NavConnections" GroupName="Rail" Style="{StaticResource RailNavButton}"
+                                         Tag="connections" ToolTip="消息连接管理" Click="Nav_Click">
                                 <Path Width="20" Height="20" Stretch="Uniform" Data="{StaticResource IconChat}"
                                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}"
                                       StrokeThickness="1.6"
@@ -207,7 +209,10 @@
                                       StrokeThickness="1.6"
                                       StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
                             </RadioButton>
+                            <Button Style="{StaticResource RailIconButton}" Content="＋" FontSize="24"
+                                    ToolTip="添加接入器" Click="AddConnection_Click" AutomationProperties.Name="添加接入器"/>
                         </StackPanel>
+                        </ScrollViewer>
 
                         <Button Grid.Row="2" x:Name="ThemeToggle"
                                 Style="{StaticResource RailIconButton}"
@@ -271,6 +276,10 @@
                      主区
                      ============================================================ -->
                 <Grid Grid.Column="2" Grid.Row="0">
+
+                    <ScrollViewer x:Name="ConnectionsPanel" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" Padding="24,20,24,20">
+                        <StackPanel x:Name="ConnectionsContent" MaxWidth="1000" HorizontalAlignment="Stretch"/>
+                    </ScrollViewer>
 
                     <!-- 总览 -->
                     <ScrollViewer x:Name="OverviewPanel" VerticalScrollBarVisibility="Auto" Padding="24,20,24,20">

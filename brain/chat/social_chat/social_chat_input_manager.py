@@ -512,8 +512,11 @@ class SocialChatInputManager:
                     channel_seen.add(entry["id"])
                     self._activated_bequests.add(entry["id"])
                     activated_titles.append(entry["title"])
-                    lines.append(f"你回想起了经验：{entry['title']} - {entry['summary']}")
-                sections.append(f"{header}\n" + "\n".join(lines))
+                    lines.append(f"· {entry['title']}：{entry['summary']}")
+                sections.append(
+                    f"{header}\n以下只作参考，用你自己的话组织；不要照搬句式，也不要逐条执行。\n"
+                    + "\n".join(lines)
+                )
 
             if activated_titles:
                 logger.info(f"social_chat 已激活经验: {', '.join(activated_titles)}")

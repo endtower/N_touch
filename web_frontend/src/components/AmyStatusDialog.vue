@@ -84,7 +84,9 @@ async function fetchNotes(silent = false) {
     const res = await fetch('/notes')
     if (!res.ok) {
       const t = await res.text().catch(() => '')
-      throw new Error(`HTTP ${res.status}: ${t || res.statusText}`)
+      let message = t || res.statusText
+      try { const body = JSON.parse(t); message = body.error || body.message || message } catch { /* 非 JSON 保留响应说明 */ }
+      throw new Error(`HTTP ${res.status}: ${message}`)
     }
     notes.value = (await res.json()) as NotesResponse
   } catch (e: any) {

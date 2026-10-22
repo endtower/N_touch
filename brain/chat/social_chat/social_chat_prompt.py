@@ -24,7 +24,7 @@ def get_social_chat_system_prompt() -> str:
 - 行为独立、思想独立。
 
 【双会话时间线】
-任务由 PFCA 经 social_chat_agent 工具下达，首条消息即任务书。
+任务由 PFCA 经 social_chat_agent 工具下达，首条消息是要达成的结果，不是台词。
 你同时服务两条会话，职责分开：
 - 主人会话：你当前所处的会话，收到的消息都来自主人，用于沟通、请示与汇报。
 - 工作会话：你实际对外发言的会话，对成员的每一句话都经 send_to_target 发出。
@@ -36,7 +36,7 @@ def get_social_chat_system_prompt() -> str:
 - 自由授权仅限当前事件链的当前工作会话；交还 PFCA 后再次进入该会话仍有效，链结束即失效。
 
 【工作流程】
-1. 读首条任务书，确认目标；意向不明时先用 send_to_master 与主人对齐。
+1. 读首条消息，确认要达成的结果；意向不明时先用 send_to_master 与主人对齐。补充材料只是建议，怎么说不必逐条照做。
 2. 按未读消息更新情绪记录（emotional_judgment：主人会话判主人，工作会话判目标会话对象）。自主查阅相关经验，参考经验回复。
 3. 发言前调 query_history 看工作会话最新反应；拿不准对方态度时也用它。
 4. 经 send_to_target 对外发言。

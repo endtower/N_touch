@@ -7,9 +7,10 @@
 
 对外两个工具（2026-09-22 由单个 vision_agent 拆为两工具，参数收敛到最小集）：
 
-- `vision_agent(type, context)`：查询类
+- `vision_agent(type, context, requirement)`：查询类
   - 向量比对：context = 期望用途的表情包描述 → 语义检索表情包库
-  - 识别图片：context = 图片标题 / 图片名称 → 只识图返回描述（不落库）
+  - 识别图片：context = 图片标题 / 图片名称 → 只识图返回描述（不落库）；
+    requirement = 可选识别要求，用来指定重点观察的方面
 - `vision_agent_adjust(type, target, new_title, summary)`：管理类
   - 保存：把图片保存为表情包（target = 图片名称，summary = 简介）
   - 删除：按标题或文件名删除（target）
@@ -48,13 +49,16 @@ VECTOR_INDEX_FILENAME = "_vectors.json"
 
 
 class ToolVision(ToolHandlers):
-    """vision 工具：vision_agent（向量比对 / 识别图片）+ vision_agent_adjust（保存 / 删除 / 修改）。"""
+    """vision 工具：vision_agent（向量比对 / 识别图片）+ vision_agent_adjust（保存 / 删除 / 修改）。
+
+    识别图片走 VisionAgent 的 describe_only 模式：只返回描述，不产生媒体库落库副作用。
+    """
 
     # ============ 工具 schema（提示词） ============
 
     @classmethod
     def get_vision_agent_tool_schema(cls) -> Dict[str, Any]:
-        """vision_agent：查询类（向量比对 / 识别图片），只有 type + context 两个参数。"""
+        """vision_agent：查询类（向量比对 / 识别图片），type + context + 可选 requirement。"""
         return {
             "type": "function",
             "function": {
@@ -63,8 +67,9 @@ class ToolVision(ToolHandlers):
                     "视觉查询工具。type 指定功能类型：\n"
                     "- 向量比对：按语义检索表情包库，返回最相似的表情包。"
                     "context 传「期望用途的表情包描述」（如「用来表达无语」）。\n"
-                    "- 识别图片：识别一张图片的内容并返回描述。"
-                    "context 传「图片标题 / 图片名称」（与消息中 [图片:文件名] 一致）。\n"
+                    "- 识别图片：识别一张图片并返回描述（不落库、不保存）。"
+                    "context 传「图片标题 / 图片名称」（与消息中 [图片:文件名] 一致）；"
+                    "需要针对某个方面观察时，把要求写进 requirement。\n"
                     "保存 / 删除 / 修改表情包请改用 vision_agent_adjust。"
                 ),
                 "parameters": {
@@ -80,6 +85,14 @@ class ToolVision(ToolHandlers):
                             "description": (
                                 "向量比对：期望用途的表情包描述；"
                                 "识别图片：图片标题 / 图片名称（与消息 [图片:文件名] 一致）"
+                            ),
+                        },
+                        "requirement": {
+                            "type": "string",
+                            "description": (
+                                "识别要求（仅识别图片可用，可选）："
+                                "希望重点观察或描述的内容，如「描述图中角色的外形与服饰」；"
+                                "留空则完整描述图片"
                             ),
                         },
                     },
@@ -139,18 +152,20 @@ class ToolVision(ToolHandlers):
     # ============ vision_agent：查询类入口 ============
 
     @classmethod
-    async def vision_agent(cls, type: str, context: str = "") -> str:
+    async def vision_agent(cls, type: str, context: str = "", requirement: str = "") -> str:
         """视觉查询入口：向量比对 / 识别图片。
 
         Args:
             type: 功能类型，取值「向量比对」/「识别图片」。
             context: 向量比对时传期望用途的表情包描述；识别图片时传图片标题 / 名称。
+            requirement: 识别图片时的附加要求（如「描述图中角色的外形」），留空则完整描述。
 
         Returns:
             操作结果文案（成功 / 失败说明）。
         """
         op = (type or "").strip()
         ctx = (context or "").strip()
+        req = (requirement or "").strip()
 
         if op == "向量比对":
             if not ctx:
@@ -160,7 +175,7 @@ class ToolVision(ToolHandlers):
         if op == "识别图片":
             if not ctx:
                 return "识别图片失败：context 缺少图片标题 / 图片名称。"
-            return await cls._recognize_image(ctx)
+            return await cls._recognize_image(ctx, req)
 
         return f"未知的 vision_agent 功能类型：{op}（仅支持 向量比对 / 识别图片）"
 
@@ -214,9 +229,13 @@ class ToolVision(ToolHandlers):
     # ============ 识别图片 ============
 
     @classmethod
-    async def _recognize_image(cls, image_filename: str) -> str:
-        """识别图片内容并返回描述（只识图，不落库）。"""
-        result = await cls.call_vision_agent(image_filename)
+    async def _recognize_image(cls, image_filename: str, requirement: str = "") -> str:
+        """识别图片并返回描述（只描述，不落库）。
+
+        requirement 非空时作为附加要求透传，让视觉模型围绕该要求组织描述。
+        """
+        hint = f"识别要求：{requirement}" if (requirement or "").strip() else None
+        result = await cls.call_vision_agent(image_filename, hint, describe_only=True)
         return result.get("content") or "vision agent 未返回任何信息。"
 
     # ============ 向量索引（一键向量化的落盘载体） ============
@@ -537,15 +556,21 @@ class ToolVision(ToolHandlers):
     # ============ 识图原始能力（内部方法，不作为独立工具暴露） ============
 
     @classmethod
-    async def call_vision_agent(cls, image_filename: str, context_hint: str = None) -> Dict[str, Any]:
+    async def call_vision_agent(
+        cls,
+        image_filename: str,
+        context_hint: str = None,
+        describe_only: bool = False,
+    ) -> Dict[str, Any]:
         """识图：调用 VisionAgent 识别图片并返回结果。
 
         只负责识图并返回结果 dict；conversation 专有的"识图记录"由调用方自行处理。
-        供「识别图片」与「保存」复用，不再作为独立工具 schema 暴露。
+        供「识别图片」（describe_only=True，只描述不落库）与「保存」（False）复用。
 
         Args:
             image_filename: 图片文件名（与消息中 [图片:xxx] 的 xxx 一致）。
-            context_hint: 可选附加提示，辅助识图模型理解。
+            context_hint: 可选附加提示 / 识别要求，辅助识图模型理解。
+            describe_only: True 时只输出描述，不调用保存类工具。
 
         Returns:
             识图结果 dict，仅含 content（str）：{ "content": "..." }。
@@ -563,6 +588,7 @@ class ToolVision(ToolHandlers):
             result = await VisionAgent().run(
                 image_filename,
                 additional_hint=hint_str or None,
+                describe_only=describe_only,
             )
         except Exception as e:
             logger.error(f"[recognize_image] 调用失败: {e}", exc_info=True)

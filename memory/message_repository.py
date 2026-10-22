@@ -192,6 +192,13 @@ class MessageRepository:
         """显式就绪钩子（SystemCore start 用）：完成连接 + 建表，先于业务并发。"""
         await self._ensure_connection()
 
+    async def bridge_session_id(self, connection_id: str, generation: str, remote_id: str) -> str:
+        """Return the persistent numeric address for one remote WeChat session."""
+        await self._ensure_connection()
+        from adapt.bridge.session_ids import resolve_session_id
+        return await asyncio.to_thread(resolve_session_id, self._db_path,
+                                       connection_id, generation, remote_id)
+
     async def reconfigure(self, storage_path: str | None = None,
                           db_name: str = "chat_history.db") -> None:
         """原地重指向存储位置（测试切库 / 恢复真实库）。

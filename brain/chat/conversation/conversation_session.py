@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import re
 from typing import List, Dict
 from utils.logger import get_logger
 from brain.base import HeavySession
@@ -6,10 +7,14 @@ from brain.chat.chat_history_manager import get_history_manager
 from brain.chat.conversation.conversation_input_manager import get_conversation_input_manager
 from brain.chat.conversation.conversation_prompt import get_full_system_prompt
 from brain.chat.conversation.conversation_tool_manager import ConversationToolManager
-from config.llm_settings import llm_config
+from config.llm_settings import llm_config, VisionConfig
 from utils.llm_client_manager import call_llm
 
 logger = get_logger('ConversationSession', "DEBUG")
+
+# 消息文本中的图片占位符（[图片:xxx]）：
+# 发送给 LLM 前把最新一条 user 消息里的占位符展开成真正的图片内容块
+_IMAGE_PLACEHOLDER_PATTERN = re.compile(r'\[图片:([^\]]+)\]')
 
 
 class ConversationSession(HeavySession):
@@ -92,8 +97,10 @@ class ConversationSession(HeavySession):
 
     async def _call_llm(self):
         tools = self.get_tools()
-        messages = self.history_manager.get_history()
-        
+        messages = self._attach_images_to_latest_user_message(
+            self.history_manager.get_history()
+        )
+
         llm_messages = [
             {"role": "system", "content": get_full_system_prompt()}
         ] + messages
@@ -103,3 +110,67 @@ class ConversationSession(HeavySession):
             tools=tools,
         )
         return response.choices[0].message
+
+    def _attach_images_to_latest_user_message(self, messages: List[Dict]) -> List[Dict]:
+        """把最新一条 user 消息里的 [图片:x] 展开成图片内容块。
+
+        只处理最新一条 user 消息，历史消息保持纯文本——避免每轮把历史图片
+        重复发给模型（token 成本随轮数线性增长）。
+
+        文件已被用户删除（FileNotFoundError）属正常内容状态、不是模块故障：
+        该占位符就地降级为「[图片:x（已删除）]」文本并跳过附件，不让整轮输入
+        装配失败。文件名非法 / 读取权限 / 解码失败等其他异常仍直接抛出崩溃阻断。
+        """
+        last_user_idx = None
+        for idx in range(len(messages) - 1, -1, -1):
+            if messages[idx].get("role") == "user":
+                last_user_idx = idx
+                break
+        if last_user_idx is None:
+            return messages
+
+        content = messages[last_user_idx].get("content")
+        if not isinstance(content, str):
+            return messages
+
+        filenames = list(dict.fromkeys(_IMAGE_PLACEHOLDER_PATTERN.findall(content)))
+        if not filenames:
+            return messages
+
+        from brain.attachments import resolve_media_file
+        from brain.base.light_agent.vision_agent import VisionAgent
+
+        text = content
+        parts: List[Dict] = []
+        attached_count = 0
+        for filename in filenames:
+            try:
+                real_path = resolve_media_file(filename)
+            except FileNotFoundError:
+                # 用户已删除该图片（如前端删表情包），历史消息里的占位符仍会留在文本里。
+                # 这是正常的内容状态而非模块故障：就地降级为文本提示，不阻断本轮对话。
+                text = text.replace(f"[图片:{filename}]", f"[图片:{filename}（已删除）]")
+                logger.warning(f"图片已被删除，本次跳过附件: {filename}")
+                continue
+            data_url = VisionAgent._image_to_data_url(
+                real_path,
+                max_side=VisionConfig.IMAGE_MAX_SIDE,
+                quality=VisionConfig.IMAGE_JPEG_QUALITY,
+            )
+            parts.append({"type": "image_url", "image_url": {"url": data_url}})
+            attached_count += 1
+
+        if not parts:
+            # 全部图片都已删除：保留纯文本（含降级标记），无需构造多段 content
+            attached = list(messages)
+            attached[last_user_idx] = {**messages[last_user_idx], "content": text}
+            return attached
+
+        logger.debug(f"已为最新 user 消息附加 {attached_count} 张图片: {filenames}")
+
+        attached = list(messages)
+        attached[last_user_idx] = {
+            **messages[last_user_idx],
+            "content": [{"type": "text", "text": text}] + parts,
+        }
+        return attached

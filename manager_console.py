@@ -45,13 +45,34 @@ class Console:
         ctrl = self.service.controller("core")
         return ctrl.snapshot() if ctrl else None
 
-    def core_ready(self):
-        core = self.core()
+    @staticmethod
+    def is_core_ready(core):
         return core is not None and core.state == "running" and core.ready
 
-    def core_base(self):
-        core = self.core()
+    def core_ready(self):
+        return self.is_core_ready(self.core())
+
+    def core_base(self, core=None):
+        core = core if core is not None else self.core()
         return f"http://127.0.0.1:{core.ports[0]}"
+
+    @staticmethod
+    def core_unready(core):
+        state = core.state if core else "stopped"
+        pid = core.pid if core else None
+        if state == "starting":
+            code, message = "core_starting", "Core 正在启动，请稍后再试"
+        elif state == "stopping":
+            code, message = "core_stopping", "Core 正在停止，此操作暂不可用"
+        elif pid is not None:
+            code, message = "core_not_ready", "Core 进程仍在运行，但服务尚未就绪，请查看状态或稍后再试"
+        elif state == "conflict":
+            code, message = "core_conflict", "Core 端口被其他进程占用，请查看管理状态"
+        else:
+            code, message = "core_stopped", "Core 未运行，此操作需要启动 Core"
+        return web.json_response({"error": message, "error_code": code,
+                                  "core_state": state, "core_pid": pid}, status=503,
+                                 headers={"Cache-Control": "no-store"})
 
     def upstream_headers(self):
         import os
@@ -79,8 +100,10 @@ class Console:
         return response
 
     async def status(self, request):
-        return web.json_response({"manager_available": True, "core_ready": self.core_ready(),
-                                  "core": vars(self.core()) if self.core() else None})
+        core = self.core()
+        return web.json_response({"manager_available": True, "core_ready": self.is_core_ready(core),
+                                  "core": vars(core) if core else None},
+                                 headers={"Cache-Control": "no-store"})
 
     async def trucks(self, request):
         if request.method == "PUT":
@@ -228,14 +251,15 @@ class Console:
         return web.FileResponse(target)
 
     async def proxy(self, request, path=None, method=None):
-        if not self.core_ready():
-            return web.json_response({"error": "Core 未运行，此操作需要启动 Core", "error_code": "core_stopped"}, status=503)
+        core = self.core()
+        if not self.is_core_ready(core):
+            return self.core_unready(core)
         path = path or request.path
         headers = self.upstream_headers()
         if request.content_type:
             headers["Content-Type"] = request.headers.get("Content-Type", "application/json")
         try:
-            async with self.client.request(method or request.method, self.core_base() + path,
+            async with self.client.request(method or request.method, self.core_base(core) + path,
                                            params=request.query, headers=headers,
                                            data=await request.read() if method != "GET" else None,
                                            allow_redirects=False) as response:
@@ -246,10 +270,11 @@ class Console:
             return web.json_response({"error": "Core 暂时无法连接", "error_code": "core_unavailable"}, status=503)
 
     async def websocket(self, request):
-        if not self.core_ready():
-            return web.json_response({"error": "Core 未运行"}, status=503)
+        core = self.core()
+        if not self.is_core_ready(core):
+            return self.core_unready(core)
         try:
-            upstream = await self.client.ws_connect(self.core_base() + request.path,
+            upstream = await self.client.ws_connect(self.core_base(core) + request.path,
                                                     params=request.query,
                                                     headers=self.upstream_headers(), heartbeat=30,
                                                     max_msg_size=100 * 1024 * 1024)

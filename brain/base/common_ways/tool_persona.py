@@ -181,17 +181,8 @@ class ToolPersona:
             )
         # 底线护栏（2026-10-21）：哄人与按指定身份/口径说话是主人明确要求的
         # 两项能力，曾被反思连续覆盖成「上限只报一次」「变不了」「不接」式条款，
-        # 导致夜间哄人与扮演全线失效。此处硬拦，走 LLM 自纠通道。
-        missing = [
-            label for label, key in (("哄人", "哄"), ("按指定身份或口径说话", "扮演"))
-            if key not in kernel_prompt
-        ]
-        if missing:
-            raise ValueError(
-                f"基本说话风格缺少必备条目：{'、'.join(missing)}。"
-                "哄人与按主人指定身份/口径说话必须各保留一条正向做法，"
-                "请补回后再提交（可精简其他条目腾出字数）。"
-            )
+        # 导致夜间哄人与扮演全线失效。此处只拦压制性表述，不检查条目是否存在——
+        # 字段是自由填写的，用关键词匹配守护会误伤各种合法写法。
         banned = next(
             (p for p in _COMMON_STYLE_BANNED_PHRASES if p in kernel_prompt), None
         )

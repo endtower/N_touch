@@ -160,12 +160,13 @@ class TargetController:
         return result
 
     def snapshot(self) -> TargetSnapshot:
-        alive = self.proc is not None and self.proc.poll() is None
+        proc = self.proc
+        alive = proc is not None and proc.poll() is None
         uptime = time.time() - self.started_at if (alive and self.started_at) else None
         return TargetSnapshot(
             name=self.spec.name, state=self.state, desired=self.desired,
-            pid=self.proc.pid if alive else None, ports=list(self.spec.ports),
-            ready=self.ready, managed=self.managed,
+            pid=proc.pid if alive else None, ports=list(self.spec.ports),
+            ready=bool(alive and self.ready and self.state == "running"), managed=self.managed,
             last_error=self.last_error, uptime_sec=round(uptime, 1) if uptime else None,
         )
 
@@ -351,11 +352,15 @@ class TargetController:
             return
         code = self.proc.poll()
         if code is None:
-            if self.state == "failed" and not self.ready \
-                    and _health_ok(self.spec.health_url):
+            # A failed stop can leave ready=True with state='failed'. Health is a
+            # fact about the existing process, independent of the last command.
+            if self.state in ("starting", "failed") and (
+                    _health_ok(self.spec.health_url) if self.spec.health_url
+                    else any(_port_alive(p) for p in self.spec.ports)):
                 self.ready = True
                 self.state = "running"
-                self.last_error = ""
+                if self.desired == "running":
+                    self.last_error = ""
             return
         self.ready = False
         self.managed = False

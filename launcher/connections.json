@@ -1,0 +1,17 @@
+{
+  "connections": [
+    {
+      "id": "snowluma",
+      "managedTarget": "snowluma",
+      "name": "SnowLuma",
+      "url": ""
+    },
+    {
+      "id": "pi-wechat",
+      "managedTarget": "",
+      "name": "Pi 微信",
+      "url": "http://192.168.2.7:6080/vnc.html"
+    }
+  ],
+  "version": 1
+}

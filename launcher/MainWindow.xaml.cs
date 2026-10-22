@@ -16,7 +16,7 @@ public partial class MainWindow : Window
 {
     private readonly ManagerClient _client = new();
     private DispatcherTimer? _poll;
-    private string _webSource = "";      // "" | "core" | "snowluma"
+    private string _webSource = "";      // "" | "core" | "connection:<id>"
     private readonly Dictionary<string, ManagerClient.Target> _targets = new();
     private bool _serviceConnected;
     private int _targetRefresh;
@@ -30,6 +30,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        InitializeConnections();
         // 构建时间戳水印：publish 时由 csproj 写入程序集元数据，
         // 存在多份同名 EXE 时据此辨认当前运行的是哪一次构建。
         var buildStamp = typeof(MainWindow).Assembly
@@ -168,7 +169,7 @@ public partial class MainWindow : Window
             {
                 var parsed = ManagerClient.ParseTarget(t);
                 if (_targets.TryGetValue(parsed.Name, out var previous)
-                    && previous.Pid != parsed.Pid && _webSource == parsed.Name && parsed.Name != "core")
+                    && previous.Pid != parsed.Pid && CurrentManagedTarget() == parsed.Name && parsed.Name != "core")
                 {
                     _loadedWebUrl = "";
                     _navigationError = "";
@@ -279,10 +280,12 @@ public partial class MainWindow : Window
 
     private void ShowSection(string tag)
     {
-        var isWeb = tag is "coreweb" or "snowluma";
+        if (tag == "snowluma") tag = "connection:snowluma";
+        var isWeb = tag == "coreweb" || tag.StartsWith("connection:", StringComparison.Ordinal);
         OverviewPanel.Visibility = tag == "overview" ? Visibility.Visible : Visibility.Collapsed;
         WebPanel.Visibility = isWeb ? Visibility.Visible : Visibility.Collapsed;
         LogsPanel.Visibility = tag == "logs" ? Visibility.Visible : Visibility.Collapsed;
+        ConnectionsPanel.Visibility = tag == "connections" ? Visibility.Visible : Visibility.Collapsed;
 
         // 只有「日志」还用得到二级侧栏；总览的服务状态已并进组件清单，整列收 0 把宽度让给内容。
         SideColumn.Width = tag == "logs" ? new GridLength(236) : new GridLength(0);
@@ -297,14 +300,15 @@ public partial class MainWindow : Window
 
         // 标题栏的刷新键只对网页区块有意义，其余区块置灰
         BtnRefreshWeb.IsEnabled = isWeb;
-        BtnRefreshWeb.ToolTip = isWeb ? "刷新当前网页" : "刷新（切到 Core / SnowLuma 页面后可用）";
+        BtnRefreshWeb.ToolTip = isWeb ? "刷新当前网页" : "刷新（切到网页后可用）";
 
         // 选中态交给 IsChecked 的触发器，颜色不在代码里写死
-        foreach (var b in new[] { NavOverview, NavCoreWeb, NavSnowluma, NavLogs })
+        foreach (var b in new[] { NavOverview, NavCoreWeb, NavConnections, NavLogs }
+            .Concat(ConnectionNav.Children.OfType<RadioButton>()))
             b.IsChecked = b.Tag?.ToString() == tag;
 
         if (tag == "coreweb") ShowWeb("core");
-        if (tag == "snowluma") ShowWeb("snowluma");
+        if (tag.StartsWith("connection:", StringComparison.Ordinal)) ShowWeb(tag);
         if (tag == "logs") _ = RefreshLogs();
     }
 
@@ -505,13 +509,23 @@ public partial class MainWindow : Window
     private void UpdateWebPage(bool force = false)
     {
         if (string.IsNullOrEmpty(_webSource)) return;
+        if (WebPanel.Visibility != Visibility.Visible) return;
+        if (_webSource.StartsWith("connection:", StringComparison.Ordinal))
+        {
+            UpdateConnectionWebPage(force);
+            return;
+        }
         var isConsole = _webSource == "core";
         var name = isConsole ? "管理" : "SnowLuma";
         WebPageTitle.Text = name + " 页面";
         _targets.TryGetValue(_webSource, out var target);
         var ready = _serviceConnected && (isConsole || (target?.State == "running" && target.Ready));
         WebPageState.Text = !_serviceConnected ? "管理服务未连接" : isConsole
-            ? (target?.Ready == true ? "管理页面可用 · Core 运行中" : "管理页面可用 · Core 未运行") : target?.State switch
+            ? (target?.Ready == true ? "管理页面可用 · Core 运行中"
+                : target?.State == "starting" ? "管理页面可用 · Core 正在启动"
+                : target?.State == "stopping" ? "管理页面可用 · Core 正在停止"
+                : target?.Pid is not null ? "管理页面可用 · Core 已启动，尚未就绪"
+                : "管理页面可用 · Core 已停止") : target?.State switch
         {
             "running" => "运行中", "starting" => "正在启动", "stopping" => "正在停止",
             "failed" => "运行失败", "conflict" => "端口被占用", _ => "尚未启动"
@@ -602,7 +616,8 @@ public partial class MainWindow : Window
     private async void WebStart_Click(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrEmpty(_webSource)) return;
-        var source = _webSource;
+        var source = CurrentManagedTarget();
+        if (string.IsNullOrEmpty(source)) return;
         if (source == "core" && !await EnsureCoreSetup()) return;
         var action = _targets.TryGetValue(source, out var target) && target.Pid is not null ? "restart" : "start";
         await Send($"/v1/targets/{source}/{action}");
@@ -611,7 +626,7 @@ public partial class MainWindow : Window
     // ---------------- 控制动作 ----------------
 
     /// <summary>受管目标是否处于"已起来"的状态（用于把启动/停止合并成一个切换按钮）。</summary>
-    private static bool IsRunning(ManagerClient.Target target) => target.State is "running" or "starting";
+    private static bool IsRunning(ManagerClient.Target target) => target.Pid is not null || target.State is "running" or "starting";
 
     /// <summary>启动/停止两个图标常驻在一行：运行中亮"停止"，否则亮"启动"。
     /// 两个按钮都在，差别只在是否可点。target 为 null（旧服务缺目标）时两个都置灰。</summary>

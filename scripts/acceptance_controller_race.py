@@ -112,6 +112,44 @@ class ManualManagementTests(unittest.TestCase):
         self.assertEqual(len(self.created), 1)
         self.assertEqual(self.stopped, [])
 
+    def test_failed_stop_with_stale_ready_recovers_existing_process(self):
+        controller = self.controller
+        controller.proc = FakeProc(900123)
+        controller.state, controller.ready, controller.managed = 'failed', True, True
+        controller.desired, controller.last_error = 'stopped', 'stop failed'
+        controller._check_exit()
+        self.assertEqual((controller.state, controller.ready), ('running', True))
+        self.assertEqual((controller.desired, controller.last_error), ('stopped', 'stop failed'))
+        self.assertEqual(controller.snapshot().pid, 900123)
+        self.assertEqual(self.created, [])
+        self.assertEqual(self.stopped, [])
+
+    def test_starting_process_becomes_ready_without_another_start(self):
+        controller = self.controller
+        controller.proc = FakeProc(900123)
+        controller.state, controller.ready, controller.desired = 'starting', False, 'running'
+        controller._check_exit()
+        self.assertEqual((controller.state, controller.ready), ('running', True))
+        self.assertEqual(self.created, [])
+
+    def test_unhealthy_failed_process_is_not_reported_ready(self):
+        self.healthy.clear()
+        controller = self.controller
+        controller.proc = FakeProc(900123)
+        controller.state, controller.ready = 'failed', True
+        controller._check_exit()
+        self.assertEqual(controller.state, 'failed')
+        self.assertFalse(controller.snapshot().ready)
+
+    def test_exited_process_snapshot_never_claims_ready(self):
+        controller = self.controller
+        controller.proc = FakeProc(900123)
+        controller.state, controller.ready = 'running', True
+        controller.proc.returncode = 7
+        snapshot = controller.snapshot()
+        self.assertIsNone(snapshot.pid)
+        self.assertFalse(snapshot.ready)
+
     def test_duplicate_starts_during_health_wait_do_not_cancel(self):
         self.healthy.clear()
         self.start_worker()

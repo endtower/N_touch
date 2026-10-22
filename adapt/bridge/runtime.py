@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
 
 import aiohttp
 
@@ -18,12 +17,6 @@ logger = setup_logging("adapt.bridge")
 
 def state_path():
     return data_root() / "memory" / "chat_history" / "bridge_state.db"
-
-
-def local_session_id(connection_id: str, generation: str, remote_id: str) -> str:
-    scope, _, identity = remote_id.partition("_")
-    generation_id = hashlib.sha256(generation.encode()).hexdigest()[:20]
-    return f"wechat_{scope}_{connection_id}-{generation_id}-{identity}"
 
 
 class BridgeRuntime:
@@ -97,7 +90,8 @@ class BridgeRuntime:
                 return
             for row in rows:
                 payload = copy.deepcopy(row["payload"])
-                sid = local_session_id(self.config.connection_id, row["generation"], row["session_id"])
+                sid = await self.repo.bridge_session_id(
+                    self.config.connection_id, row["generation"], row["session_id"])
                 payload["session_info"].update(
                     session_id=sid, platform=self.config.platform,
                     connection_id=self.config.connection_id,

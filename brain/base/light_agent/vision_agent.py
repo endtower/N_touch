@@ -45,12 +45,17 @@ LLM_SAVE_IMAGE_SUBDIR = "images"
 
 
 class VisionAgent(LightweightAgent):
-    """识图Agent —— 输入图片 → 生成标题与描述 → 以标题为新文件名转存到目标文件夹。
+    """识图Agent —— 两种模式：
+
+    - describe_only=True（识别图片）：把图片交给视觉模型，按附加要求直接返回描述，
+      不调用任何保存 / 删除工具，不产生落库副作用。
+    - describe_only=False（保存）：生成标题与描述后调用 save_image / save_sticker，
+      以标题为新文件名转存到目标文件夹。
 
     继承 `LightweightAgent`，按五段式骨架组织：
     - 前处理 `_preprocess`：解析源图、转 data_url、构造 user 消息、注入 _current_source
     - LLM 循环 `_llm_loop`：复用父类，由 `_call_llm` 覆盖走 vision 等级模型
-    - 后处理 `_postprocess`：从循环产出的工具结果整理最终文案
+    - 后处理 `_postprocess`：只描述模式返回模型描述，保存模式从工具结果整理文案
 
     事件链上下文保留：history_prefix="vision"，经父类 _llm_loop 落盘
     event_chains/{chain_id}/vision_{HHMMSS}.json（前端 /context 以 kind=vision 展示）。
@@ -117,10 +122,21 @@ class VisionAgent(LightweightAgent):
     def _postprocess(self, content: str, extra_info: Any) -> Dict[str, Any]:
         """后处理：LLM 退出循环之后，整理最终返回值。
 
-        从循环产出的 extra_info.tools_called 中取第一个工具的 result，
+        只描述模式（describe_only）直接返回模型输出的描述文本；
+        保存模式从循环产出的 extra_info.tools_called 中取第一个工具的 result，
         拼装为最终 content 返回。
         """
         tools_called = (extra_info or {}).get("tools_called") or []
+
+        if getattr(self, "_describe_only", False):
+            if content and content.strip():
+                return {"content": content}
+            for item in tools_called:
+                result = item.get("result") or {}
+                desc = result.get("description") if isinstance(result, dict) else ""
+                if desc:
+                    return {"content": desc}
+            return {"content": "vision agent 未返回任何信息。"}
 
         if not tools_called:
             return {"content": "vision agent 未调用任何工具。"}
@@ -140,18 +156,26 @@ class VisionAgent(LightweightAgent):
         }
 
     # ===================== 统一入口（重写以适配双入参，内部仍走三段式骨架） =====================
-    async def run(self, image_path: str, additional_hint: Optional[str] = None) -> Dict[str, Any]:
+    async def run(
+        self,
+        image_path: str,
+        additional_hint: Optional[str] = None,
+        describe_only: bool = False,
+    ) -> Dict[str, Any]:
         """识图入口：前处理 → LLM 循环 → 后处理。
 
         Args:
             image_path: 图片绝对路径，或相对 media/ 的路径。
-            additional_hint: 可选附加提示（透传给视觉模型）。
+            additional_hint: 可选附加提示 / 识别要求（透传给视觉模型）。
+            describe_only: True 时只输出描述、不调用任何保存 / 删除工具（识别图片）；
+                False 时沿用保存语义（保存表情包 / 图片）。
 
         Returns:
             {"content": "...", "extra_info": ...}。
         """
         self._input_image_path = image_path
         self._input_hint = additional_hint
+        self._describe_only = describe_only
         try:
             processed_input = self._preprocess(image_path)
             loop_result = await self._llm_loop(processed_input, level="vision")
@@ -162,6 +186,7 @@ class VisionAgent(LightweightAgent):
             self._current_source = None
             self._input_image_path = None
             self._input_hint = None
+            self._describe_only = False
 
     # ===================== 视觉模型专用 LLM 调用（覆盖父类默认桥接） =====================
     async def _call_llm(self, messages: list, *, level: str = "vision",
@@ -178,16 +203,27 @@ class VisionAgent(LightweightAgent):
         sp = system_prompt if system_prompt is not None else self.get_system_prompt()
         full_messages = [{"role": "system", "content": sp}] + messages
 
-        return await call_llm(
-            level,
-            full_messages,
-            tools=self.get_available_tools(),
-            tool_choice=tool_choice or "auto",
-        )
+        # 只描述模式不提供工具：tools / tool_choice 都不传，避免空数组被接入点拒绝
+        available_tools = self.get_available_tools()
+        call_kwargs = {}
+        if available_tools:
+            call_kwargs["tools"] = available_tools
+            call_kwargs["tool_choice"] = tool_choice or "auto"
+
+        return await call_llm(level, full_messages, **call_kwargs)
 
     # ===================== System Prompt =====================
     def _get_system_prompt_content(self) -> str:
-        """vision agent 的 system prompt：识图 + 媒体管理。"""
+        """vision agent 的 system prompt：只描述（识图）或识图 + 媒体管理（保存）。"""
+        if getattr(self, "_describe_only", False):
+            return """
+你是 vision agent，是 conversation 子系统按需调用的视觉描述 agent。
+本次任务只做识别与描述：不要保存、修改、删除任何文件，也不要调用任何工具。
+请完整识别图片内容，直接输出描述。
+描述必须详实：人物 / 角色的外形、服饰、动作、表情、画面场景与构图都要写到，
+图片中的文字需要逐字复述原文。
+若用户给出了具体识别要求，严格围绕该要求组织描述。
+"""
         return """
 你是 vision agent，是 conversation 子系统按需调用的视觉处理 agent。
 你需要根据用户的要求，识别图片内容并调用对应的工具进行操作。
@@ -221,7 +257,9 @@ description中必须包含对图片内容的详细描述，文字需要复述原
         }
 
     def get_available_tools(self) -> List[Dict[str, Any]]:
-        """暴露给 LLM 的工具 schema。"""
+        """暴露给 LLM 的工具 schema（只描述模式不提供工具）。"""
+        if getattr(self, "_describe_only", False):
+            return []
         return [
             {
                 "type": "function",

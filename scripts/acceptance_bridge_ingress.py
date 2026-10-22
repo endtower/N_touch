@@ -20,7 +20,6 @@ os.environ["ONEBOT_ENABLED"] = "false"
 from aiohttp.test_utils import TestClient, TestServer
 from adapt.bridge.config import BridgeConfig
 from adapt.bridge.contract import SendReceipt
-from adapt.bridge.runtime import local_session_id
 from adapt.ingress_runtime import IngressRuntime, build_app
 from adapt.ingress_client import BridgeIngressChannel
 from adapt.protocol import OutboundPayload, OutboundTarget, SessionScope
@@ -55,7 +54,7 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.proxy = BridgeIngressChannel(self.config)
         self.proxy._base = str(self.http.make_url("")).rstrip("/")
         await self.proxy.start()
-        self.local = local_session_id("bridge-1", "cache-A", SID)
+        self.local = await self.repo.bridge_session_id("bridge-1", "cache-A", SID)
         self.store_patch = patch("memory.message_repository.get_message_store", return_value=self.repo)
         self.store_patch.start()
         await until(self.ready)
@@ -73,7 +72,7 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     async def test_received_text_has_platform_prefix_and_persisted_return_route(self):
-        self.assertTrue(self.local.startswith("wechat_private_"))
+        self.assertRegex(self.local, r"^wechat_private_[0-9]+$")
         self.assertTrue(self.runtime.bridge.ready, self.runtime.bridge.last_error)
         rows = (await self.repo.read_session_messages(self.local))["message_list"]
         self.assertEqual(len(rows), 1)
@@ -151,7 +150,7 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_generation_changes_local_identity_and_old_target_is_rejected(self):
         self.peer.generation = "cache-B"
         self.peer.cursor = 1
-        new_local = local_session_id("bridge-1", "cache-B", SID)
+        new_local = await self.repo.bridge_session_id("bridge-1", "cache-B", SID)
         async def new_route():
             return await self.repo.session_route(new_local) is not None
         await until(new_route)

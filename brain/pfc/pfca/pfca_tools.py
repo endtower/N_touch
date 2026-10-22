@@ -60,11 +60,12 @@ class PFCA_tool_manager(ToolManager):
                             },
                             "purpose": {
                                 "type": "string",
-                                "description": "本段话题的目标 / 期望结局，给出具体策略而非话术。禁止描述自己当前的情绪。"
+                                "maxLength": 120,
+                                "description": "一句话说清这段要达成的结果或要做的事，像标题一样，最多两句。不写语气、句式、具体台词，也不写禁止项。"
                             },
                             "extra_info": {
                                 "type": "string",
-                                "description": "可选，本任务的额外补充信息（如其他会话消息原文、agent 结论 / 计划书等）。"
+                                "description": "可选，可以写长：相关消息原文、前因后果、人物印象、你希望参考的要点。这些只是参考与建议，不是要求对话逐条照做。"
                             },
                             "max_messages": {
                                 "type": "integer",
@@ -93,11 +94,12 @@ class PFCA_tool_manager(ToolManager):
                             },
                             "purpose": {
                                 "type": "string",
-                                "description": "社交任务书：目标 / 现状 / 期望结局 / 关键约束。给出具体策略而非话术；禁止描述自己的情绪。"
+                                "maxLength": 120,
+                                "description": "一句话说清这次社交要达成的结果，像标题一样，最多两句。不写语气、句式、具体台词，也不写禁止项。"
                             },
                             "extra_info": {
                                 "type": "string",
-                                "description": "可选，任务补充材料：相关消息原文、人物印象要点、前因后果。严禁含糊指代（要求告知某事结果必须附结果内容）。"
+                                "description": "可选，可以写长：相关消息原文、人物印象、前因后果、希望参考的要点。这些只是参考与建议，不是要求对方逐条照做。"
                             },
                             "persona_name": {
                                 "type": "string",
@@ -352,8 +354,8 @@ class PFCA_tool_manager(ToolManager):
         由 conversation 在本段会话首条消息注入该人格 kernel_prompt；人格不再随 PFCA 全局切换。
 
         Args:
-            purpose: 本次聊天的目的与期望结局，具体策略与计划。
-            extra_info: 额外补充信息（其他会话消息原文、agent 结论 / 计划书等）。
+            purpose: 这一段要达成的结果或要做的事，一两句话，像标题。
+            extra_info: 可选的参考材料（消息原文、前因后果、人物印象等），可以写长，仅作建议。
             max_messages: 软限制发送轮次数（一次发送工具调用计 1）
             session_id: 可选，目标会话 id，格式 'type_id'。为空时默认主人的私聊会话。
             persona_name: 可选，本段对话使用的人格名。为空时用默认人格（normal）。
@@ -399,13 +401,10 @@ class PFCA_tool_manager(ToolManager):
         if not any(s.get("session_id") == session_id for s in pfca_sessions):
             await focus_state.add_pfca_session(session_id, search_impression=True)
 
-        # 拼装 purpose 模板（仅当 extra_info 非空时套外壳）
-        if extra_info:
+        # 拼装 purpose：目标在前，extra_info 作为参考材料附后，明确其非强制性质
+        if extra_info and extra_info.strip():
             combined_purpose = (
-                f"本次任务由pfca(核心任务调度器，能力：查询可联系目标和其聊天记录、"
-                f"发布对主人的社交任务、发布对其他人的社交任务、修订对角色的印象，构造长期任务)发布\n"
-                f"任务目标：{purpose}\n"
-                f"任务格外信息：{extra_info}"
+                f"{purpose}\n\n【可参考的信息】\n以下只是参考与建议，不必逐条照做：\n{extra_info.strip()}"
             )
         else:
             combined_purpose = purpose
@@ -435,8 +434,8 @@ class PFCA_tool_manager(ToolManager):
         Args:
             session_id: 工作会话 id，格式 "type_id"（如 "group_xxx" / "private_yyy"）。
                 不能是主人的私聊会话（主人私聊请用 conversation_agent）。
-            purpose: 社交任务书：目标 / 现状 / 期望结局 / 关键约束。
-            extra_info: 可选补充材料（相关消息原文、人物印象要点、前因后果）。
+            purpose: 这次社交要达成的结果，一两句话，像标题。
+            extra_info: 可选参考材料（消息原文、人物印象、前因后果），可以写长，仅作建议。
             persona_name: 可选，本段社交使用的人格名。为空时用默认人格（normal）。
 
         Returns:
@@ -459,9 +458,7 @@ class PFCA_tool_manager(ToolManager):
 
         if extra_info and extra_info.strip():
             combined_purpose = (
-                f"本次任务由 pfca 发布（对其他人 / 群聊的社交任务）\n"
-                f"任务目标：{purpose.strip()}\n"
-                f"任务格外信息：{extra_info.strip()}"
+                f"{purpose.strip()}\n\n【可参考的信息】\n以下只是参考与建议，不必逐条照做：\n{extra_info.strip()}"
             )
         else:
             combined_purpose = purpose.strip()

@@ -178,6 +178,37 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         core.state, core.ready = "stopped", False
         self.assertEqual((await self.client.get("/console/trucks", headers=self.headers)).status, 200)
 
+    async def test_notes_distinguish_stopped_starting_and_live_unready(self):
+        core = self.controllers["core"].value
+        for state, pid, ready, code in (
+            ("stopped", None, False, "core_stopped"),
+            ("starting", None, False, "core_starting"),
+            ("starting", 900123, False, "core_starting"),
+            ("stopping", 900123, True, "core_stopping"),
+            ("failed", 900123, True, "core_not_ready"),
+            ("conflict", None, False, "core_conflict"),
+        ):
+            with self.subTest(state=state, pid=pid):
+                core.state, core.pid, core.ready = state, pid, ready
+                response = await self.client.get("/notes", headers=self.headers)
+                self.assertEqual(response.status, 503)
+                body = await response.json()
+                self.assertEqual(body["error_code"], code)
+                self.assertEqual(body["core_pid"], pid)
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                if pid is not None:
+                    self.assertNotIn("未运行", body["error"])
+
+    async def test_status_reads_one_snapshot_and_is_not_cached(self):
+        controller = self.controllers["core"]
+        original = controller.snapshot
+        with patch.object(controller, "snapshot", wraps=original) as read:
+            response = await self.client.get("/console/status", headers=self.headers)
+            body = await response.json()
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(body["core_ready"], body["core"]["state"] == "running" and body["core"]["ready"])
+
     async def test_saved_settings_are_acknowledged_if_core_disconnects(self):
         app = web.Application()
         app.router.add_get("/console/trucks", lambda request: web.json_response({"error": "unavailable"}, status=503))

@@ -34,6 +34,14 @@ const tokenStatsOpen = ref(false)
 const systemPanelOpen = ref(false)
 const coreReady = ref(false)
 const managerAvailable = ref(false)
+const coreProcessState = ref('unknown')
+const coreHasProcess = ref(false)
+const coreStatusLabel = computed(() => !managerAvailable.value ? '状态未连接'
+  : coreReady.value ? '运行中'
+  : coreProcessState.value === 'starting' ? '启动中'
+  : coreProcessState.value === 'stopping' ? '停止中'
+  : coreHasProcess.value ? '尚未就绪'
+  : coreProcessState.value === 'conflict' ? '端口冲突' : '已停止')
 const coreError = ref('')
 let consolePoll: number | null = null
 let consolePolling = false
@@ -49,6 +57,8 @@ async function pollConsole() {
     if (disposed) return
     managerAvailable.value = data.manager_available === true
     coreReady.value = data.core_ready === true
+    coreProcessState.value = data.core?.state || 'unknown'
+    coreHasProcess.value = data.core?.pid != null
     coreError.value = data.core?.last_error || ''
     if (coreReady.value) {
       channel.connect()
@@ -284,7 +294,7 @@ async function onSend(payload: { text: string; images: string[] }) {
         <div style="display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;">
           <h1 style="flex-shrink: 0;" :class="{ 'core-off': managerAvailable && !coreReady }">Abyss</h1>
           <span class="header-sub" style="white-space: nowrap; flex-shrink: 0;"
-            :title="coreError || 'Core 停止时仍可查看上下文、记录和配置 Truck'">{{ coreReady ? '运行中' : managerAvailable ? '已停止' : '未连接' }}</span>
+            :title="coreError || 'Core 停止时仍可查看上下文、记录和配置 Truck'">{{ coreStatusLabel }}</span>
         </div>
         <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
           <button
@@ -386,14 +396,14 @@ async function onSend(payload: { text: string; images: string[] }) {
           <!-- 一个大区域: 底色 + 上面身份信息 + 下面输入框 (输入框自带边框, 即"框") -->
           <div class="input-region">
             <IdentityBar v-if="chat.state.connected" :session="chat.activeSession.value" />
-            <div v-else class="header-sub" style="padding: 8px 12px;">Core 未运行，当前显示已保存的记录。</div>
+            <div v-else class="header-sub" style="padding: 8px 12px;">{{ coreReady ? '会话连接尚未建立' : `Core ${coreStatusLabel}` }}，当前显示已保存的记录。</div>
             <InputArea @send="onSend" :disabled="!chat.canSend.value" />
           </div>
         </template>
         <div v-else class="no-session">
           <div class="no-session-icon">💬</div>
           <div class="no-session-text">
-            {{ coreReady ? '从左侧选一个会话，或点「新建」开始' : 'Core 未运行。可以查看上下文、会话记录、调整布局和配置 Truck。' }}
+            {{ coreReady ? '从左侧选一个会话，或点「新建」开始' : `Core ${coreStatusLabel}。可以查看上下文、会话记录、调整布局和配置 Truck。` }}
           </div>
         </div>
       </main>

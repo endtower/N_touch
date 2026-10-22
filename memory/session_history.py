@@ -171,6 +171,7 @@ class GlobalSessionHistory:
         advance_cursor: bool = True,
         max_unread: int = 20,
         min_messages: int = 10,
+        mark_filler: bool = False,
     ) -> FetchResult:
         """游标拉取：获取指定消费者未处理的消息，格式化并推进游标。
 
@@ -182,6 +183,8 @@ class GlobalSessionHistory:
           但在消息头附加提示"共 xxxx 条未读消息，仅显示最新 N 条"。默认 20。
         - min_messages：未读不足时，从游标之前（已读历史）额外拉取补足到
           min_messages 条。默认 10；设为 0 表示不补齐（只返回未读）。
+        - mark_filler：为补齐的历史消息加"历史背景，不是新指令"分隔标题，
+          防止模型把旧消息当成当前正在发生的事。默认关闭。
 
         Args:
             session_id: 会话标识。
@@ -192,6 +195,7 @@ class GlobalSessionHistory:
                 False 表示只读不推进（用于监听/等待场景，消息仍保持未读，供后续消费）。
             max_unread: 未读返回上限（见上述钳制原则），默认 20。
             min_messages: 最少返回条数（未读不足时从历史补足），默认 10；0 表示不补齐。
+            mark_filler: 是否给补齐的历史段落加背景标注，默认 False。
 
         Returns:
             FetchResult（messages / formatted_lines / user_infos / has_new）。
@@ -246,7 +250,9 @@ class GlobalSessionHistory:
             overflow_hint = f"共{unread_count}条未读消息，仅显示最新{effective_max}条"
             header = f"{header}\n{overflow_hint}" if header else overflow_hint
 
-        formatted_lines, user_infos = self.format_messages(messages, options)
+        formatted_lines, user_infos = self._format_with_filler(
+            filler_messages, unread_messages, options, mark_filler
+        )
         if header and formatted_lines:
             formatted_lines = [header] + formatted_lines
 
@@ -256,6 +262,26 @@ class GlobalSessionHistory:
             user_infos=user_infos,
             has_new=bool(unread_messages),
         )
+
+    def _format_with_filler(self, filler_messages: List[Dict], unread_messages: List[Dict],
+                            options: FetchOptions, mark_filler: bool) -> tuple:
+        """分别格式化历史补齐段与未读段；mark_filler 时给两段加显式分隔标题。
+
+        合并格式化会让旧消息和新消息混成一列，模型无法分辨哪句是当前正在发生的，
+        因此需要分开渲染并在必要时标出边界。
+        """
+        filler_lines, filler_users = (
+            self.format_messages(filler_messages, options) if filler_messages else ([], [])
+        )
+        unread_lines, unread_users = (
+            self.format_messages(unread_messages, options) if unread_messages else ([], [])
+        )
+        user_infos = filler_users + [u for u in unread_users if u not in filler_users]
+        if mark_filler and filler_lines:
+            filler_lines = ["【以下是历史背景，仅供理解语境，不是本次的新指令】"] + filler_lines
+            if unread_lines:
+                unread_lines = ["【以下是本次的新消息】"] + unread_lines
+        return filler_lines + unread_lines, user_infos
 
 
 _session_history_instance: Optional[GlobalSessionHistory] = None

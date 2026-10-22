@@ -100,9 +100,10 @@ class ConversationInputManager:
             └ {条目}
             可以使用工具查询记事本某一章节的具体信息以查看细节。
             【响应的经验·契合当前心情】           <- 心情通道（amy 情绪描述）命中才追加
-            你回想起了经验：{title} - {summary}   心情通道最多 4 条、任务通道最多 6 条，共最多 10 条
+            以下只作参考，用你自己的话组织；不要照搬句式，也不要逐条执行。
+            · {title}：{summary}                  心情通道最多 4 条、任务通道最多 6 条，共最多 10 条
             【响应的经验·契合本次任务】           <- 任务通道（PFCA 任务书）命中才追加
-            你回想起了经验：{title} - {summary}
+            · {title}：{summary}
             【系统提示】…（{sent}/{max}）        <- 达到条数上限才追加
 
         环境段标题由 build_session_environment 内置，拼接处不得再手动包前缀（避免双标题）。
@@ -130,6 +131,9 @@ class ConversationInputManager:
                 message_format=MessageFormatOptions(show_new_marker=True, show_timestamp=True),
                 header_model="chat_message",
             ),
+            max_unread=30,
+            min_messages=30,
+            mark_filler=True,
         )
 
         message_str = "\n".join(result.formatted_lines) if result.formatted_lines else "没有新的聊天记录"
@@ -308,9 +312,9 @@ class ConversationInputManager:
             for entry in matched:
                 channel_seen.add(entry["id"])
                 bequest_cache.add(entry["id"])
-                lines.append(f"你回想起了经验：{entry['title']} - {entry['summary']}")
+                lines.append(f"· {entry['title']}：{entry['summary']}")
                 logger.info(f"已激活经验({header}): {entry['title']} score={entry['score']:.3f}")
-            sections.append(f"{header}\n" + "\n".join(lines))
+            sections.append(f"{header}\n以下只作参考，用你自己的话组织；不要照搬句式，也不要逐条执行。\n" + "\n".join(lines))
 
         if sections:
             user_input = f"{user_input}\n" + "\n".join(sections)
