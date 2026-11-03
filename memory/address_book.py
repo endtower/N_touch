@@ -28,7 +28,13 @@ def _extract_session_type(session_id: str) -> str:
 
 
 class AddressBook:
-    """通讯录类，用于管理和查询联系人信息（纯异步）"""
+    """通讯录类，用于管理和查询联系人信息（纯异步）
+
+    刷新策略（2026-10-25）：通讯录不再一次性缓存到进程退出。每次读取都按会话表
+    重新聚合（一条 SQL 拿全部会话的消息数 / 最近活跃数 / 最后一条消息），
+    因此新会话与刚收到的回复会立刻出现在通讯录里，不需要重启 Core。
+    只有「第一印象」描述按 session_id 缓存——它涉及节点创建，且名称不变时无需重查。
+    """
 
     def __init__(self):
         if not hasattr(self, '_initialized'):
@@ -38,39 +44,27 @@ class AddressBook:
                 "private": [],
                 "group": []
             }
-            self._loaded = False
-            self._initialized = True
+            # session_id -> (session_name, description)：名称变化时重查印象
+            self._descriptions: Dict[str, tuple] = {}
             self._initialize_lock = None  # 在第一次异步调用时建
 
     def _build_contact(self, session_id: str, session_name: str,
-                       last_update_time: float, message_list: List[Dict],
+                       last_update_time: float, message_count: int,
+                       recent_count: int, last_user_name: str,
+                       last_content_text: str, last_timestamp: float,
                        session_type: str, description: str,
                        conversation_allowed: bool = False) -> Dict[str, Any]:
-        """从单个会话数据构建联系人信息字典（纯字符串处理）
+        """从一条聚合结果构建联系人信息字典（纯字符串处理）
 
-        状态判定：当前最近 10 分钟内消息数 >= 10 → 活跃，否则不活跃
+        状态判定：当前最近 10 分钟内消息数 >= 10 → 活跃，否则不活跃。
 
         conversation_allowed：该会话是否可直接用 conversation 模式进入（无需主人参与）。
-        由 _load_contacts 传入（保护模式放行集合判定结果），此处仅原样落字段。
+        由 _refresh_contacts 传入（保护模式放行集合判定结果），此处仅原样落字段。
         """
-        import time
-        message_count = len(message_list)
-
-        # 状态判定：当前时间最近 10 分钟内的消息数
-        ten_min_ago = time.time() - 600
-        recent_count = sum(
-            1 for msg in message_list
-            if msg.get("timestamp", 0) >= ten_min_ago
-        )
-
         last_message = ""
-        if message_list:
-            last_msg = message_list[-1]
-            user_name = last_msg.get("user_name", "未知")
-            content_text = last_msg.get("content_text", "")
-            timestamp = last_msg.get("timestamp", 0)
-            time_str = datetime.fromtimestamp(timestamp).strftime("%m月%d号 %H:%M:%S")
-            last_message = f"[{time_str}] {user_name}:{content_text}"
+        if last_timestamp:
+            time_str = datetime.fromtimestamp(last_timestamp).strftime("%m月%d号 %H:%M:%S")
+            last_message = f"[{time_str}] {last_user_name}:{last_content_text}"
 
         return {
             "name": session_name,
@@ -88,28 +82,54 @@ class AddressBook:
         }
 
     async def initialize(self):
-        """异步初始化（首次调用 get_*_contacts 时会 await）"""
-        if self._loaded:
-            return
+        """异步初始化：确保锁存在（真正的数据刷新在每次读取时进行）。"""
         if self._initialize_lock is None:
             import asyncio
             self._initialize_lock = asyncio.Lock()
-        async with self._initialize_lock:
-            if self._loaded:
-                return
-            await self._load_contacts()
 
-    async def _load_contacts(self):
-        """异步加载联系人信息（通过 MessageRepository 读取，不再直接读 JSON 文件）
+    async def _describe(self, session_id: str, session_name: str, session_type: str) -> str:
+        """取该会话的第一印象描述；名称未变时复用缓存，避免重复查库与建节点。"""
+        cached = self._descriptions.get(session_id)
+        if cached is not None and cached[0] == session_name:
+            return cached[1]
+
+        from brain.hc.database.character_compose import CharacterCompose
+        try:
+            impression_result = await CharacterCompose().first_session_impression_search(
+                name=session_name,
+                session_id=session_id
+            )
+            if session_type == "private":
+                description = impression_result.get(
+                    "formatted_info", f"你对{session_name}没有任何印象。"
+                )
+            else:
+                description = impression_result.get(
+                    "formatted_info", f"群组{session_name}。"
+                )
+        except Exception as e:
+            # 单个联系人的印象查询失败不阻断整本通讯录（降级为空印象）。
+            logger.error(f"获取第一印象失败: {e}")
+            if session_type == "private":
+                description = f"你对{session_name}没有任何印象。"
+            else:
+                description = f"群组{session_name}。"
+
+        self._descriptions[session_id] = (session_name, description)
+        return description
+
+    async def _refresh_contacts(self):
+        """按会话表现况重建通讯录（每次读取都执行）。
 
         加载失败直接抛异常阻断（硬约定 #4），不吞异常伪装"空通讯录"。
+        一条聚合 SQL 取代原先每个会话一次的全表消息读取，刷新成本与会话数线性但常数极小。
         """
-        from brain.hc.database.character_compose import CharacterCompose
+        import time
         from brain.hc.database.core import get_memory_db
         from config.settings import SafetyConfig
         from config.role_settings import RoleConfig
         from memory.message_repository import get_message_store
-        character_compose = CharacterCompose()
+
         message_store = get_message_store()
 
         # 保护模式放行集合（三源，与 pfca_tools.conversation_agent 的判定口径一致）：
@@ -122,40 +142,37 @@ class AddressBook:
             | await get_memory_db().get_conversation_allowed_session_ids()
         )
 
-        # 通过 repository 列出所有会话
-        sessions = await message_store.list_sessions()
+        conn = await message_store._ensure_connection()
+        cur = await conn.execute(
+            """SELECT s.session_id, s.session_name, s.last_update_time,
+                      COUNT(m.seq) AS message_count,
+                      COALESCE(SUM(CASE WHEN m.timestamp >= ? THEN 1 ELSE 0 END), 0) AS recent_count,
+                      COALESCE((SELECT lm.user_name FROM messages lm
+                                WHERE lm.session_id = s.session_id
+                                ORDER BY lm.seq DESC LIMIT 1), '') AS last_user_name,
+                      COALESCE((SELECT lm.content_text FROM messages lm
+                                WHERE lm.session_id = s.session_id
+                                ORDER BY lm.seq DESC LIMIT 1), '') AS last_content,
+                      COALESCE((SELECT lm.timestamp FROM messages lm
+                                WHERE lm.session_id = s.session_id
+                                ORDER BY lm.seq DESC LIMIT 1), 0) AS last_timestamp
+               FROM sessions s
+               LEFT JOIN messages m ON m.session_id = s.session_id
+               GROUP BY s.session_id
+               ORDER BY s.last_update_time DESC""",
+            (time.time() - 600,),
+        )
+        rows = await cur.fetchall()
 
-        for session_info in sessions:
-            session_id = session_info.get("session_id", "")
-            session_name = session_info.get("session_name", session_id)
-            last_update_time = session_info.get("last_update_time", 0)
+        contacts = {"private": [], "group": []}
+        for row in rows:
+            session_id = row["session_id"] or ""
             session_type = _extract_session_type(session_id)
-            if session_type not in ("private", "group"):
+            if session_type not in contacts:
                 continue
 
-            # 通过 repository 读取会话消息
-            session_data = await message_store._get_session_data(session_id)
-            message_list = session_data.get("message_list", [])
-
-            try:
-                impression_result = await character_compose.first_session_impression_search(
-                    name=session_name,
-                    session_id=session_id
-                )
-                if session_type == "private":
-                    description = impression_result.get(
-                        "formatted_info", f"你对{session_name}没有任何印象。"
-                    )
-                else:
-                    description = impression_result.get(
-                        "formatted_info", f"群组{session_name}。"
-                    )
-            except Exception as e:
-                logger.error(f"获取第一印象失败: {e}")
-                if session_type == "private":
-                    description = f"你对{session_name}没有任何印象。"
-                else:
-                    description = f"群组{session_name}。"
+            session_name = row["session_name"] or session_id
+            description = await self._describe(session_id, session_name, session_type)
 
             # 可直接 conversation 进入的提示资格：保护模式开启 + 在放行集合内 + 非主人私聊
             # （主人私聊本就可对话，贴「无需主人参与」有歧义；保护模式关闭时全不标）
@@ -164,14 +181,42 @@ class AddressBook:
                 and session_id != master_private
                 and session_id in allowed_sessions
             )
-            contact = self._build_contact(
-                session_id, session_name, last_update_time,
-                message_list, session_type, description,
+            contacts[session_type].append(self._build_contact(
+                session_id, session_name, row["last_update_time"] or 0,
+                row["message_count"], row["recent_count"],
+                row["last_user_name"], row["last_content"], row["last_timestamp"] or 0,
+                session_type, description,
                 conversation_allowed=conversation_allowed,
-            )
-            self._contacts[session_type].append(contact)
+            ))
 
-        self._loaded = True
+        # 整体替换而非追加：已删除的会话也要从通讯录消失
+        self._contacts = contacts
+
+        logger.debug(
+            f"通讯录已刷新：私聊 {len(contacts['private'])} 个，群聊 {len(contacts['group'])} 个"
+        )
+
+    async def refresh_impression(self, session_id: str) -> None:
+        """丢弃指定会话的印象缓存，下次读取时重查。
+
+        供记忆修改（MemoryAgent 更新印象 / 熟悉程度）后调用：
+        名称没变但描述已变，只靠名称比对无法感知，必须显式失效。
+        """
+        self._descriptions.pop(session_id, None)
+
+    async def _current_contacts(self, session_types: tuple) -> List[Dict[str, Any]]:
+        """读取前先刷新，返回指定类型的联系人列表（一次刷新覆盖全部类型）。
+
+        刷新在锁内完成，避免并发查询时重复重建；锁只覆盖构建过程，
+        调用方拿到的列表是本次刷新的快照。
+        """
+        await self.initialize()
+        async with self._initialize_lock:
+            await self._refresh_contacts()
+        contacts: List[Dict[str, Any]] = []
+        for session_type in session_types:
+            contacts.extend(self._contacts.get(session_type, []))
+        return contacts
 
     async def get_private_contacts(self, include_status: bool = False) -> str:
         """获取私聊联系人信息
@@ -180,9 +225,8 @@ class AddressBook:
             include_status: 是否附带近期状态（活跃/不活跃、消息总数、最后一条消息）。
                            默认 False：只返回联系方式与印象。
         """
-        await self.initialize()
-        contacts = self._contacts.get("private", [])
-        return self._format_contacts(contacts, include_status=include_status)
+        return self._format_contacts(await self._current_contacts(("private",)),
+                                     include_status=include_status)
 
     async def get_group_contacts(self, include_status: bool = False) -> str:
         """获取群聊联系人信息
@@ -191,9 +235,8 @@ class AddressBook:
             include_status: 是否附带近期状态（活跃/不活跃、消息总数、最后一条消息）。
                            默认 False：只返回联系方式与印象。
         """
-        await self.initialize()
-        contacts = self._contacts.get("group", [])
-        return self._format_contacts(contacts, include_status=include_status)
+        return self._format_contacts(await self._current_contacts(("group",)),
+                                     include_status=include_status)
 
     async def get_all_contacts(self, include_status: bool = False) -> str:
         """获取所有联系人信息
@@ -202,11 +245,8 @@ class AddressBook:
             include_status: 是否附带近期状态（活跃/不活跃、消息总数、最后一条消息）。
                            默认 False：只返回联系方式与印象。
         """
-        await self.initialize()
-        private_contacts = self._contacts.get("private", [])
-        group_contacts = self._contacts.get("group", [])
-        all_contacts = private_contacts + group_contacts
-        return self._format_contacts(all_contacts, include_status=include_status)
+        return self._format_contacts(await self._current_contacts(("private", "group")),
+                                     include_status=include_status)
 
     def _format_contacts(self, contacts: List[Dict[str, Any]], include_status: bool = False) -> str:
         """格式化联系人信息（纯字符串处理）

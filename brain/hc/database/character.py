@@ -3,14 +3,16 @@
 角色操作类（SQLite）
 
 以 00000000（LLM 扮演的角色）为中心，管理 00000000 指向的其他角色。
-角色表字段：别名（JSON 数组）、印象（单值）、熟悉度（单值）、联系方式（JSON 数组）、
-关系（与 00000000 的关系描述）、好感度事件（JSON 数组）。
+角色行只存单值字段（印象、熟悉度、关系、好感度事件）；
+名称（主名 + 别名）与联系方式分别存在 entity_names / entity_contacts，
+由 entity_identity 统一读写，(类型, 名字) 与 session_id 都是主键。
 """
 
 import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
+from . import entity_identity as identity
 from .core import get_memory_db, serialize_vector, deserialize_vector, cosine_similarity
 from .common import generate_timestamp_id
 from .vector_store import get_vector_store
@@ -31,66 +33,51 @@ class CharacterOperations:
     # ============================================================
 
     async def create_character_node(self, name: str) -> str:
-        """创建角色节点，必须输入 name，同时自动创建别名。"""
+        """创建角色节点，必须输入 name，同时把它记为主名。
+
+        同名已存在时先抛错，避免「先建行再改名失败」留下半条记录。
+        """
         uuid = generate_timestamp_id("Character")
         current_time = datetime.now().isoformat()
 
         conn = await self.db._ensure_connection()
+        existing = await identity.find_entity_by_name(conn, identity.CHARACTER, name)
+        if existing:
+            raise identity.NameConflictError(f"角色名称「{name}」已存在（uuid={existing}）")
+
         await conn.execute(
-            """INSERT INTO characters (uuid, name, aliases, usage_count, last_used_at, created_at)
-               VALUES (?, ?, ?, 0, ?, ?)""",
-            (uuid, name, json.dumps([name], ensure_ascii=False), current_time, current_time),
+            """INSERT INTO characters (uuid, usage_count, last_used_at, created_at)
+               VALUES (?, 0, ?, ?)""",
+            (uuid, current_time, current_time),
         )
+        await identity.set_primary_name(conn, identity.CHARACTER, uuid, name)
         await conn.commit()
         return uuid
 
     async def create_alias_node(self, name: str, owner_uuid: str) -> None:
-        """为角色添加别名（追加到 aliases JSON 数组）。"""
+        """为角色添加别名。"""
         conn = await self.db._ensure_connection()
-        cur = await conn.execute("SELECT aliases FROM characters WHERE uuid=?", (owner_uuid,))
-        row = await cur.fetchone()
-        if row is None:
-            return
-        aliases = json.loads(row["aliases"] or "[]")
-        if name not in aliases:
-            aliases.append(name)
-        await conn.execute(
-            "UPDATE characters SET aliases=? WHERE uuid=?",
-            (json.dumps(aliases, ensure_ascii=False), owner_uuid),
-        )
+        await identity.add_name(conn, identity.CHARACTER, owner_uuid, name)
         await conn.commit()
 
     async def create_contact_node(self, session_id: str, owner_uuid: str) -> None:
-        """为角色添加联系方式（追加到 contacts JSON 数组）。"""
+        """为角色添加联系方式。"""
         conn = await self.db._ensure_connection()
-        cur = await conn.execute("SELECT contacts FROM characters WHERE uuid=?", (owner_uuid,))
-        row = await cur.fetchone()
-        if row is None:
-            return
-        contacts = json.loads(row["contacts"] or "[]")
-        if not any(c.get("session_id") == session_id for c in contacts):
-            contacts.append({"session_id": session_id, "usage_count": 0})
-        await conn.execute(
-            "UPDATE characters SET contacts=? WHERE uuid=?",
-            (json.dumps(contacts, ensure_ascii=False), owner_uuid),
-        )
+        await identity.add_contact(conn, identity.CHARACTER, owner_uuid, session_id)
         await conn.commit()
 
     async def replace_aliases(self, owner_uuid: str, new_aliases: list) -> None:
-        """整组替换角色别名（覆盖 aliases JSON 数组）。"""
+        """整组替换角色名称（new_aliases[0] 为主名）。"""
         conn = await self.db._ensure_connection()
-        await conn.execute(
-            "UPDATE characters SET aliases=? WHERE uuid=?",
-            (json.dumps(new_aliases, ensure_ascii=False), owner_uuid),
-        )
+        await identity.replace_names(conn, identity.CHARACTER, owner_uuid, new_aliases)
         await conn.commit()
 
     async def update_character(self, uuid: str, **fields: Any) -> bool:
         """更新角色可编辑字段（名称/别名/印象/熟悉度/关系），成功后重新向量化。
 
         fields 支持:
-          name: str          — 角色名称
-          aliases: list[str] — 别名（整组替换，覆盖 aliases JSON 数组）
+          name: str          — 主名（改为该名称；被其他角色占用则抛 NameConflictError）
+          aliases: list[str] — 名称整组替换（首项为主名）
           impression: str    — 印象（单值）
           familiarity: str   — 熟悉度（单值）
           relationship: str  — 与 00000000 的关系（单值）
@@ -108,12 +95,6 @@ class CharacterOperations:
 
         sets: List[str] = []
         params: List[Any] = []
-        if fields.get("name") is not None:
-            sets.append("name=?")
-            params.append(fields["name"])
-        if fields.get("aliases") is not None:
-            sets.append("aliases=?")
-            params.append(json.dumps(fields["aliases"], ensure_ascii=False))
         if fields.get("impression") is not None:
             sets.append("impression=?")
             params.append(fields["impression"])
@@ -133,7 +114,14 @@ class CharacterOperations:
                 f"UPDATE characters SET {', '.join(sets)} WHERE uuid=?",
                 params,
             )
-            await conn.commit()
+
+        # 名称：aliases 优先（整组替换），否则单独改主名
+        if fields.get("aliases") is not None:
+            await identity.replace_names(conn, identity.CHARACTER, uuid, fields["aliases"])
+        elif fields.get("name") is not None:
+            await identity.set_primary_name(conn, identity.CHARACTER, uuid, fields["name"])
+
+        await conn.commit()
 
         # 仅切换放行开关不影响描述文本，避免无谓的向量重算
         if set(fields) - {"allow_conversation"}:
@@ -141,55 +129,37 @@ class CharacterOperations:
         return True
 
     async def delete_character(self, uuid: str) -> bool:
-        """删除角色行。
-
-        别名 / 印象 / 熟悉度 / 联系方式 / 关系 / 好感度事件 / 向量都在同一行的
-        JSON/BLOB 列内，随行一并删除；返回 False 表示 uuid 不存在。
-        """
+        """删除角色行及其名称与联系方式；返回 False 表示 uuid 不存在。"""
         if not uuid:
             return False
         conn = await self.db._ensure_connection()
         cur = await conn.execute("DELETE FROM characters WHERE uuid=?", (uuid,))
+        if cur.rowcount == 0:
+            await conn.commit()
+            return False
+        await identity.delete_entity(conn, identity.CHARACTER, uuid)
         await conn.commit()
-        return cur.rowcount > 0
+        return True
 
     # ============================================================
     # 查询
     # ============================================================
 
     async def find_character_uuid(self, identifier: str) -> Optional[str]:
-        """根据别名或主名查找角色 UUID。"""
+        """根据主名或别名查找角色 UUID（同类型内名称唯一，不会多匹配）。"""
         if not identifier:
             return None
         conn = await self.db._ensure_connection()
-        # 主名匹配
-        cur = await conn.execute("SELECT uuid FROM characters WHERE name=?", (identifier,))
-        row = await cur.fetchone()
-        if row:
-            return row["uuid"]
-        # 别名匹配
-        cur = await conn.execute("SELECT uuid, aliases FROM characters")
-        rows = await cur.fetchall()
-        matches = []
-        for r in rows:
-            aliases = json.loads(r["aliases"] or "[]")
-            if identifier in aliases:
-                matches.append(r["uuid"])
-        if len(matches) > 1:
-            raise ValueError(f"找到多个匹配的角色，别名: {identifier}")
-        return matches[0] if matches else None
+        return await identity.find_entity_by_name(conn, identity.CHARACTER, identifier)
 
     async def get_character_by_contact(self, session_id: str) -> Optional[str]:
-        """根据会话 ID 查找对应角色 UUID。"""
+        """根据会话 ID 查找对应角色 UUID（只认角色，不认群组）。"""
         if not session_id:
             return None
         conn = await self.db._ensure_connection()
-        cur = await conn.execute("SELECT uuid, contacts FROM characters")
-        rows = await cur.fetchall()
-        for r in rows:
-            contacts = json.loads(r["contacts"] or "[]")
-            if any(c.get("session_id") == session_id for c in contacts):
-                return r["uuid"]
+        found = await identity.find_entity_by_contact(conn, session_id)
+        if found and found[0] == identity.CHARACTER:
+            return found[1]
         return None
 
     async def get_character_full_info(self, uuid: str) -> Optional[Dict[str, Any]]:
@@ -199,13 +169,14 @@ class CharacterOperations:
         row = await cur.fetchone()
         if row is None:
             return None
+        names = await identity.get_names(conn, identity.CHARACTER, uuid)
         return {
             "uuid": row["uuid"],
-            "name": row["name"],
-            "aliases": [{"name": a, "usage_count": 0} for a in json.loads(row["aliases"] or "[]")],
+            "name": names[0] if names else "",
+            "aliases": [{"name": n, "usage_count": 0} for n in names],
             "impressions": [{"content": row["impression"]}] if row["impression"] else [],
             "familiarities": [{"content": row["familiarity"]}] if row["familiarity"] else [],
-            "contacts": json.loads(row["contacts"] or "[]"),
+            "contacts": await identity.get_contacts(conn, identity.CHARACTER, uuid),
             "relationships_with_default": [{"type": row["relationship"]}] if row["relationship"] else [],
             "allow_conversation": bool(row["allow_conversation"]),
             "affinity_events": json.loads(row["affinity_events"] or "[]"),
@@ -318,7 +289,8 @@ class CharacterOperations:
 
         conn = await self.db._ensure_connection()
         table = "characters" if search_type == "character" else "groups"
-        cur = await conn.execute(f"SELECT uuid, name, vector FROM {table} WHERE is_vectorized=1")
+        entity_type = identity.CHARACTER if search_type == "character" else identity.GROUP
+        cur = await conn.execute(f"SELECT uuid, vector FROM {table} WHERE is_vectorized=1")
         rows = await cur.fetchall()
 
         results = []
@@ -331,7 +303,7 @@ class CharacterOperations:
                 sim = cosine_similarity(query_vector, vec)
                 results.append({
                     "uuid": r["uuid"],
-                    "name": r["name"],
+                    "name": await identity.get_primary_name(conn, entity_type, r["uuid"]),
                     "similarity": sim,
                     "entity_type": search_type,
                 })

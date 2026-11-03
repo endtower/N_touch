@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -28,7 +29,6 @@ from brain.amy.constants import EvaluationAct, FinalEvaluationAct, TaskResultAct
 from brain.amy.emotional_interface import EmotionalInterface, reset_emotional_interface
 from brain.hc.database.bequest import BequestOperations
 from brain.hc.maintenance import MaintenanceService
-from brain.base.common_ways.tool_task import ToolTask
 from brain.pfc.pfca.pfca_tools import PFCA_tool_manager
 from brain.pfc.reflection.reflection_tools import Reflection_tool_manager
 from brain.chat.conversation.conversation_tool_manager import ConversationToolManager
@@ -61,16 +61,10 @@ class CriticalActionChecks(unittest.IsolatedAsyncioTestCase):
 
     def args(self, action):
         return dict(action=action, title="本轮行动", reason="明确的实际原因", plan="针对问题的实施打算",
-                    next_occurrence="2030-01-01T12:00:00", notify_master="私聊说明问题与维护时间",
+                    notify_master="私聊说明问题与维护时间",
                     verification="观察新方式的实际结果", event="引发不满的事件", target="具体对象", expectation="改善相处方式")
 
-    async def quest(self, title, context, when):
-        await self.conn.execute("INSERT INTO tasks(task_id,title,context,next_occurrence) VALUES(?,?,?,?)",
-                                ("new-task", title, context, when))
-        await self.conn.commit()
-        return {"created_tasks": [{"task_id": "new-task", "title": title}]}
-
-    async def test_four_states_only_reset_corresponding_axis_and_register_real_tasks(self):
+    async def test_four_states_only_reset_corresponding_axis_and_register_immediate_tasks(self):
         for action, values, expected in (
             ("申请维护", (100, 55), (50, 55)), ("尝试自修复", (0, 55), (50, 55)),
             ("情绪宣泄", (65, 0), (65, 50)), ("发布关系改进任务", (65, 100), (65, 50)),
@@ -79,24 +73,33 @@ class CriticalActionChecks(unittest.IsolatedAsyncioTestCase):
                 self.values(*values)
                 await self.conn.execute("DELETE FROM tasks")
                 await self.conn.commit()
-                with patch.object(ToolTask, "_run_quest_request", AsyncMock(side_effect=self.quest)) as quest:
-                    result = await self.service.register(**self.args(action))
-                    self.assertEqual(result["status"], "registered")
-                    self.assertEqual(quest.await_count, int(action != "申请维护"))
+                before = datetime.now()
+                result = await self.service.register(**self.args(action))
+                self.assertEqual(result["status"], "registered")
+                rows = await (await self.conn.execute("SELECT * FROM tasks")).fetchall()
+                if action == "申请维护":
+                    self.assertEqual(rows, [])
+                else:
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0]["kind"], "onetime")
+                    self.assertLessEqual(datetime.fromisoformat(rows[0]["next_occurrence"]), before)
+                    self.assertEqual(result["task_ids"], [rows[0]["task_id"]])
+                    self.assertIn("目的：", rows[0]["context"])
+                    self.assertIn("要做：", rows[0]["context"])
                 state = self.feedback.snapshot()
                 self.assertEqual((state["competence_value"], state["value"]), expected)
                 self.assertEqual(state["history"][-1]["label"], "临界行动已登记")
 
-    async def test_boundaries_and_failed_task_do_not_reset(self):
+    async def test_boundaries_and_missing_fields_do_not_reset(self):
         self.values(20, 99)
         for action in actionmod.ACTION_STATES:
             with self.assertRaises(ValueError):
                 await self.service.register(**self.args(action))
         self.values(0, 55)
-        with patch.object(ToolTask, "_run_quest_request", AsyncMock(return_value={"created_tasks": []})):
-            result = await self.service.register(**self.args("尝试自修复"))
-        self.assertEqual(result["status"], "not_registered")
+        with self.assertRaises(ValueError):
+            await self.service.register(**{**self.args("尝试自修复"), "verification": "  "})
         self.assertEqual(self.feedback.snapshot()["competence_value"], 0)
+        self.assertEqual((await (await self.conn.execute("SELECT COUNT(*) AS n FROM tasks")).fetchone())["n"], 0)
 
     async def test_reason_batch_moves_into_request_then_new_reasons_stay_pending(self):
         for source in ("conversation", "social_chat"):

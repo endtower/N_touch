@@ -1,0 +1,11 @@
+{
+  "format": "source-v1",
+  "notes": "修复新装用户向量比对缺少 numpy 报错、首次安装后人格 'normal' 不存在、通讯录不随新消息即时刷新；发布 runtime 不再静默漏装缺清单的依赖（如 aiosqlite）。模型接入面板新增连通性测试接口。",
+  "breaking_changes": [
+    "沿用 0.4.0 的 source-v1 目录结构与安装边界，无新增破坏性变更。",
+    "检测到相对官方安装基线的程序修改时仍会阻止覆盖，请先在副本中合并修改。"
+  ],
+  "data_policy": "compatible",
+  "migration_notes": "本版本未新增数据库结构迁移；程序回退不需要回退用户数据。",
+  "requires": { "manager": "0.10.0", "launcher": "0.7.0" }
+}

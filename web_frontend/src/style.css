@@ -332,6 +332,22 @@ button {
   line-height: 1.4;
 }
 
+/* 平台标记：同一个人/群在不同平台是不同会话，标清来源避免看成重复 */
+.plat-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.plat-badge.plat-qq { color: #1677ff; }
+.plat-badge.plat-wechat { color: #2fb344; }
+.plat-badge.plat-web { color: var(--tag-warning, #e6a23c); }
+
 .session-delete {
   flex: 0 0 auto;
   background: transparent;

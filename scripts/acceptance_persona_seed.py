@@ -1,10 +1,11 @@
 """人格播种验收：全新数据目录（无人格文件）自动播种空 common，且不放松坏文件契约。
 
-四条断言：
+五条断言：
 1. 空目录 → 自动播种且只播种一个 common.json（正文留空给用户写）；
 2. 空目录 → DEFAULT_PERSONA_MODE 回落到 common，取默认人格不再 KeyError；
 3. 已有 common + normal → 不播种、DEFAULT 仍为 normal、原文件字节不变；
-4. 文件已存在但内容坏（缺字段 / 缺基本人格）→ 照旧崩溃阻断。
+4. 空目录 → 可入参人格（selectable）含 common，内荐清单仍排除它；
+5. 文件已存在但内容坏（缺字段 / 缺基本人格）→ 照旧崩溃阻断。
 """
 
 import importlib.util
@@ -68,6 +69,16 @@ class PersonaSeedTests(unittest.TestCase):
         self.assertEqual(module.DEFAULT_PERSONA_MODE, "normal")
         self.assertEqual(len(list(self.dir.glob("*.json"))), 2)   # 未额外播种
         self.assertEqual((self.dir / "common.json").read_bytes(), before)
+
+    def test_empty_dir_selectable_contains_common(self):
+        """全新安装只有 common：它既是默认人格，也必须能通过工具入参校验。"""
+        module = _load_registry(self.root, "persona_seed_selectable")
+        selectable = [p.persona_name for p in module.list_selectable_personas()]
+        self.assertEqual(selectable, ["common"])                  # 校验范围含基本人格
+        self.assertEqual(module.list_roster_personas(), [])       # 内荐清单仍排除它
+        roster_text = module.render_persona_roster()
+        self.assertNotIn("你具有以下人格。", roster_text)          # 不输出空壳标题
+        self.assertIn("common", roster_text)                      # 明确说明只有基本人格
 
     def test_broken_file_still_crashes(self):
         _write_persona(self.dir, "common")                 # 缺 scene / kernel_prompt

@@ -40,7 +40,7 @@ def web_dist() -> Path:
     """前端活资源目录（web_frontend/dist）。
 
     前端始终是活资源、不随 exe 打包（2026-10-15）：源码运行 = 仓库根；
-    冻结运行 = 数据根（`dist/Abyss/abyss-data-dir.txt` 指向项目根）。
+    冻结运行 = 数据根（`常用版本/abyss-data-dir.txt` 指向项目根）。
     因此 `npm run build` 后刷新页面即生效，无需重打包、无需复制。
     """
     managed = app_root() / "components" / "core" / "source" / "web_frontend" / "dist"

@@ -14,7 +14,7 @@ import socket
 import subprocess
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from paths import app_root, data_root, is_frozen, log_root
@@ -126,6 +126,10 @@ class ProcSpec:
     desc: str = ""
     dependencies: tuple[str, ...] = ()
     startup_timeout: float = 0  # 0 使用管理器默认；发行版冷启动允许证书/杀毒扫描完成。
+    health_headers: dict = field(default_factory=dict)  # 健康检查附带的请求头（桥接需鉴权）
+    # 允许外部实例满足就绪：为 True 时端口/健康在但进程不属于本服务也算「运行中」，
+    # 只显示状态、不接管也不终止别人的进程（Pi 隧道由手动脚本拉起时属于这种情况）。
+    external_ok: bool = False
 
 
 def build_specs() -> dict[str, ProcSpec]:
@@ -135,7 +139,7 @@ def build_specs() -> dict[str, ProcSpec]:
     ingress_port = api_port()
     if ingress_port in (web_port, onebot_port) or web_port == onebot_port:
         raise ValueError("Web、OneBot、接入 API 端口必须互不相同")
-    return {
+    specs = {
         "ingress": ProcSpec(
             name="ingress", cmd=ingress_cmd(), cwd=PROJECT_ROOT,
             out_log=LOG_DIR / "ingress.out.log",
@@ -165,7 +169,93 @@ def build_specs() -> dict[str, ProcSpec]:
             desc=f"SnowLuma（QQ 登录，WebUI :{snowluma_webui_port()}）",
             dependencies=("ingress",),
         ),
+        **({"tunnel": tunnel} if (tunnel := tunnel_spec()) is not None else {}),
     }
+    return specs
+
+
+# ============================================================
+# Pi 隧道（ssh -L 端口转发）
+# ============================================================
+
+TUNNEL_NAME = "tunnel"
+
+
+def bridge_env() -> dict:
+    """读 .env.dev 的桥接相关键；环境变量优先，与 ingress_config 的取值顺序一致。"""
+    from dotenv import dotenv_values
+    values = dict(dotenv_values(data_root() / ".env.dev"))
+    values.update(os.environ)
+    return values
+
+
+def bridge_local_target(base_url: str, default_port: int = 18770) -> tuple[str, int]:
+    """从 BRIDGE_BASE_URL 解析本地转发地址（隧道本地端）与端口。"""
+    from urllib.parse import urlsplit
+    try:
+        url = urlsplit(base_url or "")
+        host = url.hostname or "127.0.0.1"
+        port = url.port or default_port
+    except ValueError:
+        return "127.0.0.1", default_port
+    return host, port
+
+
+def ssh_exe() -> str:
+    """OpenSSH 客户端路径：优先系统目录，其次 PATH。"""
+    system = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "OpenSSH" / "ssh.exe"
+    if system.is_file():
+        return str(system)
+    found = shutil.which("ssh")
+    if found:
+        return found
+    raise RuntimeError("未找到 ssh 客户端：请启用 Windows 可选功能 OpenSSH 客户端")
+
+
+def tunnel_spec() -> ProcSpec | None:
+    """Pi 微信隧道：ssh -L 把本机端口转发到树莓派上的桥接 daemon。
+
+    未启用（BRIDGE_TUNNEL_ENABLED=false 或未填写主机）时返回 None，
+    总览里不会出现这一行。这里只负责拉起进程与探活；隧道里跑的协议与
+    微信驱动都在 Pi 上，管理服务不参与，也不需要知道。
+    """
+    values = bridge_env()
+    enabled = str(values.get("BRIDGE_TUNNEL_ENABLED") or "false").lower() in ("true", "1", "yes", "on")
+    host = (values.get("BRIDGE_TUNNEL_PI_HOST") or "").strip()
+    if not enabled or not host:
+        return None
+    user = (values.get("BRIDGE_TUNNEL_PI_USER") or "pi").strip()
+    key = (values.get("BRIDGE_TUNNEL_KEY_PATH") or "").strip()
+    if not key:
+        raise ValueError("启用 Pi 隧道前请填写 BRIDGE_TUNNEL_KEY_PATH")
+    key_path = Path(os.path.expandvars(key)).expanduser()
+    remote_port = int(values.get("BRIDGE_TUNNEL_REMOTE_PORT") or 8770)
+    local_host, local_port = bridge_local_target(values.get("BRIDGE_BASE_URL") or "")
+    command = [
+        ssh_exe(), "-N", "-T",
+        "-i", str(key_path),
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ConnectTimeout=8",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=2",
+        "-L", f"{local_host}:{local_port}:127.0.0.1:{remote_port}",
+        f"{user}@{host}",
+    ]
+    token = (values.get("BRIDGE_TOKEN") or "").strip()
+    return ProcSpec(
+        name=TUNNEL_NAME, cmd=command, cwd=PROJECT_ROOT,
+        out_log=LOG_DIR / "tunnel.out.log",
+        ports=[local_port],
+        # 端到端探活：隧道通 + Pi 上桥接 daemon 在跑 + 令牌匹配才算就绪。
+        health_url=f"http://{local_host}:{local_port}/health",
+        health_headers={"Authorization": f"Bearer {token}"} if token else {},
+        order=0,
+        desc=f"Pi 微信隧道（{host} → 本机 {local_port}）",
+        startup_timeout=20,
+        external_ok=True,
+    )
 
 
 # ============================================================
@@ -188,7 +278,8 @@ def health_ok(spec: ProcSpec) -> bool:
     if not spec.health_url:
         return spec_alive(spec)
     try:
-        with urllib.request.urlopen(spec.health_url, timeout=2) as resp:
+        request = urllib.request.Request(spec.health_url, headers=spec.health_headers or {})
+        with urllib.request.urlopen(request, timeout=2) as resp:
             return resp.status == 200
     except Exception:
         return False

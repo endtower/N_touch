@@ -73,7 +73,7 @@ class PFCA_tool_manager(ToolManager):
                             },
                             "persona_name": {
                                 "type": "string",
-                                "description": "可选，指定本段对话使用的人格名（如 normal / task / assistant）。不填则使用默认人格 normal。"
+                                "description": "可选，指定本段对话使用的人格名，只能填人格清单里已有的名字。不填则使用默认人格。"
                             }
                         },
                         "required": ["session_id", "purpose", "max_messages"]
@@ -103,7 +103,7 @@ class PFCA_tool_manager(ToolManager):
                             },
                             "persona_name": {
                                 "type": "string",
-                                "description": "可选，指定本段社交使用的人格名（如 normal / task / assistant）。不填则使用默认人格 normal。"
+                                "description": "可选，指定本段社交使用的人格名，只能填人格清单里已有的名字。不填则使用默认人格。"
                             }
                         },
                         "required": ["session_id", "purpose"]
@@ -780,14 +780,17 @@ class PFCA_tool_manager(ToolManager):
         """
         from brain.base.persona.persona_registry import (
             DEFAULT_PERSONA_MODE,
-            list_roster_personas,
+            list_selectable_personas,
         )
 
         key = (persona_name or "").strip()
         if not key:
             return DEFAULT_PERSONA_MODE
-        if key not in (p.persona_name for p in list_roster_personas()):
-            valid = "、".join(p.persona_name for p in list_roster_personas())
+        # 用 list_selectable 而非 roster：roster 排除了基本人格，
+        # 全新安装只有 common 时会把唯一合法人格也判为不存在。
+        selectable = list_selectable_personas()
+        if key not in (p.persona_name for p in selectable):
+            valid = "、".join(p.persona_name for p in selectable)
             raise ValueError(f"人格不存在: {key!r}。可用人格: {valid}。")
         return key
 

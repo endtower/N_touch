@@ -7,15 +7,22 @@ const emit = defineEmits<{
   'new-session': []
 }>()
 
-async function onDelete(sid: string, name: string, ev: Event) {
+function platformLabel(platform?: string): string {
+  if (platform === 'wechat') return '微信'
+  if (platform === 'web') return 'Web'
+  if (platform === 'qq') return 'QQ'
+  return ''
+}
+
+async function onDelete(sid: string, name: string, scope: string, ev: Event) {
   ev.stopPropagation()
   try {
     await ElMessageBox.confirm(
-      `删除会话「${name}」？仅删除 WebChannel 注册表里的会话配置，聊天历史会保留。`,
+      `删除会话「${name}」？会同时删除该会话的全部聊天记录，不可恢复。若它仍在接收消息，之后会重新出现。`,
       '确认',
       { type: 'warning' },
     )
-    chat.deleteSession(sid)
+    chat.deleteSession(sid, scope)
   } catch {
     /* 用户取消 */
   }
@@ -57,6 +64,7 @@ async function onDelete(sid: string, name: string, ev: Event) {
         <div class="session-info">
           <div class="session-name">{{ s.session_name || s.user_name }}</div>
           <div class="session-sub">
+            <span v-if="platformLabel(s.platform)" class="plat-badge" :class="'plat-' + (s.platform || 'qq')">{{ platformLabel(s.platform) }}</span>
             <span>{{ s.user_name }}</span>
             <span v-if="s.role" class="role-badge">{{ s.role }}</span>
           </div>
@@ -65,7 +73,7 @@ async function onDelete(sid: string, name: string, ev: Event) {
           class="session-delete"
           :disabled="!chat.state.connected"
           title="删除会话"
-          @click="onDelete(s.session_id, s.session_name || s.user_name, $event)"
+          @click="onDelete(s.session_id, s.session_name || s.user_name, s.scope, $event)"
         >
           <el-icon :size="12"><MoreFilled /></el-icon>
         </button>

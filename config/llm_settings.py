@@ -147,6 +147,7 @@ vision_config = VisionConfig()
 # key 为接入点 host 子串，value 为展示用提供商名；新增接入点只需在此追加一行。
 PROVIDER_LABELS = {
     "ark.cn-beijing.volces.com": "火山方舟",
+    "amr-link.open-design.ai": "open-design中转",
     "opencode.ai": "opencode",
     "api.commandcode.ai": "commandcode",
     "open.bigmodel.cn": "智谱GLM",

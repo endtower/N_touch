@@ -6,7 +6,9 @@ import {
   Refresh,
   Search,
   ChatLineRound,
+  Delete,
 } from '@element-plus/icons-vue'
+import { ElMessageBox } from 'element-plus'
 import type { WebSession, FileMessage } from '../types'
 import { chat } from '../stores/chat'
 import ResizableSplit from './ResizableSplit.vue'
@@ -66,6 +68,25 @@ function selectSession(s: WebSession) {
   selectedSession.value = s
   chat.loadSessionDebugMessages(s.scope, s.session_id, VIEW_LIMIT)
   splitRef.value?.closeOnNarrow()
+}
+
+async function onDeleteSession(s: WebSession, ev: Event) {
+  ev.stopPropagation()
+  const name = s.session_name || s.user_name || s.session_id
+  try {
+    await ElMessageBox.confirm(
+      `删除会话「${name}」？会同时删除该会话的全部聊天记录，不可恢复。若它仍在接收消息，之后会重新出现。`,
+      '确认',
+      { type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  if (selectedSession.value?.scope === s.scope && selectedSession.value?.session_id === s.session_id) {
+    selectedSession.value = null
+    chat.clearSessionDebugMessages()
+  }
+  chat.deleteSession(s.session_id, s.scope)
 }
 
 // =====================================================================
@@ -130,6 +151,17 @@ function scopeBadge(scope?: string): string {
 
 function scopeColor(scope?: string): string {
   return scope === 'group' ? 'var(--tag-success)' : 'var(--tag-info)'
+}
+
+function platformLabel(platform?: string): string {
+  if (platform === 'wechat') return '微信'
+  if (platform === 'web') return 'Web'
+  if (platform === 'qq') return 'QQ'
+  return ''
+}
+
+function platformClass(platform?: string): string {
+  return `plat-${platform || 'qq'}`
 }
 
 // =====================================================================
@@ -215,7 +247,7 @@ watch(() => props.visible, (v) => {
           <div class="schat-empty-sub">当前 scope / 搜索条件下无结果</div>
         </div>
         <div v-else class="schat-list-items">
-          <button
+          <div
             v-for="s in filteredSessions"
             :key="s.scope + '-' + s.session_id"
             class="schat-item"
@@ -227,6 +259,7 @@ watch(() => props.visible, (v) => {
               <div class="schat-item-label">
                 <span class="schat-item-name">{{ s.session_name || s.user_name || s.session_id }}</span>
                 <span class="schat-scope-badge" :style="{ color: scopeColor(s.scope) }">{{ scopeBadge(s.scope) }}</span>
+                <span class="schat-plat-badge" :class="platformClass(s.platform)">{{ platformLabel(s.platform) }}</span>
               </div>
               <div class="schat-item-sub">
                 {{ s.user_name }}<template v-if="s.user_id && s.user_id !== s.user_name">（{{ s.user_id }}）</template>
@@ -236,7 +269,15 @@ watch(() => props.visible, (v) => {
                 <span class="schat-item-id">id={{ s.session_id }}</span>
               </div>
             </div>
-          </button>
+            <button
+              type="button"
+              class="schat-item-del"
+              title="删除会话"
+              @click.stop="onDeleteSession(s, $event)"
+            >
+              <el-icon :size="12"><Delete /></el-icon>
+            </button>
+          </div>
         </div>
       </aside>
       </template>
@@ -253,6 +294,7 @@ watch(() => props.visible, (v) => {
         <template v-else>
           <div class="schat-msg-head">
             <span class="schat-msg-scope" :style="{ background: scopeColor(selectedSession.scope) }">{{ scopeBadge(selectedSession.scope) }}</span>
+            <span class="schat-plat-badge" :class="platformClass(selectedSession.platform)">{{ platformLabel(selectedSession.platform) }}</span>
             <span class="schat-msg-name">{{ selectedSession.session_name || selectedSession.user_name }}</span>
             <span class="schat-msg-count">共 {{ messageTotal }} 条 · 显示最新 {{ messageCount }} 条</span>
             <span v-if="selectedMessagesError" class="schat-msg-error">{{ selectedMessagesError }}</span>
@@ -422,6 +464,24 @@ watch(() => props.visible, (v) => {
   background: var(--accent-soft);
   border-color: var(--accent);
 }
+.schat-item-del {
+  flex: 0 0 auto;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.schat-item:hover .schat-item-del { opacity: 1; }
+.schat-item-del:hover { color: var(--danger); background: var(--bg-subtle); }
 .schat-item-dot {
   width: 9px;
   height: 9px;
@@ -458,6 +518,19 @@ watch(() => props.visible, (v) => {
   flex-shrink: 0;
   white-space: nowrap;
 }
+.schat-plat-badge {
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+  white-space: nowrap;
+  padding: 0 5px;
+  border-radius: 4px;
+  line-height: 15px;
+  border: 1px solid currentColor;
+}
+.schat-plat-badge.plat-wechat { color: #2fb344; }
+.schat-plat-badge.plat-qq { color: #1677ff; }
+.schat-plat-badge.plat-web { color: var(--tag-warning, #e6a23c); }
 .schat-item-sub {
   font-size: 11.5px;
   color: var(--text-3);

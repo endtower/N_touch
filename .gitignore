@@ -76,7 +76,10 @@ docs/build/
 gitlab-ci.yml
 .travis.yml
 Jenkinsfile
-.github/
+# 允许 GitHub Actions 工作流入库（发布构建在 CI 上跑）；其余 .github 内容仍忽略
+.github/*
+!.github/workflows/
+!.github/workflows/*.yml
 
 # ==================================================
 # Sanitized-project additions: exclude personal data
@@ -156,6 +159,12 @@ brain/base/persona/history/
 
 # 运行时备份（含 memory.db / chat_history.db / 私聊笔记快照）
 backups/
+# 数据库就地迁移留下的一次性备份（含身份/聊天原始数据）
+memory/*.bak*
+*.db.bak*
+
+# 界面设计参考图与本地素材（仅个人比对用，不属于程序源码）
+reference/
 
 # LLM 速度基准脚本（源码含 API Key）
 scripts/benchmark_llm_speed.py
@@ -200,3 +209,7 @@ updater-tests/obj/
 manager/update_sources.json
 manager/updates/
 .versions/
+
+# 日常运行目录（自包含发布产物：EXE、运行时、组件安装副本，约 500MB，不入库）
+常用版本/
+dist/Abyss/

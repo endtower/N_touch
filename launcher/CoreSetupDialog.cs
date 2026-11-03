@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 
 namespace AbyssLauncher;
 
@@ -34,6 +35,7 @@ public sealed class CoreSetupDialog : Window
         var model = Input("模型名称", Text(values, "LLM_FLASH", Text(defaults, "model", "")));
         panel.Children.Add(new TextBlock { Text = "API Key（已有配置时留空保留）", Margin = new Thickness(0, 8, 0, 4) });
         var key = new PasswordBox { Padding = new Thickness(6) }; panel.Children.Add(key);
+        EnablePaste(key);
         var error = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
         error.SetResourceReference(ForegroundProperty, "BrushAccent"); panel.Children.Add(error);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 16, 0, 0) };
@@ -53,5 +55,37 @@ public sealed class CoreSetupDialog : Window
         };
         buttons.Children.Add(cancel); buttons.Children.Add(save); panel.Children.Add(buttons);
         Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+    }
+
+    /// <summary>让密码框支持 Ctrl+V 与右键「粘贴」：整段覆盖，避免残留旧字符。</summary>
+    private static void EnablePaste(PasswordBox box)
+    {
+        static string? ReadClipboard()
+        {
+            if (!Clipboard.ContainsText()) return null;
+            // 从文档里复制的内容常带换行与首尾空白；API Key 不能带这些字符
+            var text = Clipboard.GetText().Replace("\r", "").Replace("\n", "").Trim();
+            return text.Length == 0 ? null : text;
+        }
+
+        void Paste()
+        {
+            var text = ReadClipboard();
+            if (text is not null) box.Password = text;
+        }
+
+        var menu = new ContextMenu();
+        var item = new MenuItem { Header = "粘贴" };
+        item.Click += (_, _) => Paste();
+        menu.Items.Add(item);
+        box.ContextMenu = menu;
+        box.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.V && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+            {
+                Paste();
+                e.Handled = true;
+            }
+        };
     }
 }

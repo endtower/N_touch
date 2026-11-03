@@ -13,6 +13,7 @@
 """
 
 import json
+import re
 from typing import List, Dict, Any, Optional
 
 from brain.base.light_agent.lightweight_agent import LightweightAgent
@@ -23,6 +24,7 @@ from brain.hc.database.task import (
     TaskOperations,
     TASK_STATUS_ACTIVE,
     TASK_STATUS_EXPIRED,
+    TASK_CONTEXT_MAX_CHARS,
 )
 
 logger = get_logger(__name__, "DEBUG")
@@ -36,6 +38,19 @@ class QuestAgent(LightweightAgent):
 
     # 一次调用内允许的最大轮次；用尽仍未 finish 视为失控，直接崩溃阻断。
     MAX_ROUNDS = 8
+
+    # 上下文是启动单，不是过程存档：固定格式里「目的」「要做」缺一不可。
+    CONTEXT_REQUIRED_FIELDS = ("目的", "要做")
+    CONTEXT_TEMPLATE = (
+        "目的：为什么做、要达成什么（一句话，必填）\n"
+        "要做：下次启动第一步的具体动作（一句话，必填）\n"
+        "对象：人物 / 群 / 会话标识（可选）\n"
+        "依据：仍有效的事实，最多两条（可选）\n"
+        "兜底：到点无人回应时的具体推进动作（可选）"
+    )
+
+    # 事项编号、合并账、32 位十六进制内部编号：系统已记录，写进上下文只是噪音。
+    _META_ID_PATTERNS = (re.compile(r"Task_\d{8,}"), re.compile(r"\b[0-9a-f]{32}\b"))
 
     # ===================== 记录写入级工具（私有） =====================
     @classmethod
@@ -60,10 +75,15 @@ class QuestAgent(LightweightAgent):
                         "context": {
                             "type": "string",
                             "description": (
-                                "要传递给下次启动时的上下文：这条事项的目的、"
-                                "已确认进展、人物与会话标识、材料线索、下次要处理什么。"
-                                "须写到点无人回应也能推进的兜底动作，"
-                                "禁止写「无人回应就什么都不做 / 到此为止」这类终止条件。"
+                                "下次启动用的启动单，按固定格式逐行写：\n"
+                                "目的：为什么做、要达成什么（必填）\n"
+                                "要做：下次启动第一步的具体动作（必填）\n"
+                                "对象：人物/群/会话标识（可选）\n"
+                                "依据：仍有效的事实，最多两条（可选）\n"
+                                "兜底：到点无人回应时的具体推进动作（可选）\n"
+                                f"总字数不超过 {TASK_CONTEXT_MAX_CHARS}；"
+                                "禁止写事项编号、合并账、来源说明、历次沿革、已办完的过程，"
+                                "也禁止写「无人回应就什么都不做 / 到此为止」这类零动作终止条件。"
                             ),
                         },
                         "next_occurrence": {
@@ -115,10 +135,11 @@ class QuestAgent(LightweightAgent):
                         "context": {
                             "type": "string",
                             "description": (
-                                "可选，改写后的完整上下文：把该事项原有的目的 / 已确认进展与"
-                                "本次笔记整合成一份新的上下文，供下次启动时使用。"
-                                "不要原样附加而要与原文合并重写；仅改期时省略，保留原文。"
-                                "合并后仍须满足 create_task 的上下文要求（禁止零动作终止条件）。"
+                                "可选，改写后的完整启动单：按 create_task 的五段格式整版重写，"
+                                "把仍有效的目的、动作与事实连同本次笔记归并进来。"
+                                f"不超过 {TASK_CONTEXT_MAX_CHARS} 字；"
+                                "禁止在原文后面追加，禁止写事项编号、合并账与过程沿革。"
+                                "仅改期时省略，保留原文。"
                             ),
                         },
                         "next_occurrence": {
@@ -235,25 +256,31 @@ class QuestAgent(LightweightAgent):
         ]
 
     def get_system_prompt(self) -> str:
-        return """
+        return f"""
 【职责】
-你负责三件事，可以分多轮推进：
-一、判断调用方给出的这条事项是否与已有待接续事项重复。
-- 不重复：调用 create_task 登记。
-- 同一事项有新时间或新进展：调用 update_task 改写原记录（原有关键线索与会话标识应保留）。
-- 同一事项时间和上下文都无变化：直接说明已有安排，不重复登记。
-- 调用方明确要求标记完成时（会点明编号）：调用 complete_task；仍有后续则另行 create_task。
-二、整理下方注入的【任务相关笔记】。
-- 描述某条已有事项的进展 / 线索 / 变化：调用 update_task，把上下文重写为「原文 + 该笔记」的整合结果。
-- 与任何事项无关、或只是无用碎片的笔记：不处理，直接丢弃。
-三、登记前先查重、先腾位置；容量与字段要求见各工具说明。
+只做一件事：把调用方给的事项写成一条「下次启动的启动单」。
+一、查重后登记或改写：
+- 与已有事项不重复：create_task 登记。
+- 同一件事有新时间或新进展：update_task 改写原记录。
+- 同一件事完全无变化：说明已有安排，不重复登记。
+- 调用方点明编号要求完成：complete_task；仍有后续则另行 create_task。
+二、整理下方注入的【任务相关笔记】：属于某条事项的进展或线索，用 update_task 并入；
+与任何事项无关、或只是无用碎片的，直接丢弃。
+三、待接续事项上限 5 条；满了先合并同类事项或提前完成旧事项，再登记。
 
-不做阶段拆分、不评价是否值得立项。只依据调用方给的事项与下方注入的【已有待接续事项】判断：
-标题相近不等于重复，要看上下文是否指向同一件待办；无法确定时简短说明判断依据。
-不要把「无变化 / 暂时不需要处理」误当成完成：只有事项确已办妥才标记完成。
+不评价是否值得立项，不做阶段拆分。标题相近不等于重复，要看是否指向同一件待办；
+无法确定时简短说明判断依据。只有事项确已办妥才标记完成。
+
+【上下文格式（必须照此逐行写，缺「目的」或「要做」会被驳回）】
+{self.CONTEXT_TEMPLATE}
+- 总字数不超过 {TASK_CONTEXT_MAX_CHARS}，超了会被驳回。
+- 只写下次启动还用得上的；过程经过、已办完的、已被本次取代的都不写。
+- 禁止写事项编号、合并账、来源说明、历次沿革，禁止在旧文后面追加。
+- 每次改写都整版重写成一版，不是过程存档。
+- 标题要写清具体做什么，不要只给「关系改进」这类空泛归类。
 
 【输出】
-落库成功后再说明处理了什么及下次唤醒时间；未成功落库不得声称已登记或已完成。
+落库成功后一句话说明处理了什么与下次唤醒时间；未成功落库不得声称已登记或已完成。
 工具报错时按其提示自行纠正后重试。
 全部办完后必须调用 finish 收尾，不调用则本次调用不算结束。
 """
@@ -311,6 +338,38 @@ class QuestAgent(LightweightAgent):
                 "换个对象或渠道去问），再登记。"
             )
 
+    @classmethod
+    def _validate_context(cls, context: str) -> None:
+        """校验启动单：零动作、长度、必填「目的 / 要做」、事项编号噪音。
+
+        上下文是下次启动时的启动单，不是过程存档：长度超限或缺少目的/要做都
+        直接驳回（抛 ValueError 回给 LLM 自纠），迫使按固定格式整版重写。
+        """
+        cls._reject_empty_action_context(context)
+        if not isinstance(context, str):
+            return
+        if len(context) > TASK_CONTEXT_MAX_CHARS:
+            raise ValueError(
+                f"上下文 {len(context)} 字，超过上限 {TASK_CONTEXT_MAX_CHARS} 字。"
+                "请按固定格式整版重写，删掉已办完的、已被本次取代的、只属于当时过程的内容：\n"
+                f"{cls.CONTEXT_TEMPLATE}"
+            )
+        missing = [name for name in cls.CONTEXT_REQUIRED_FIELDS
+                   if f"{name}：" not in context and f"{name}:" not in context]
+        if missing:
+            raise ValueError(
+                f"上下文缺少「{'」「'.join(missing)}」，没有说明目的或下一步动作。"
+                "必须按固定格式整版重写，每行一句话：\n"
+                f"{cls.CONTEXT_TEMPLATE}"
+            )
+        for pattern in cls._META_ID_PATTERNS:
+            hit = pattern.search(context)
+            if hit:
+                raise ValueError(
+                    f"上下文里不要写事项编号「{hit.group(0)}」。编号与合并关系系统已记录；"
+                    "只写目的、要做、对象、依据、兜底，按固定格式整版重写。"
+                )
+
     @staticmethod
     def _resolve_next_occurrence(next_occurrence: Optional[str]) -> str:
         """解析 next_occurrence 的「尽快」快捷语义。
@@ -359,7 +418,7 @@ class QuestAgent(LightweightAgent):
             )
         if kind == TASK_KIND_ONGOING:
             next_occurrence = ""
-        QuestAgent._reject_empty_action_context(context)
+        QuestAgent._validate_context(context)
 
         task_ops = TaskOperations()
         active_count = await task_ops.count_active_tasks()
@@ -406,7 +465,7 @@ class QuestAgent(LightweightAgent):
         if context is not None and not cleaned_context:
             raise ValueError("改写事项必须给出整合后的上下文；无内容可写时不要调用本工具。")
         if cleaned_context is not None:
-            QuestAgent._reject_empty_action_context(cleaned_context)
+            QuestAgent._validate_context(cleaned_context)
         resolved_when = QuestAgent._resolve_next_occurrence(next_occurrence) if next_occurrence else ""
         if cleaned_context is None and not resolved_when:
             raise ValueError("修改事项至少需要新的唤醒时间或整合后的上下文。")

@@ -64,9 +64,9 @@ def main():
     manager = output / "components/manager"
     package("manager", versions["manager"], manager, output / "packages", args.package_base_url,
             notes="Core 手动确认、源码组件安装、本地修改保护与更新备份。")
-    dotnet = ROOT / ".tools/dotnet/dotnet.exe"
+    dotnet = str(ROOT / ".tools" / "dotnet" / "dotnet.exe") if (ROOT / ".tools" / "dotnet" / "dotnet.exe").is_file() else "dotnet"
     helper = output / "updater"
-    subprocess.run([str(dotnet), "publish", str(ROOT / "updater/AbyssUpdater.csproj"), "-c", "Release", "-r", "win-x64",
+    subprocess.run([dotnet, "publish", str(ROOT / "updater/AbyssUpdater.csproj"), "-c", "Release", "-r", "win-x64",
                     "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true",
                     "-p:NuGetAudit=false", "-o", str(helper), "--nologo"], check=True, cwd=ROOT)
     defaults = {"auto_check": True, "core_distribution": "source-v1", "sources": {

@@ -6,8 +6,9 @@
 实现角色完整信息查询与更新。
 """
 
-import json
+from typing import Optional
 
+from . import entity_identity as identity
 from .character import CharacterOperations
 from .relationship import RelationshipOperations
 from .impression import get_impression
@@ -26,13 +27,31 @@ class CharacterCompose:
     def __init__(self):
         self.character_ops = CharacterOperations()
 
+    async def _resolve_character_uuid(self, kwargs) -> Optional[str]:
+        """优先用 uuid 定位角色，其次用名称。
+
+        uuid 是唯一可靠的定位方式：名称可能被大模型改动，且在「同名即同一人」
+        之外，也不该靠名字反查来决定往谁身上挂数据。
+        """
+        uuid = kwargs.get("uuid") or kwargs.get("character_id")
+        if uuid:
+            info = await self.character_ops.get_character_full_info(uuid)
+            if not info:
+                raise ValueError(f"角色 uuid={uuid} 不存在")
+            return uuid
+        return await self.character_ops.find_character_uuid(kwargs.get("name"))
+
     @handle_errors()
     async def character_operation(self, operation_type, **kwargs):
         """角色相关的复合操作方法。"""
         if operation_type == "create":
             name = kwargs["name"]
-            await self.character_ops.create_character_node(name)
-            character_uuid = await self.character_ops.find_character_uuid(name)
+            existing = await self.character_ops.find_character_uuid(name)
+            if existing:
+                # 同名即同一人：不重复建节点，直接把后续信息挂到既有实体上
+                character_uuid = existing
+            else:
+                character_uuid = await self.character_ops.create_character_node(name)
 
             if kwargs.get("impression"):
                 impression_instance = get_impression()
@@ -56,50 +75,51 @@ class CharacterCompose:
 
         elif operation_type == "add_alias":
             name, alias = kwargs["name"], kwargs["alias"]
-            character_uuid = await self.character_ops.find_character_uuid(name)
+            character_uuid = await self._resolve_character_uuid(kwargs)
             await self.character_ops.create_alias_node(alias, character_uuid)
             return {"status": "success", "message": f"为角色 {name} 添加别名 {alias} 成功"}
 
         elif operation_type == "add_impression":
             name, impression = kwargs["name"], kwargs["impression"]
-            character_uuid = await self.character_ops.find_character_uuid(name)
+            character_uuid = await self._resolve_character_uuid(kwargs)
             impression_instance = get_impression()
             impression_id = await impression_instance.create_impression(impression, character_uuid)
             return {"status": "success", "message": f"为角色 {name} 添加印象成功，印象ID: {impression_id}"}
 
         elif operation_type == "add_familiarity":
             name, familiarity = kwargs["name"], kwargs["familiarity"]
-            character_uuid = await self.character_ops.find_character_uuid(name)
+            character_uuid = await self._resolve_character_uuid(kwargs)
             familiarity_instance = get_familiarity()
             familiarity_id = await familiarity_instance.create_familiarity(familiarity, character_uuid)
             return {"status": "success", "message": f"为角色 {name} 设置熟悉程度成功，ID: {familiarity_id}"}
 
         elif operation_type == "add_contact":
             name, session_id = kwargs["name"], kwargs["session_id"]
-            character_uuid = await self.character_ops.find_character_uuid(name)
+            character_uuid = await self._resolve_character_uuid(kwargs)
             await self.character_ops.create_contact_node(session_id, character_uuid)
             return {"status": "success", "message": f"为角色 {name} 添加联系方式成功"}
 
         elif operation_type == "add_relationship":
             name, relation_type = kwargs["name"], kwargs["relation_type"]
-            character_uuid = await self.character_ops.find_character_uuid(name)
+            character_uuid = await self._resolve_character_uuid(kwargs)
             relationship_ops = RelationshipOperations()
             await relationship_ops.create_character_relationship(character_uuid, relation_type)
             return {"status": "success", "message": f"为角色 {name} 添加关系成功"}
 
         elif operation_type == "add_self_relationship":
             name, relation_type = kwargs["name"], kwargs["relation_type"]
-            character_uuid = await self.character_ops.find_character_uuid(name)
+            character_uuid = await self._resolve_character_uuid(kwargs)
             relationship_ops = RelationshipOperations()
             await relationship_ops.create_character_relationship(character_uuid, relation_type)
             return {"status": "success", "message": f"为角色 {name} 添加与自己的关系成功"}
 
         elif operation_type == "overwrite":
-            name = kwargs["name"]
-            character_uuid = await self.character_ops.find_character_uuid(name)
+            name = kwargs.get("name")
+            character_uuid = await self._resolve_character_uuid(kwargs)
             if not character_uuid:
-                await self.character_ops.create_character_node(name)
-                character_uuid = await self.character_ops.find_character_uuid(name)
+                if not name:
+                    raise ValueError("覆盖角色信息需要提供 name 或 character_id")
+                character_uuid = await self.character_ops.create_character_node(name)
 
             impression_instance = get_impression()
             if kwargs.get("impression"):
@@ -119,15 +139,18 @@ class CharacterCompose:
                     if session_id:
                         await self.character_ops.create_contact_node(session_id, character_uuid)
 
-            return {"status": "success", "message": f"角色 {name} 信息覆盖成功"}
+            return {"status": "success", "message": f"角色 {name or character_uuid} 信息覆盖成功"}
 
         else:
             raise ValueError(f"不支持的操作类型: {operation_type}")
 
     @handle_errors()
-    async def modify_character_info(self, character_name, field_type, operation_type, old_value, new_value=None):
-        """修改或删除角色信息，包括关系。"""
-        character_uuid = await self.character_ops.find_character_uuid(character_name)
+    async def modify_character_info(self, character_name, field_type, operation_type, old_value,
+                                    new_value=None):
+        """修改或删除角色信息，包括关系。character_name 需能唯一定位到角色。"""
+        character_uuid = await self._resolve_character_uuid({"name": character_name})
+        if not character_uuid:
+            raise ValueError(f"未找到名称为 {character_name} 的角色")
         relationship_ops = RelationshipOperations()
 
         if field_type == "alias":
@@ -196,51 +219,35 @@ class CharacterCompose:
     # ============================================================
 
     async def _modify_alias(self, uuid: str, old_value: str, new_value: str) -> None:
+        """把旧别名改成新名字；旧名不存在则忽略，新名被占用则抛错。"""
         conn = await self.character_ops.db._ensure_connection()
-        cur = await conn.execute("SELECT aliases FROM characters WHERE uuid=?", (uuid,))
-        row = await cur.fetchone()
-        if row is None:
+        names = await identity.get_names(conn, identity.CHARACTER, uuid)
+        if old_value not in names:
             return
-        aliases = json.loads(row["aliases"] or "[]")
-        if old_value in aliases:
-            aliases[aliases.index(old_value)] = new_value
-        await conn.execute("UPDATE characters SET aliases=? WHERE uuid=?", (json.dumps(aliases, ensure_ascii=False), uuid))
+        renamed = [new_value if n == old_value else n for n in names]
+        await identity.replace_names(conn, identity.CHARACTER, uuid, renamed)
         await conn.commit()
 
     async def _delete_alias(self, uuid: str, old_value: str) -> None:
-        conn = await self.character_ops.db._ensure_connection()
-        cur = await conn.execute("SELECT aliases FROM characters WHERE uuid=?", (uuid,))
-        row = await cur.fetchone()
-        if row is None:
+        """删除别名；主名不可删（要改主名用 _modify_alias）。"""
+        if not old_value:
             return
-        aliases = json.loads(row["aliases"] or "[]")
-        if old_value in aliases:
-            aliases.remove(old_value)
-        await conn.execute("UPDATE characters SET aliases=? WHERE uuid=?", (json.dumps(aliases, ensure_ascii=False), uuid))
+        conn = await self.character_ops.db._ensure_connection()
+        names = await identity.get_names(conn, identity.CHARACTER, uuid)
+        if not names or names[0] == old_value:
+            logger.info("[modify_character_info] 角色 %s 的主名「%s」不可删除，已忽略", uuid, old_value)
+            return
+        await identity.delete_name(conn, identity.CHARACTER, uuid, old_value)
         await conn.commit()
 
     async def _modify_contact(self, uuid: str, old_value: str, new_value: str) -> None:
         conn = await self.character_ops.db._ensure_connection()
-        cur = await conn.execute("SELECT contacts FROM characters WHERE uuid=?", (uuid,))
-        row = await cur.fetchone()
-        if row is None:
-            return
-        contacts = json.loads(row["contacts"] or "[]")
-        for c in contacts:
-            if c.get("session_id") == old_value:
-                c["session_id"] = new_value
-        await conn.execute("UPDATE characters SET contacts=? WHERE uuid=?", (json.dumps(contacts, ensure_ascii=False), uuid))
+        await identity.move_contact(conn, identity.CHARACTER, uuid, old_value, new_value)
         await conn.commit()
 
     async def _delete_contact(self, uuid: str, old_value: str) -> None:
         conn = await self.character_ops.db._ensure_connection()
-        cur = await conn.execute("SELECT contacts FROM characters WHERE uuid=?", (uuid,))
-        row = await cur.fetchone()
-        if row is None:
-            return
-        contacts = json.loads(row["contacts"] or "[]")
-        contacts = [c for c in contacts if c.get("session_id") != old_value]
-        await conn.execute("UPDATE characters SET contacts=? WHERE uuid=?", (json.dumps(contacts, ensure_ascii=False), uuid))
+        await identity.delete_contact(conn, identity.CHARACTER, uuid, old_value)
         await conn.commit()
 
     async def _clear_impression(self, uuid: str) -> None:
@@ -397,43 +404,31 @@ class CharacterCompose:
             logger.warning(f"[first_session_impression_search] 写入默认熟悉程度失败: {e}")
 
     async def _ensure_name_alias(self, entity_uuid: str, name: str, is_group: bool) -> None:
-        """确保 name 出现在实体的别名集合中。"""
+        """确保 name 出现在实体的名称集合中。
+
+        名称归另一实体所有时不追加：会话与实体的绑定关系已经建立，名称唯一约束
+        不该反过来把已成立的绑定推翻。冲突只记录，由大模型在改记忆时自行归并。
+        """
         if not entity_uuid or not name:
             return
-        if is_group:
-            from .group import GroupOperations
-            group_ops = GroupOperations()
-            info = await group_ops.get_group_with_details(entity_uuid)
-            aliases = info.get("aliases", []) if info else []
-            if any(a.get("name") == name for a in aliases):
-                return
-            if info and info.get("name") == name:
-                return
-            await group_ops.create_alias_node(name, entity_uuid)
-        else:
-            info = await self.character_ops.get_character_full_info(entity_uuid)
-            aliases = info.get("aliases", []) if info else []
-            if any(a.get("name") == name for a in aliases):
-                return
-            if info and info.get("name") == name:
-                return
-            await self.character_ops.create_alias_node(name, entity_uuid)
+        conn = await self.character_ops.db._ensure_connection()
+        entity_type = identity.GROUP if is_group else identity.CHARACTER
+        names = await identity.get_names(conn, entity_type, entity_uuid)
+        if name in names:
+            return
+        owner = await identity.find_entity_by_name(conn, entity_type, name)
+        if owner and owner != entity_uuid:
+            logger.warning(
+                "[first_session_impression_search] 名称「%s」已属于 %s，"
+                "会话已绑定 %s，跳过别名追加", name, owner, entity_uuid,
+            )
+            return
+        await identity.add_name(conn, entity_type, entity_uuid, name)
+        await conn.commit()
 
     async def _find_group_by_name(self, name):
-        """根据名称查找群组 UUID。"""
-        from .group import GroupOperations
-        group_ops = GroupOperations()
-        conn = await group_ops.db._ensure_connection()
-        cur = await conn.execute("SELECT uuid, name, aliases FROM groups")
-        rows = await cur.fetchall()
-        matches = []
-        for r in rows:
-            if r["name"] == name:
-                matches.append(r["uuid"])
-                continue
-            aliases = json.loads(r["aliases"] or "[]")
-            if name in aliases:
-                matches.append(r["uuid"])
-        if len(matches) > 1:
-            raise ValueError(f"找到多个匹配的群组，名称: {name}")
-        return matches[0] if matches else None
+        """根据名称查找群组 UUID（同类型内唯一，不会多匹配）。"""
+        if not name:
+            return None
+        conn = await self.character_ops.db._ensure_connection()
+        return await identity.find_entity_by_name(conn, identity.GROUP, name)

@@ -56,9 +56,9 @@ public sealed class ConnectionCatalog
                 throw new InvalidDataException("连接标识为空或重复");
             if (string.IsNullOrWhiteSpace(entry.Name))
                 throw new InvalidDataException("请填写连接名称");
-            if (entry.ManagedTarget is not ("" or "snowluma"))
+            if (entry.ManagedTarget is not ("" or "snowluma" or "tunnel"))
                 throw new InvalidDataException("未知的本机受管接入器");
-            if (entry.Url.Length == 0 && entry.ManagedTarget == "snowluma") continue;
+            if (entry.Url.Length == 0 && entry.ManagedTarget.Length > 0) continue;
             if (!Uri.TryCreate(entry.Url, UriKind.Absolute, out var uri)
                 || uri.Scheme is not ("http" or "https") || string.IsNullOrEmpty(uri.Host))
                 throw new InvalidDataException("控制页地址应为完整的 http:// 或 https:// 地址");

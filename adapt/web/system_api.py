@@ -302,6 +302,80 @@ async def handle_config_put(request: web.Request) -> web.Response:
     return await _proxy(await _service_call("PUT", "/v1/config/core", body))
 
 
+# ============================================================
+# 模型连通性测试（网页「模型接入」面板用）
+# ============================================================
+
+def _saved_llm_key(group: str) -> str:
+    """取该配置组已保存的 API Key（前端不回显密钥，测试时由服务端补上）。
+
+    回退顺序与运行时一致：专属接入点为空则用主力接入点；向量组走 VectorConfig。
+    """
+    from config.llm_settings import LLMSettings
+
+    if group == "embed":
+        from config.settings import VectorConfig
+        return VectorConfig.API_KEY
+    if group == "conversation":
+        return LLMSettings.CONVERSATION_API_KEY or LLMSettings.FLASH_API_KEY or LLMSettings.API_KEY
+    if group == "persona":
+        return LLMSettings.PERSONA_API_KEY or LLMSettings.FLASH_API_KEY or LLMSettings.API_KEY
+    if group == "vision":
+        return LLMSettings.VISION_API_KEY or LLMSettings.FLASH_API_KEY or LLMSettings.API_KEY
+    return LLMSettings.FLASH_API_KEY or LLMSettings.API_KEY
+
+
+async def handle_config_test(request: web.Request) -> web.Response:
+    """用当前填写（未保存也可）的地址/模型/Key 发一次最小请求，验证能否连通。
+
+    成功返回 {ok: true, message}，失败返回 {ok: false, message}：
+    这是诊断接口，失败要变成可读提示，不能把页面打成 500。
+    """
+    if not _authorized(request):
+        return _denied()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+    group = str(body.get("group") or "common").strip()
+    base_url = str(body.get("base_url") or "").strip()
+    model = str(body.get("model") or "").strip()
+    api_key = str(body.get("api_key") or "").strip() or _saved_llm_key(group)
+    if not base_url or not model:
+        return web.json_response({"ok": False, "message": "请先填写 API 地址与模型名称"})
+    if not api_key:
+        return web.json_response({"ok": False, "message": "未填写 API Key（未保存过密钥）"})
+
+    started = time.perf_counter()
+    try:
+        if group == "embed":
+            from brain.hc.database.embedding_service import EmbeddingService
+            service = EmbeddingService(api_key, base_url, model)
+            vector = await asyncio.wait_for(service.generate_embedding("连接测试"), timeout=20)
+            message = f"嵌入成功 · {len(vector)} 维"
+        else:
+            from utils.llm_client_manager import LLMClient
+            client = LLMClient(api_key=api_key, base_url=base_url,
+                               extra_headers={"User-Agent": "N-Touch/1.0"})
+            response = await asyncio.wait_for(
+                client.chat(
+                    model=model,
+                    messages=[{"role": "user", "content": "连接测试，只回复 ok"}],
+                    max_tokens=8,
+                ),
+                timeout=20,
+            )
+            reply = (response.choices[0].message.content or "").strip()
+            message = f"模型已响应 · {model}" + (f"：{reply[:20]}" if reply else "")
+    except asyncio.TimeoutError:
+        return web.json_response({"ok": False, "message": "连接超时（20 秒）"})
+    except Exception as exc:
+        return web.json_response({"ok": False,
+                                  "message": f"{type(exc).__name__}: {str(exc)[:200]}"})
+    elapsed = round((time.perf_counter() - started) * 1000)
+    return web.json_response({"ok": True, "message": f"{message}（{elapsed} ms）"})
+
+
 async def handle_connections(request: web.Request) -> web.Response:
     if not _authorized(request):
         return _denied()

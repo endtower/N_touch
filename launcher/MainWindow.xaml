@@ -251,6 +251,8 @@
                                          Tag="snowluma" Content="SnowLuma" Click="LogTab_Click"/>
                             <RadioButton x:Name="LogTabIngress" GroupName="LogSource" Style="{StaticResource SegmentedTab}"
                                          Tag="ingress" Content="消息接入" Click="LogTab_Click"/>
+                            <RadioButton x:Name="LogTabTunnel" GroupName="LogSource" Style="{StaticResource SegmentedTab}"
+                                         Tag="tunnel" Content="Pi 隧道" Click="LogTab_Click"/>
                             <RadioButton x:Name="LogTabService" GroupName="LogSource" Style="{StaticResource SegmentedTab}"
                                          Tag="service" Content="管理服务" Click="LogTab_Click"/>
 
@@ -482,6 +484,43 @@
                                     </Border>
                                     <Border Height="1" Background="{DynamicResource BrushBorderSubtle}"/>
 
+                                    <!-- Pi 隧道：本机到树莓派的 ssh 转发，断了微信就发不出去 -->
+                                    <Border x:Name="TunnelRow" Style="{StaticResource ComponentRow}" Visibility="Collapsed">
+                                        <StackPanel>
+                                            <Grid Background="Transparent">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <Ellipse x:Name="TunnelDot" Width="8" Height="8" VerticalAlignment="Center"
+                                                         Fill="{DynamicResource BrushTextDisabled}"/>
+                                                <StackPanel Grid.Column="1" Margin="10,0,12,0" VerticalAlignment="Center">
+                                                    <TextBlock Text="Pi 隧道" Style="{StaticResource TextSection}"
+                                                               ToolTip="本机到树莓派的 ssh 转发；断开后微信收发会失效"/>
+                                                    <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                                                        <TextBlock x:Name="TunnelDetail" Text="—"
+                                                                   Style="{StaticResource TextValue}" VerticalAlignment="Center"
+                                                                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+                                                    </StackPanel>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"
+                                                            HorizontalAlignment="Right" MouseLeftButtonUp="RowActions_Click">
+                                                    <Button x:Name="TunnelStart" Tag="tunnel" Style="{StaticResource RowIconButton}"
+                                                            ToolTip="建立隧道" Click="TargetStart_Click">
+                                                        <TextBlock Style="{StaticResource RowGlyph}" Text="&#xE768;"/>
+                                                    </Button>
+                                                    <Button x:Name="TunnelStop" Tag="tunnel" Style="{StaticResource RowIconButton}"
+                                                            ToolTip="断开隧道" Click="TargetStop_Click">
+                                                        <TextBlock Style="{StaticResource RowGlyph}" Text="&#xE71A;"/>
+                                                    </Button>
+                                                </StackPanel>
+                                            </Grid>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border x:Name="TunnelRowDivider" Height="1"
+                                            Background="{DynamicResource BrushBorderSubtle}" Visibility="Collapsed"/>
+
                                     <!-- 管理服务：随启动器自启，不需要手动启停，只做版本更新 -->
                                     <Border Style="{StaticResource ComponentRow}">
                                         <StackPanel>
@@ -581,7 +620,33 @@
                          刷新按钮浮在左侧轨道上（悬停导航项才出现），
                          所以这里不再有横栏。控制栏仍在网页外部（任务书 §7）。 -->
                     <Grid x:Name="WebPanel" Visibility="Collapsed">
-                        <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <!-- Pi 隧道状态条：VNC 画面直连 Pi，不代表隧道通；
+                             这一条单独显示隧道/桥接状态，断线时可在这里一键重连。 -->
+                        <Border x:Name="TunnelBar" Grid.Row="0" Visibility="Collapsed"
+                                Background="{DynamicResource BrushBgRaised}"
+                                BorderBrush="{DynamicResource BrushBorderSubtle}"
+                                BorderThickness="0,0,0,1" Padding="16,8">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Ellipse x:Name="TunnelBarDot" Width="8" Height="8" VerticalAlignment="Center"
+                                         Fill="{DynamicResource BrushTextDisabled}"/>
+                                <TextBlock x:Name="TunnelBarText" Grid.Column="1" Margin="10,0,12,0"
+                                           Style="{StaticResource TextValue}"
+                                           VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                <Button x:Name="TunnelBarAction" Grid.Column="2"
+                                        Style="{StaticResource PrimaryButton}"
+                                        Content="连接 Pi" Click="TunnelBarAction_Click"/>
+                            </Grid>
+                        </Border>
+                        <Grid Grid.Row="1">
                             <wv2:WebView2 x:Name="Web" Visibility="Collapsed"/>
                             <Border x:Name="WebUnavailable" Background="{DynamicResource BrushBgSunken}" Padding="32">
                                 <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="560">

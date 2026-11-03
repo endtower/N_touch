@@ -34,6 +34,12 @@ TASK_STATUS_EXPIRED = "expired"
 TASK_KIND_ONETIME = "onetime"
 TASK_KIND_ONGOING = "ongoing"
 
+# context 的硬预算（字符数）：上下文是下次启动时的启动单，不是过程存档。
+# 超限由 Quest 工具层驳回，迫使做取舍；目录展示也按此上限截断，
+# 避免一条记录把整轮上下文撑爆、并让后续改写继续照着膨胀。
+# 600 字：格式固定为「目的 / 要做 / 对象 / 依据 / 兜底」，正常事项用不完。
+TASK_CONTEXT_MAX_CHARS = 600
+
 # 已到处理时间的短语前缀（_calculate_time_until 的过期分支产出，
 # 调用方据此判断是否叠加「下次处理时间为」前缀——见 format_task_by_id / format_tasks_brief）
 _OVERDUE_PREFIX = "已到"
@@ -317,7 +323,12 @@ class TaskOperations:
         return "\n".join(lines)
 
     async def format_active_task_overview(self, limit: int = 5, *, full_context: bool = False) -> str:
-        """有界接续目录；Quest 可取得完整原文与准确时间，其他调用默认 120 字摘要。"""
+        """有界接续目录；Quest 可取得完整原文与准确时间，其他调用默认 120 字摘要。
+
+        full_context 时正常记录原文照给；超预算的旧记录只显示前
+        TASK_CONTEXT_MAX_CHARS 字并标注实际字数与「必须整版重写」。
+        旧记录整段注入会撑爆本轮上下文，也会让改写方照着同样的密度继续写。
+        """
         limit = max(1, min(int(limit), 20))
         conn = await self.db._ensure_connection()
         cur = await conn.execute("SELECT COUNT(*) AS total FROM tasks WHERE status='active'")
@@ -334,19 +345,33 @@ class TaskOperations:
         for row in rows:
             title = (row["title"] or "未知标题").replace("\n", " ")
             context = row["context"] or "待查询"
+            oversize_note = ""
             if not full_context:
                 context = context.replace("\n", " ")
                 context = context[:120] + ("…" if len(context) > 120 else "")
+            elif len(context) > TASK_CONTEXT_MAX_CHARS:
+                oversize_note = (
+                    f"\n（本条现存 {len(context)} 字，已超上限 {TASK_CONTEXT_MAX_CHARS} 字，"
+                    f"下方只显示前 {TASK_CONTEXT_MAX_CHARS} 字；改写时须按格式整版重写，"
+                    "不得在原基础上续写）"
+                )
+                context = context[:TASK_CONTEXT_MAX_CHARS] + "…"
             if (row["kind"] or TASK_KIND_ONETIME) == TASK_KIND_ONGOING:
                 if full_context:
-                    lines.append(f"· {title}（{row['task_id']}）\n上下文：{context}\n持续任务：无固定唤醒时间")
+                    lines.append(
+                        f"· {title}（{row['task_id']}）\n上下文：{context}{oversize_note}\n"
+                        "持续任务：无固定唤醒时间"
+                    )
                 else:
                     lines.append(f"· {title}（{row['task_id']}）：{context}；持续进行中")
                 continue
             when = row["next_occurrence"] or ""
             timing = self._calculate_time_until(when) if when else "未设置唤醒时间"
             if full_context:
-                lines.append(f"· {title}（{row['task_id']}）\n上下文：{context}\n下次唤醒：{when}；{timing}")
+                lines.append(
+                    f"· {title}（{row['task_id']}）\n上下文：{context}{oversize_note}\n"
+                    f"下次唤醒：{when}；{timing}"
+                )
             else:
                 lines.append(f"· {title}（{row['task_id']}）：{context}；{timing}")
         if total > len(rows):

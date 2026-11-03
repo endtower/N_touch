@@ -36,6 +36,24 @@ python scripts/build_public_release.py --output dist/public-0.4.0 --feed-base-ur
 latest 和 versions 清单需由发布者上传到指定地址，构建脚本不会自动发布。
 后续构建加 `--previous-releases 上次的packages目录` 保留历史清单，历史 ZIP 保留在原永久地址。
 当前默认更新源使用 GitHub 的 latest release：每次发布都应携带所有自有组件的 latest 与 versions 清单，先上传完整版本包，最后更新清单，避免其他组件的更新入口丢失。
+
+### 自动发布（GitHub Actions）
+
+`.github/workflows/release.yml` 在 GitHub 托管的 Windows 运行器上完成上述构建并上传 Release，
+不再依赖本机的 `.tools/` 与已安装运行时：
+
+1. 改版本号：`component_versions.json`（必要时应同步 `launcher/AbyssLauncher.csproj` 的
+   `Version` 与 `manager_service.py` 的 `SERVICE_VERSION`）。
+2. 写本次 Core 说明：`releases/core-<版本>.json`（`notes` / `breaking_changes` / `requires` /
+   `data_policy` / `migration_notes`）。缺这个文件时工作流会直接失败，不会产出半成品 Release。
+3. 触发：推送 `v*` 标签，或在 Actions 页面手动运行并填写 `tag`。
+4. 工作流会先取回上一版 Release 的 `*-versions.json` 作为历史清单，再构建并上传
+   `AbyssLauncher.exe` 与全部 `packages/` 资产。
+
+同一个标签重复触发会覆盖该 Release 的资产（`--clobber`），因此可以只重发 EXE 而不新建版本；
+但这会让旧标签的内容与源码不一致，正式对外发布建议推进版本号。
+不改 `component_versions.json` 时，更新中心不会认为有新版本可用。
+
 启动器更新 ZIP 同时包含外部更新器；对用户的首次下载入口仍只有一个 EXE。
 源码运行环境从构建机的 Windows Python 和已安装依赖生成，并记录准确依赖锁文件；
 安装前的隔离检查会拒绝缺依赖或不能创建关键会话的包。
@@ -107,9 +125,9 @@ python scripts/build_release.py
 python scripts/build_release.py --components launcher manager
 ```
 
-输出 `dist/independent-updates/Abyss/` 为验收用程序文件，`dist/independent-updates/packages/` 为独立更新包。构建不会改动日常运行的 `dist/Abyss/`。本机验收目录的描述文件指向仓库数据根；对外分发时按实际部署设置数据目录，不沿用本机的相对关系。
+输出 `dist/independent-updates/Abyss/` 为验收用程序文件，`dist/independent-updates/packages/` 为独立更新包。构建不会改动日常运行的 `常用版本/`（兼容入口 `dist/Abyss/`）。本机验收目录的描述文件指向仓库数据根；对外分发时按实际部署设置数据目录，不沿用本机的相对关系。
 
-首次从旧版部署到既有 `dist/Abyss/` 可在验收通过后执行 `python scripts/deploy_release.py`。它先校验全部程序包，再通过现有管理服务停止已持有的目标，关闭旧启动器，以同一个 C# 安装事务替换程序文件，保留描述文件和所有运行数据，并重启原有界面和此前运行的目标。SnowLuma 不在本次本地部署范围内；其程序版本和登录数据保持原状。程序备份位于数据根 `manager/updates/jobs/bootstrap-*/`。
+首次从旧版部署到既有 `常用版本/`（兼容入口 `dist/Abyss/`）可在验收通过后执行 `python scripts/deploy_release.py`。它先校验全部程序包，再通过现有管理服务停止已持有的目标，关闭旧启动器，以同一个 C# 安装事务替换程序文件，保留描述文件和所有运行数据，并重启原有界面和此前运行的目标。SnowLuma 不在本次本地部署范围内；其程序版本和登录数据保持原状。程序备份位于数据根 `manager/updates/jobs/bootstrap-*/`。
 
 生成单组件包（同时生成历史版本列表）：
 

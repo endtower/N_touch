@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 from aiohttp import web
 
 from brain.hc.database.core import get_memory_db
+from brain.hc.database import entity_identity as identity
 from brain.hc.database.character import CharacterOperations
 from brain.hc.database.group import GroupOperations
 from brain.hc.database.fuzzy_role import FuzzyRoleOperations
@@ -98,11 +99,14 @@ async def handle_create_social_memory(request: web.Request) -> web.Response:
                 await (ops.update_character(entity_id, **kwargs) if entity_type == "character" else ops.update_group(entity_id, **kwargs))
             row = await (await conn.execute(f"SELECT * FROM {table} WHERE uuid=?", (entity_id,))).fetchone()
             formatter, node_type = {"character": (_character_full, "Character"), "group": (_group_full, "Group"), "fuzzy_role": (_fuzzy_role_full, "FuzzyRole")}[entity_type]
-            return web.json_response({"node": _add_id_type_label(formatter(row), node_type)}, status=201)
+            return web.json_response({"node": _add_id_type_label(await formatter(conn, row), node_type)}, status=201)
         except Exception:
             # 既有操作分步 commit；失败时只清理本次创建的新实体，避免页面重试留下半条记忆。
             if entity_id:
                 await conn.execute(f"DELETE FROM {table} WHERE uuid=?", (entity_id,))
+                if entity_type != "fuzzy_role":
+                    entity_kind = identity.CHARACTER if entity_type == "character" else identity.GROUP
+                    await identity.delete_entity(conn, entity_kind, entity_id)
                 await conn.commit()
             logger.exception("创建社交实体失败")
             return web.json_response({"error": "创建失败，请检查数据库或嵌入服务"}, status=500)
@@ -144,15 +148,17 @@ def _safe_int(s: Optional[str], default: int) -> int:
 # 行 → 完整详情字典（与 database.character / database.group 对齐）
 # ============================================================
 
-def _character_full(rec) -> Dict[str, Any]:
+async def _character_full(conn, rec) -> Dict[str, Any]:
     """characters 行 → 完整详情字典（同 get_character_full_info 字段）。"""
+    uuid = rec["uuid"]
+    names = await identity.get_names(conn, identity.CHARACTER, uuid)
     return {
-        "uuid": rec["uuid"],
-        "name": rec["name"],
-        "aliases": [{"name": a, "usage_count": 0} for a in json.loads(rec["aliases"] or "[]")],
+        "uuid": uuid,
+        "name": names[0] if names else "",
+        "aliases": [{"name": n, "usage_count": 0} for n in names],
         "impressions": [{"content": rec["impression"]}] if rec["impression"] else [],
         "familiarities": [{"content": rec["familiarity"]}] if rec["familiarity"] else [],
-        "contacts": json.loads(rec["contacts"] or "[]"),
+        "contacts": await identity.get_contacts(conn, identity.CHARACTER, uuid),
         "relationships_with_default": [{"type": rec["relationship"]}] if rec["relationship"] else [],
         "allow_conversation": bool(rec["allow_conversation"]),
         "affinity_events": json.loads(rec["affinity_events"] or "[]"),
@@ -162,16 +168,18 @@ def _character_full(rec) -> Dict[str, Any]:
     }
 
 
-def _group_full(rec) -> Dict[str, Any]:
+async def _group_full(conn, rec) -> Dict[str, Any]:
     """groups 行 → 完整详情字典（同 get_group_with_details 字段）。"""
+    uuid = rec["uuid"]
+    names = await identity.get_names(conn, identity.GROUP, uuid)
     return {
-        "uuid": rec["uuid"],
-        "name": rec["name"],
-        "aliases": [{"name": a, "usage_count": 0} for a in json.loads(rec["aliases"] or "[]")],
+        "uuid": uuid,
+        "name": names[0] if names else "",
+        "aliases": [{"name": n, "usage_count": 0} for n in names],
         "impressions": [{"content": rec["impression"]}] if rec["impression"] else [],
         "familiarities": [{"content": rec["familiarity"]}] if rec["familiarity"] else [],
         "member_impressions": [{"content": rec["member_impression"]}] if rec["member_impression"] else [],
-        "contacts": json.loads(rec["contacts"] or "[]"),
+        "contacts": await identity.get_contacts(conn, identity.GROUP, uuid),
         "relationships_with_default": [{"type": rec["self_image"]}] if rec["self_image"] else [],
         "allow_conversation": bool(rec["allow_conversation"]),
         "usage_count": rec["usage_count"],
@@ -180,7 +188,7 @@ def _group_full(rec) -> Dict[str, Any]:
     }
 
 
-def _fuzzy_role_full(rec) -> Dict[str, Any]:
+async def _fuzzy_role_full(_conn, rec) -> Dict[str, Any]:
     """fuzzy_roles 行 → 完整详情字典。"""
     return {
         "uuid": rec["uuid"],
@@ -254,7 +262,7 @@ async def handle_get_social_memory(request: web.Request) -> web.Response:
             uuid = rec["uuid"]
             if not uuid:
                 continue
-            node = _character_full(rec)
+            node = await _character_full(conn, rec)
             nodes.append(_add_id_type_label(node, "Character"))
             char_count += 1
             # 星形边：00000000 → 角色（关系描述作为边标签，无则默认 HAS_RELATIONSHIP）
@@ -269,7 +277,10 @@ async def handle_get_social_memory(request: web.Request) -> web.Response:
 
         # ---- Group ----
         cur = await conn.execute(
-            "SELECT * FROM groups ORDER BY name ASC LIMIT ?",
+            """SELECT g.* FROM groups g
+               LEFT JOIN entity_names n
+                 ON n.entity_type='group' AND n.entity_uuid=g.uuid AND n.is_primary=1
+               ORDER BY n.name ASC LIMIT ?""",
             (limit,),
         )
         rows = await cur.fetchall()
@@ -277,7 +288,7 @@ async def handle_get_social_memory(request: web.Request) -> web.Response:
             uuid = rec["uuid"]
             if not uuid:
                 continue
-            node = _group_full(rec)
+            node = await _group_full(conn, rec)
             nodes.append(_add_id_type_label(node, "Group"))
             group_count += 1
             rel_type = rec["self_image"] or "HAS_RELATIONSHIP"
@@ -299,7 +310,7 @@ async def handle_get_social_memory(request: web.Request) -> web.Response:
             uuid = rec["uuid"]
             if not uuid:
                 continue
-            node = _fuzzy_role_full(rec)
+            node = await _fuzzy_role_full(conn, rec)
             nodes.append(_add_id_type_label(node, "FuzzyRole"))
             fuzzy_count += 1
             # 只在来源实体存在时连边（依附性节点 → 来源实体）
@@ -613,7 +624,7 @@ async def handle_update_social_memory(request: web.Request) -> web.Response:
             rec = await cur.fetchone()
             if rec is None:
                 return web.json_response({"error": "更新后无法回读"}, status=500)
-            node = _add_id_type_label(_character_full(rec), "Character")
+            node = _add_id_type_label(await _character_full(conn, rec), "Character")
         elif entity_type == "group":
             ok = await GroupOperations().update_group(entity_id, **kwargs)
             if not ok:
@@ -622,7 +633,7 @@ async def handle_update_social_memory(request: web.Request) -> web.Response:
             rec = await cur.fetchone()
             if rec is None:
                 return web.json_response({"error": "更新后无法回读"}, status=500)
-            node = _add_id_type_label(_group_full(rec), "Group")
+            node = _add_id_type_label(await _group_full(conn, rec), "Group")
         else:
             ok = await FuzzyRoleOperations().update_fuzzy_role(entity_id, **kwargs)
             if not ok:
@@ -631,7 +642,7 @@ async def handle_update_social_memory(request: web.Request) -> web.Response:
             rec = await cur.fetchone()
             if rec is None:
                 return web.json_response({"error": "更新后无法回读"}, status=500)
-            node = _add_id_type_label(_fuzzy_role_full(rec), "FuzzyRole")
+            node = _add_id_type_label(await _fuzzy_role_full(conn, rec), "FuzzyRole")
 
         logger.debug(f"[/memory/social PATCH] {entity_type} {entity_id} 已更新: {sorted(kwargs)}")
         return web.json_response({"node": node, "updated": True})

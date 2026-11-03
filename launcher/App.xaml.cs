@@ -134,6 +134,16 @@ public partial class App : Application
         _main.Activate();
     }
 
+    /// <summary>托盘气泡提醒：不抢焦点、不弹窗口，窗口最小化到托盘时也能看到。</summary>
+    public static void Notify(string title, string message)
+    {
+        if (_tray is null) return;
+        _tray.BalloonTipTitle = title;
+        _tray.BalloonTipText = message;
+        _tray.BalloonTipIcon = System.Windows.Forms.ToolTipIcon.Warning;
+        _tray.ShowBalloonTip(10_000);
+    }
+
     public static void ExitFromTray() => _main?.RequestExit();
 
     /// <summary>关闭窗口时隐藏到托盘（受管目标继续运行）。</summary>

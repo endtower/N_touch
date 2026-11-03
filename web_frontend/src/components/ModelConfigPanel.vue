@@ -22,6 +22,7 @@ const groups: Group[] = [
 const allFields = groups.flatMap(g => g.fields)
 const secrets = new Set(allFields.filter(f => f.secret).map(f => f.key))
 const loading = ref(false), saving = ref(false), loaded = ref(false), error = ref('')
+const testing = ref<string | null>(null)
 const values = ref<Record<string, string>>({}), saved = ref<Record<string, string>>({})
 const keySet = ref<Record<string, boolean>>({}), effective = ref<Record<string, Entry>>({})
 const dirty = ref(new Set<string>()), cleared = ref(new Set<string>())
@@ -100,6 +101,28 @@ async function reload() {
   expanded.value = null
   await load()
 }
+async function test(group: Group) {
+  if (testing.value || saving.value) return
+  const entry = resolved(group)
+  // 已填写的草稿 Key 优先；留空则交给服务端用已保存的 Key（不会回显）
+  const keyField = group.fields.find(f => f.secret)
+  const draftKey = keyField && !cleared.value.has(keyField.key) ? values.value[keyField.key]?.trim() || '' : ''
+  testing.value = group.id
+  try {
+    const response = await fetch('/system/config/test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group: group.id, base_url: entry.base_url, model: entry.model, api_key: draftKey || null }),
+    })
+    const body = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(body.message || body.error || `HTTP ${response.status}`)
+    if (body.ok) ElMessage.success(`连接成功 · ${body.message}`)
+    else ElMessage.error(`连接失败 · ${body.message}`)
+  } catch (e: any) {
+    ElMessage.error(`连接失败 · ${e.message || e}`)
+  } finally {
+    if (testing.value === group.id) testing.value = null
+  }
+}
 async function save() {
   if (!loaded.value || !changes.value || saving.value) return
   const fields: Record<string, string> = {}
@@ -149,6 +172,7 @@ defineExpose({ confirmClose, markApplied })
               <header class="mc-card-head">
                 <div :class="['mc-icon', { embedding: group.id === 'embed' }]"><el-icon :size="20"><Coin v-if="group.id === 'embed'" /><Cpu v-else /></el-icon></div>
                 <div class="mc-card-info"><div class="mc-name"><h3>{{ group.id }}</h3><span v-if="changed(group)" class="mc-state changed">未保存</span><span v-else-if="group.optional && !custom(group)" class="mc-state inherited">使用 common</span><span v-else class="mc-state" :class="resolved(group).key_set ? 'configured' : 'missing'">{{ resolved(group).key_set ? '已配置' : '待配置' }}</span></div><p>{{ group.description }}</p></div>
+                <el-button text :loading="testing === group.id" :disabled="saving || testing !== null" @click="test(group)">测试连接</el-button>
                 <el-button :aria-expanded="expanded === group.id" :aria-label="`编辑 ${group.id}`" @click="expanded = expanded === group.id ? null : group.id">{{ expanded === group.id ? '收起' : '编辑' }}<el-icon class="mc-edit-arrow"><ArrowDown v-if="expanded === group.id" /><ArrowRight v-else /></el-icon></el-button>
               </header>
               <div v-if="expanded !== group.id" class="mc-summary"><span>{{ resolved(group).model }}</span><span class="mc-endpoint" :title="resolved(group).base_url">{{ resolved(group).base_url }}</span></div>

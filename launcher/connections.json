@@ -8,9 +8,9 @@
     },
     {
       "id": "pi-wechat",
-      "managedTarget": "",
+      "managedTarget": "tunnel",
       "name": "Pi 微信",
-      "url": "http://192.168.2.7:6080/vnc.html"
+      "url": "http://192.168.1.50:6080/vnc.html"
     }
   ],
   "version": 1

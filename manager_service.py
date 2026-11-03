@@ -41,7 +41,7 @@ from manager_core import SupervisorService, log_root        # noqa: E402
 from config.llm_settings import (DEFAULT_COMMON_URL, DEFAULT_COMMON_MODEL,
                                  DEFAULT_EMBEDDING_MODEL, resolve_provider_label)  # noqa: E402
 
-SERVICE_VERSION = "0.9.0"
+SERVICE_VERSION = "0.10.0"
 API_PORT = 49990
 _TOKEN_FILE = data_root() / "manager" / "service_token.txt"
 
@@ -153,7 +153,7 @@ async def handle_logs(request: web.Request) -> web.Response:
     path = _log_path(name)
     if path is None:
         return web.json_response({"error_code": "bad_source",
-                                  "message": "未知日志源（core | core_out | snowluma | service）"}, status=404)
+                                  "message": "未知日志源（core | core_out | ingress | tunnel | snowluma | service）"}, status=404)
     lines: list[str] = []
     if path.exists():
         with open(path, "rb") as f:
@@ -172,6 +172,8 @@ def _log_path(name: str) -> Path | None:
         return log_root() / "manager" / "core.out.log"
     if name == "ingress":
         return log_root() / "manager" / "ingress.out.log"
+    if name == "tunnel":
+        return log_root() / "manager" / "tunnel.out.log"
     if name == "snowluma":
         return log_root() / "manager" / "snowluma.out.log"
     if name == "service":
@@ -200,6 +202,12 @@ _CONFIG_ALLOW = {
     "BRIDGE_CONNECTION_ID": str,
     "BRIDGE_BASE_URL": str,
     "BRIDGE_TOKEN": str,
+    # Pi 微信隧道（ssh -L 转发）：由管理服务托管，与 SnowLuma 同级
+    "BRIDGE_TUNNEL_ENABLED": bool,
+    "BRIDGE_TUNNEL_PI_HOST": str,
+    "BRIDGE_TUNNEL_PI_USER": str,
+    "BRIDGE_TUNNEL_KEY_PATH": str,
+    "BRIDGE_TUNNEL_REMOTE_PORT": int,
     # LLM 接入配置（按四个功能域：common / conversation / vision / embed）
     #   common       FLASH_API_KEY / FLASH_BASE_URL / LLM_FLASH（persona 折入本组）
     #   conversation CONVERSATION_API_KEY / CONVERSATION_BASE_URL / LLM_CONVERSATION（social_chat 同等级）
@@ -375,7 +383,8 @@ def _validate_config_value(key: str, value) -> str:
         raise ValueError(f"{key} 长度超过 {_MAX_VALUE_LEN}")
     if any(ch in _CONTROL_CHARS for ch in text):
         raise ValueError(f"{key} 含换行/控制字符")
-    if any(ch.isspace() for ch in text) and key not in ("MASTER_NAME", "ASSISTANT_NAME", "ASSISTANT_NICK_NAME"):
+    if any(ch.isspace() for ch in text) and key not in ("MASTER_NAME", "ASSISTANT_NAME",
+                                                        "ASSISTANT_NICK_NAME", "BRIDGE_TUNNEL_KEY_PATH"):
         raise ValueError(f"{key} 不能含空白")
     if "#" in text or '"' in text or "'" in text:
         raise ValueError(f"{key} 不能含 # 或引号")
@@ -388,6 +397,16 @@ def _validate_config_value(key: str, value) -> str:
     if key == "BRIDGE_BASE_URL":
         from adapt.bridge.config import BridgeConfig
         BridgeConfig.from_values({"BRIDGE_BASE_URL": text})
+    if key == "BRIDGE_TUNNEL_PI_HOST":
+        if text and (any(ch in text for ch in "/\\@ ") or not text.replace(".", "").replace(":", "").isalnum()):
+            raise ValueError("Pi 地址应为主机名或 IP，不含用户名、空格与路径")
+    if key == "BRIDGE_TUNNEL_PI_USER":
+        if text and (not text.isascii() or any(ch in text for ch in "@ /\\:")):
+            raise ValueError("Pi 用户名只能包含字母、数字、点、下划线与横线")
+    if key == "BRIDGE_TUNNEL_KEY_PATH":
+        if text and not text.lower().endswith((".pem", ".key", "_ed25519", "_rsa", ".ppk")) \
+                and "id_" not in text:
+            raise ValueError("密钥路径看起来不是私钥文件（应以 id_ / .pem / .key 结尾）")
     if key == "ONEBOT_WS_PATH":
         if text and not text.startswith("/"):
             raise ValueError("ONEBOT_WS_PATH 必须以 / 开头")

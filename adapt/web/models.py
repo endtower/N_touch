@@ -21,6 +21,7 @@ class WebSession:
     user_name: str                              # 会话显示名
     session_name: str = ""                      # 会话显示名（与 user_name 重复，保留兼容）
     role: Optional[str] = None                  # 群聊中扮演的角色（私聊 None）
+    platform: str = ""                          # "qq" | "wechat" | "web"，旧会话无前缀按 qq
     created_at: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:

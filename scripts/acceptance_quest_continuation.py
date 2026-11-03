@@ -42,6 +42,17 @@ def tool(name, args=None, call_id="call-1"):
     return SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=json.dumps(args or {})))
 
 
+def startup_note(basis="地址已确认", action="先给老师发消息确认收货时间"):
+    """构造符合固定五段格式的启动单（目的 / 要做 / 对象 / 依据 / 兜底）。"""
+    return (
+        "目的：办妥这条待接续事项\n"
+        f"要做：{action}\n"
+        "对象：会话 private_test\n"
+        f"依据：{basis}\n"
+        "兜底：到点无回应就换个渠道再问一次"
+    )
+
+
 class QuestContinuationAcceptance(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         directory = Path(tempfile.mkdtemp(dir=_sandbox.name))
@@ -60,9 +71,7 @@ class QuestContinuationAcceptance(unittest.IsolatedAsyncioTestCase):
         await self.db.close()
 
     async def create(self, title="给老师送枣"):
-        return await QuestAgent._create_task_impl(
-            title, "老师下周方便收；会话 private_test；地址已确认。", self.later,
-        )
+        return await QuestAgent._create_task_impl(title, startup_note(), self.later)
 
     async def test_create_task_keeps_context(self):
         receipt = await self.create()
@@ -190,14 +199,14 @@ class QuestContinuationAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.ops.count_active_tasks(), 5)
 
         second = await self.ops.get_task_id_by_title("事项1")
-        await QuestAgent._update_task_impl(second, context="合并后的进展")
+        await QuestAgent._update_task_impl(second, context=startup_note(basis="合并后的进展"))
         self.assertEqual(await self.ops.count_active_tasks(), 5)
 
     async def test_quest_reports_capacity_error_without_writing(self):
         for i in range(5):
             await self.create(title=f"事项{i}")
         agent = QuestAgent()
-        args = {"title": "溢出事项", "context": "上下文 private_overflow", "next_occurrence": self.later}
+        args = {"title": "溢出事项", "context": startup_note(basis="private_overflow"), "next_occurrence": self.later}
         agent._call_llm = AsyncMock(side_effect=[
             reply(calls=[tool("create_task", args)]),
             reply(content="", calls=[tool("finish", call_id="call-2")]),
@@ -221,7 +230,7 @@ class QuestContinuationAcceptance(unittest.IsolatedAsyncioTestCase):
 
     async def test_quest_agent_multiround_registers(self):
         agent = QuestAgent()
-        args = {"title": "择时验证", "context": "验证经验 private_verify", "next_occurrence": self.later}
+        args = {"title": "择时验证", "context": startup_note(basis="验证经验 private_verify"), "next_occurrence": self.later}
         agent._call_llm = AsyncMock(side_effect=[
             reply(calls=[tool("create_task", args)]),
             reply(content="", calls=[tool("finish", {"summary": "已登记"}, call_id="call-2")]),
@@ -250,6 +259,35 @@ class QuestContinuationAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["created_tasks"], [])
         self.assertEqual([c["tool"] for c in result["tools_called"]], ["finish"])
         self.assertEqual(agent._call_llm.await_count, 2)
+
+    async def test_oversized_context_is_rejected_and_creates_nothing(self):
+        from brain.hc.database.task import TASK_CONTEXT_MAX_CHARS
+        with self.assertRaises(ValueError) as ctx:
+            await QuestAgent._create_task_impl("超长上下文", "过程记录。" * 400, self.later)
+        self.assertIn(str(TASK_CONTEXT_MAX_CHARS), str(ctx.exception))
+        self.assertEqual(await self.ops.get_active_tasks(), [])
+
+    async def test_update_rejects_oversized_context_without_overwriting(self):
+        receipt = await self.create()
+        original = (await self.ops.get_task_by_id(receipt["task_id"]))["context"]
+        with self.assertRaises(ValueError):
+            await QuestAgent._update_task_impl(receipt["task_id"], context="追加。" * 400)
+        self.assertEqual((await self.ops.get_task_by_id(receipt["task_id"]))["context"], original)
+
+    async def test_context_without_purpose_or_action_is_rejected(self):
+        for text in ("老师下周方便收；地址已确认。", "目的：把枣送到老师手上", "要做：先发消息问收货时间"):
+            with self.assertRaises(ValueError) as ctx:
+                await QuestAgent._create_task_impl("缺段事项", text, self.later)
+            self.assertIn("目的", str(ctx.exception))
+            self.assertIn("要做", str(ctx.exception))
+        self.assertEqual(await self.ops.get_active_tasks(), [])
+
+    async def test_context_with_task_id_bookkeeping_is_rejected(self):
+        text = startup_note() + "\nTask_20261011123456 与 Task_20261012123456 合并"
+        with self.assertRaises(ValueError) as ctx:
+            await QuestAgent._create_task_impl("编号事项", text, self.later)
+        self.assertIn("编号", str(ctx.exception))
+        self.assertEqual(await self.ops.get_active_tasks(), [])
 
     async def test_wake_block_carries_title_and_context(self):
         record = {"title": "寄枣", "context": "运单 test；会话 private_test；检查收货"}

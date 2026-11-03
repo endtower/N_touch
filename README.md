@@ -21,7 +21,8 @@ Core **只自动检查新版**，不会自动下载、安装或在空闲时切�
 对外构建使用 `scripts/build_public_release.py`，详细步骤见
 [更新与发布](updater/README.md)。`scripts/build_release.py` 继续用于旧二进制组件的
 本机验收；其开发目录描述文件不能作为公开安装布局。公共默认模块在
-`release_defaults/`，个人配置与记忆不进入源码组件。AGENTS.md 后续另行提供。
+`release_defaults/`，个人配置与记忆不进入源码组件。面向使用者与接手机器人的
+安装、配置、更新、QQ 接入指南见 [AGENTS.md](AGENTS.md)。
 
 ## 快速入口
 
@@ -82,7 +83,7 @@ python manager.py                # 管家 CLI：Core/SnowLuma 启停、状态、
 python main.py --dev             # 后端完整版（热重载；生产用 python main.py）
 python scripts/web_only.py       # 不开大脑，只起前端与查看 API（仍提供部分编辑接口，非强制只读；--port 可换端口）
 cd web_frontend && npm run dev   # 前端开发服；非开发时可直接开 5002（后端伺服 dist）
-# 图形化：运行 dist/Abyss/AbyssLauncher.exe（WPF 启动器，自动拉起管理服务）
+# 图形化：运行 常用版本/AbyssLauncher.exe（WPF 启动器，自动拉起管理服务；dist/Abyss 为兼容链接）
 ```
 
 运行/打包/日志/配置位置的完整说明见 [docs/工程总览.md](docs/工程总览.md)。
@@ -156,7 +157,7 @@ ingress、Core；刷新前端不会替换这些程序。真实微信联调及历
 
 ## 统一维护工具
 
-maintenance_action 仅分发给反思系统，严格对应四种状态：效能感100申请维护、为0尝试自修复；归属感为0情绪宣泄、100发布关系改进任务。除申请维护外，均自动交给 Quest 登记待办。登记成功后仅对应值重置为50。旧的申请审批链、48小时间隔、近期成功次数条件和+30保底补偿已移除。
+maintenance_action 仅分发给反思系统，严格对应四种状态：效能感100申请维护、为0尝试自修复；归属感为0情绪宣泄、100发布关系改进任务。维护行动一律立即执行：工具不提供时间参数，唤醒时间固定为登记时刻，登记即到期由 task_truck 立刻交付；其余三类由工具直接落库生成一条独立的立即待办（不经 Quest，避免被查重合并或改期）。登记成功后仅对应值重置为50。旧的申请审批链、48小时间隔、近期成功次数条件和+30保底补偿已移除。
 
 AMY 结束评价词表区分正面与负面分区。负面收尾填写的 failure_reason 在本地缓存；维护申请发布时将当前整批原因归入该申请并清空缓存，之后的新原因属于下一批。前端维护页按申请展示其原因。PFCA 仅保留 failure_reason，不再单独填写 task_reason 或 evaluation_reason；归属和效益变动说明采用事件标题。
 

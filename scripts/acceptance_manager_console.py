@@ -136,9 +136,13 @@ class ConsoleTests(unittest.IsolatedAsyncioTestCase):
         conn.close()
         with sqlite3.connect(self.root / "memory/memory.db") as conn:
             for table in ("characters", "groups"):
-                conn.execute(f"CREATE TABLE {table} (uuid TEXT, name TEXT, aliases TEXT, contacts TEXT)")
-            conn.execute("INSERT INTO characters VALUES (?, ?, ?, ?)",
-                         ("c1", "主名", json.dumps(["第一个别名", "临时身份"]), json.dumps([{"session_id": "private_123"}])))
+                conn.execute(f"CREATE TABLE {table} (uuid TEXT)")
+            conn.execute("CREATE TABLE entity_names (entity_type TEXT, name TEXT, entity_uuid TEXT, is_primary INTEGER, created_at TEXT)")
+            conn.execute("CREATE TABLE entity_contacts (session_id TEXT, entity_type TEXT, entity_uuid TEXT, platform TEXT, scope TEXT, created_at TEXT)")
+            conn.execute("INSERT INTO characters VALUES ('c1')")
+            conn.execute("INSERT INTO entity_names VALUES ('character', '第一个别名', 'c1', 1, '')")
+            conn.execute("INSERT INTO entity_names VALUES ('character', '主名', 'c1', 0, '')")
+            conn.execute("INSERT INTO entity_contacts VALUES ('private_123', 'character', 'c1', 'qq', 'private', '')")
         conn.close()
         before = db.read_bytes()
         data = await (await self.client.get("/sessions", headers=self.headers)).json()

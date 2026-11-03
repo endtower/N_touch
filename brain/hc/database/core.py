@@ -6,8 +6,11 @@
 所有信息从 00000000 指向其他对象（角色 / 群组 / 事件 / 经验 / 模糊角色）。
 
 存储引擎：SQLite（aiosqlite，全异步，WAL）。
-- 角色表 / 群组表：00000000 指向的其他角色 / 群组，含多值字段（别名、联系方式，JSON 数组）
-  与单值字段（印象、熟悉度、群组成员印象）。
+- 角色表 / 群组表：00000000 指向的其他角色 / 群组，只存单值字段（印象、熟悉度、
+  群组成员印象、关系）。名称与联系方式不再内联，统一收口到下面两张表。
+- entity_names   ：「叫什么」——(entity_type, name) 唯一，同名即同一实体，
+                   不同平台同名会话据此自动合并。主名用 is_primary=1 标记。
+- entity_contacts：「怎么找到他」——session_id 唯一，一条联系方式只能属于一个实体。
 - 任务表 / 经验表 / 模糊角色表：独立。
 - 向量以 BLOB 存 JSON 序列化，Python 侧算余弦相似度。
 """
@@ -15,9 +18,11 @@
 from paths import data_root
 import asyncio
 import json
+import math
 import os
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import aiosqlite
 
@@ -25,6 +30,28 @@ from utils.logger import get_logger
 from utils.error_handling import StorageError, ConfigurationError
 
 logger = get_logger(__name__, "INFO")
+
+# 旧桥接（Pi 微信 v0）使用的远端 session 形如
+#   wechat_group_wechat-pi-3ede5669b79f358b7e3e-wcbf62aba7939b
+# generation 变更后这类 ID 失效，且与数值地址指向同一会话，属于脏数据。
+_STALE_BRIDGE_RE = re.compile(r"^(wechat|qq)_(private|group)_[a-z0-9]+-[0-9a-f]{20,}-")
+
+
+def _is_stale_bridge_session(session_id: str) -> bool:
+    """旧 generation 的桥接远端会话 ID（无法再收发，迁移时丢弃）。"""
+    return bool(_STALE_BRIDGE_RE.match(session_id))
+
+
+def _split_contact(session_id: str) -> tuple[str, str]:
+    """session_id -> (platform, scope)。
+
+    无平台前缀的旧会话（private_xxx / group_xxx）按 QQ 处理：QQ 是项目最早期
+    也是默认平台，前缀是 2026-10-16 加入微信后才引入的。
+    """
+    from adapt.session_identity import parse_session_id
+
+    identity = parse_session_id(session_id)
+    return identity.platform or "qq", identity.scope
 
 
 class MemoryDatabase:
@@ -97,40 +124,40 @@ class MemoryDatabase:
         await self._ensure_connection()
 
     async def conversation_allowed(self, session_id: str) -> bool:
-        """该会话所属社交实体是否已在记忆里勾选「允许 conversation」。
-
-        角色表先于群组表匹配；会话 id 自带 private_/group_ 前缀，两者不会重名。
-        """
+        """该会话所属社交实体是否已在记忆里勾选「允许 conversation」。"""
         if not session_id:
             return False
         conn = await self._ensure_connection()
-        for table in ("characters", "groups"):
-            cur = await conn.execute(f"SELECT contacts, allow_conversation FROM {table}")
-            for row in await cur.fetchall():
-                contacts = json.loads(row["contacts"] or "[]")
-                if any(c.get("session_id") == session_id for c in contacts):
-                    return bool(row["allow_conversation"])
-        return False
+        cur = await conn.execute(
+            """SELECT c.allow_conversation
+               FROM entity_contacts ec
+               JOIN characters c ON c.uuid = ec.entity_uuid
+               WHERE ec.session_id=? AND ec.entity_type='character'
+               UNION ALL
+               SELECT g.allow_conversation
+               FROM entity_contacts ec
+               JOIN groups g ON g.uuid = ec.entity_uuid
+               WHERE ec.session_id=? AND ec.entity_type='group'""",
+            (session_id, session_id),
+        )
+        row = await cur.fetchone()
+        return bool(row["allow_conversation"]) if row else False
 
     async def get_conversation_allowed_session_ids(self) -> set:
-        """一次性返回所有「允许 conversation」实体的 session_id 集合。
-
-        角色表与群组表都扫，只取 allow_conversation=1 的实体，收集其 contacts 里的
-        每个 session_id。供通讯录一次性标注放行会话，避免逐会话调用
-        conversation_allowed() 引发的 O(n²) 全表扫。
-        """
+        """一次性返回所有「允许 conversation」实体的 session_id 集合。"""
         conn = await self._ensure_connection()
-        allowed: set = set()
-        for table in ("characters", "groups"):
-            cur = await conn.execute(f"SELECT contacts, allow_conversation FROM {table}")
-            for row in await cur.fetchall():
-                if not row["allow_conversation"]:
-                    continue
-                for c in json.loads(row["contacts"] or "[]"):
-                    sid = c.get("session_id")
-                    if sid:
-                        allowed.add(sid)
-        return allowed
+        cur = await conn.execute(
+            """SELECT ec.session_id
+               FROM entity_contacts ec
+               JOIN characters c ON c.uuid = ec.entity_uuid
+               WHERE ec.entity_type='character' AND c.allow_conversation=1
+               UNION
+               SELECT ec.session_id
+               FROM entity_contacts ec
+               JOIN groups g ON g.uuid = ec.entity_uuid
+               WHERE ec.entity_type='group' AND g.allow_conversation=1"""
+        )
+        return {r["session_id"] for r in await cur.fetchall()}
 
     async def _create_tables(self) -> None:
         """建表。"""
@@ -138,13 +165,11 @@ class MemoryDatabase:
         await self._conn.executescript(
             """
             -- 角色表（00000000 → 其他角色）
+            -- 名称/别名/联系方式不在此表：见 entity_names / entity_contacts。
             CREATE TABLE IF NOT EXISTS characters (
                 uuid TEXT PRIMARY KEY,
-                name TEXT DEFAULT '',
-                aliases TEXT DEFAULT '[]',
                 impression TEXT DEFAULT '',
                 familiarity TEXT DEFAULT '',
-                contacts TEXT DEFAULT '[]',
                 relationship TEXT DEFAULT '',
                 allow_conversation INTEGER DEFAULT 0,
                 affinity_events TEXT DEFAULT '[]',
@@ -159,12 +184,9 @@ class MemoryDatabase:
             -- 群组表（00000000 → 群组）
             CREATE TABLE IF NOT EXISTS groups (
                 uuid TEXT PRIMARY KEY,
-                name TEXT DEFAULT '',
-                aliases TEXT DEFAULT '[]',
                 impression TEXT DEFAULT '',
                 familiarity TEXT DEFAULT '',
                 member_impression TEXT DEFAULT '',
-                contacts TEXT DEFAULT '[]',
                 self_image TEXT DEFAULT '',
                 allow_conversation INTEGER DEFAULT 0,
                 usage_count INTEGER DEFAULT 0,
@@ -174,6 +196,31 @@ class MemoryDatabase:
                 is_vectorized INTEGER DEFAULT 0,
                 vector_updated_at TEXT DEFAULT ''
             );
+
+            -- 名称表：一个实体可以有多个名字，但 (类型, 名字) 全局唯一。
+            -- 同名 = 同一个实体，这是跨平台（QQ / 微信 / Web）合并的唯一依据。
+            CREATE TABLE IF NOT EXISTS entity_names (
+                entity_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                entity_uuid TEXT NOT NULL,
+                is_primary INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT '',
+                PRIMARY KEY (entity_type, name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_entity_names_uuid
+                ON entity_names(entity_type, entity_uuid);
+
+            -- 联系方式表：一个实体可以有多个会话，但一个会话只能属于一个实体。
+            CREATE TABLE IF NOT EXISTS entity_contacts (
+                session_id TEXT PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_uuid TEXT NOT NULL,
+                platform TEXT NOT NULL DEFAULT '',
+                scope TEXT NOT NULL DEFAULT '',
+                created_at TEXT DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_entity_contacts_uuid
+                ON entity_contacts(entity_type, entity_uuid);
 
             -- 旧事件表（已废弃，任务系统替代；启动时彻底删除旧数据）
             DROP TABLE IF EXISTS events;
@@ -268,6 +315,76 @@ class MemoryDatabase:
         await self._migrate_conversation_flag()
         await self._migrate_tasks_kind()
         await self._migrate_critical_actions_archive()
+        await self._migrate_entity_identity()
+
+    async def _migrate_entity_identity(self) -> None:
+        """把 characters/groups 内联的名称与联系方式搬到 entity_names / entity_contacts。
+
+        旧结构：name + aliases(JSON) + contacts(JSON)，靠全表扫 + json.loads 反查；
+        新结构：名称与联系方式各自独立成表，(类型, 名字) 与 session_id 都是主键，
+        从库层面保证「同名即同一人」「一条会话只属于一个实体」。
+
+        迁移完成后删除 characters/groups 的 name / aliases / contacts 三列
+        （2026-10-23 决定：不留冗余副本，避免双写不一致）。
+        """
+        assert self._conn is not None
+        cur = await self._conn.execute("PRAGMA table_info(characters)")
+        cols = {r["name"] for r in await cur.fetchall()}
+        legacy = cols & {"name", "aliases", "contacts"}
+        if not legacy:
+            return  # 已是新结构
+
+        logger.info("开始迁移角色/群组的名称与联系方式到 entity_names / entity_contacts")
+        for entity_type, table in (("character", "characters"), ("group", "groups")):
+            cur = await self._conn.execute(
+                f"SELECT uuid, name, aliases, contacts FROM {table}"
+            )
+            rows = await cur.fetchall()
+            for row in rows:
+                uuid = row["uuid"]
+                primary = (row["name"] or "").strip()
+
+                # 主名 + 别名进 entity_names；主名优先占用，重复的别名静默跳过
+                names = []
+                if primary:
+                    names.append(primary)
+                for alias in json.loads(row["aliases"] or "[]"):
+                    if isinstance(alias, str) and alias.strip() and alias.strip() not in names:
+                        names.append(alias.strip())
+                for index, name in enumerate(names):
+                    await self._conn.execute(
+                        """INSERT INTO entity_names
+                               (entity_type, name, entity_uuid, is_primary, created_at)
+                           VALUES (?, ?, ?, ?, ?)
+                           ON CONFLICT(entity_type, name) DO NOTHING""",
+                        (entity_type, name, uuid, 1 if index == 0 else 0, ""),
+                    )
+
+                # 联系方式进 entity_contacts；旧 generation 残留的 remote ID 直接丢弃
+                for contact in json.loads(row["contacts"] or "[]"):
+                    session_id = contact.get("session_id") if isinstance(contact, dict) else None
+                    if not isinstance(session_id, str) or not session_id:
+                        continue
+                    if _is_stale_bridge_session(session_id):
+                        logger.warning("迁移时丢弃旧桥接残留联系方式: %s", session_id)
+                        continue
+                    platform, scope = _split_contact(session_id)
+                    await self._conn.execute(
+                        """INSERT INTO entity_contacts
+                               (session_id, entity_type, entity_uuid, platform, scope, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(session_id) DO NOTHING""",
+                        (session_id, entity_type, uuid, platform, scope, ""),
+                    )
+        await self._conn.commit()
+
+        for table in ("characters", "groups"):
+            for column in ("aliases", "contacts", "name"):
+                cur = await self._conn.execute(f"PRAGMA table_info({table})")
+                if column in {r["name"] for r in await cur.fetchall()}:
+                    await self._conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        await self._conn.commit()
+        logger.info("名称与联系方式迁移完成，已删除 characters/groups 的 name/aliases/contacts 列")
 
     async def _migrate_critical_actions_archive(self) -> None:
         """维护申请增加归档时间；不改 state，避免 recover_resets 漏挑待重置记录。"""
@@ -448,14 +565,21 @@ def deserialize_vector(blob) -> Optional[list]:
 
 
 def cosine_similarity(vec_a: list, vec_b: list) -> float:
-    """计算两个向量的余弦相似度。"""
-    import numpy as np
-    a = np.array(vec_a)
-    b = np.array(vec_b)
-    if len(a) != len(b):
+    """计算两个向量的余弦相似度。
+
+    纯 Python 实现，不依赖 numpy：发布包运行时只装 requirements.txt 里的依赖，
+    numpy 不在其中（且带 ABI 二进制，跨 Python 版本易出问题）。向量维度在
+    千级、只在检索时逐条比对，纯 Python 足够快。
+    """
+    if vec_a is None or vec_b is None or len(vec_a) != len(vec_b) or not vec_a:
         return 0.0
-    norm_a = np.linalg.norm(a)
-    norm_b = np.linalg.norm(b)
-    if norm_a == 0 or norm_b == 0:
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for a, b in zip(vec_a, vec_b):
+        dot += a * b
+        norm_a += a * a
+        norm_b += b * b
+    if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
-    return float(np.dot(a, b) / (norm_a * norm_b))
+    return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))

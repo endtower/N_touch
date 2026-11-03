@@ -26,6 +26,8 @@ public partial class MainWindow : Window
     private int _serviceEnsuring;
     private DateTime _consoleSessionRenewAt = DateTime.MinValue;
     private double? _managerStartedAt;
+    /// <summary>上一次看到的隧道状态：只在「正常 → 断开」时提醒一次，避免反复弹。</summary>
+    private bool? _tunnelHealthy;
 
     public MainWindow()
     {
@@ -209,11 +211,15 @@ public partial class MainWindow : Window
                 ApplyDot(IngressDot, "failed");
                 SetRunButtons(IngressStart, IngressStop, null);
             }
+            ApplyTunnelState(_targets.TryGetValue("tunnel", out var tunnel) ? tunnel : null);
             _serviceConnected = true;
             // 组件卡右上角的状态 chip：管理服务与启动器自身常驻，另有跑起来的业务/常驻目标
-            var runningCount = new[] { "core", "snowluma", "ingress" }.Count(TargetRunning) + 2;
+            var managedNames = new List<string> { "core", "snowluma", "ingress" };
+            if (_targets.ContainsKey("tunnel")) managedNames.Add("tunnel");
+            var runningCount = managedNames.Count(TargetRunning) + 2;
             SetChip(ComponentsChip, ComponentsChipText,
-                runningCount >= 5 ? "全部运行" : $"运行中 {runningCount} / 5", false);
+                runningCount >= managedNames.Count + 2 ? "全部运行"
+                    : $"运行中 {runningCount} / {managedNames.Count + 2}", false);
             if (Web.CoreWebView2 is not null && DateTime.UtcNow >= _consoleSessionRenewAt)
             {
                 var session = await _client.GetAsync("/v1/console-session");
@@ -637,6 +643,98 @@ public partial class MainWindow : Window
         stop.IsEnabled = target is not null && running;
         start.ToolTip = running ? "已在运行" : "启动";
         stop.ToolTip = running ? "停止" : "未在运行";
+    }
+
+    // ---------------- Pi 隧道 ----------------
+
+    /// <summary>隧道是否端到端可用：进程在跑、端口在听、Pi 端桥接也响应。</summary>
+    private static bool TunnelHealthy(ManagerClient.Target? tunnel) =>
+        tunnel is not null && tunnel.State == "running" && tunnel.Ready;
+
+    /// <summary>刷新总览里的 Pi 隧道行与网页区状态条；状态由「通」变「断」时弹一次托盘气泡。</summary>
+    private void ApplyTunnelState(ManagerClient.Target? tunnel)
+    {
+        var configured = tunnel is not null;
+        TunnelRow.Visibility = configured ? Visibility.Visible : Visibility.Collapsed;
+        TunnelRowDivider.Visibility = configured ? Visibility.Visible : Visibility.Collapsed;
+        if (tunnel is null)
+        {
+            _tunnelHealthy = null;
+            UpdateTunnelBar(null);
+            return;
+        }
+
+        var healthy = TunnelHealthy(tunnel);
+        ApplyDot(TunnelDot, healthy ? "running"
+            : tunnel.State == "starting" ? "starting"
+            : tunnel.State == "running" ? "failed" : tunnel.State);
+        var where = tunnel.Ports.Length > 0 ? $"本机 {string.Join("/", tunnel.Ports)}" : "本机端口未知";
+        var detail = $"{where} · {tunnel.State}"
+            + (tunnel.External ? " · 外部进程" : "")
+            + (string.IsNullOrEmpty(tunnel.LastError) ? "" : $" · {tunnel.LastError}");
+        if (healthy) detail = where + " · 已连通";
+        TunnelDetail.Text = detail;
+        TunnelDetail.ToolTip = detail;
+        SetRunButtons(TunnelStart, TunnelStop, tunnel);
+
+        if (_tunnelHealthy == true && !healthy)
+            App.Notify("Pi 隧道已断开", "微信收发会失效。打开启动器后点「重新连接」，或在 Pi 页面顶部重连。");
+        _tunnelHealthy = healthy;
+
+        UpdateTunnelBar(tunnel);
+    }
+
+    /// <summary>网页区顶部的隧道状态条：只在当前入口是 tunnel 时出现。</summary>
+    private void UpdateTunnelBar(ManagerClient.Target? tunnel)
+    {
+        var entry = CurrentConnection();
+        var isTunnel = entry?.ManagedTarget == "tunnel";
+        TunnelBar.Visibility = isTunnel ? Visibility.Visible : Visibility.Collapsed;
+        if (!isTunnel) return;
+
+        if (tunnel is null)
+        {
+            SetTheme(TunnelBarDot, System.Windows.Shapes.Shape.FillProperty, "BrushTagDanger");
+            TunnelBarText.Text = "未检测到隧道配置：请在系统设置里填写 Pi 地址、用户名与密钥路径，并重启管理服务。";
+            TunnelBarAction.Content = "查看说明";
+            TunnelBarAction.Tag = "";
+            TunnelBarAction.IsEnabled = true;
+            return;
+        }
+
+        var healthy = TunnelHealthy(tunnel);
+        SetTheme(TunnelBarDot, System.Windows.Shapes.Shape.FillProperty,
+            healthy ? "BrushTagSuccess" : tunnel.State == "starting" ? "BrushTagWarning" : "BrushTagDanger");
+        TunnelBarAction.Tag = "tunnel";
+        TunnelBarAction.IsEnabled = true;
+        if (healthy)
+        {
+            TunnelBarText.Text = "隧道已连接。画面显示的是 Pi 桌面，与消息通道是两条不同的链路。";
+            TunnelBarAction.Content = "断开";
+        }
+        else if (tunnel.State == "starting")
+        {
+            TunnelBarText.Text = "正在建立隧道…";
+            TunnelBarAction.Content = "连接中";
+            TunnelBarAction.IsEnabled = false;
+        }
+        else
+        {
+            TunnelBarText.Text = "隧道未连接，微信消息发不出去。"
+                + (string.IsNullOrEmpty(tunnel.LastError) ? "" : "原因：" + tunnel.LastError);
+            TunnelBarAction.Content = tunnel.State == "running" ? "重新连接" : "连接 Pi";
+        }
+    }
+
+    private async void TunnelBarAction_Click(object sender, RoutedEventArgs e)
+    {
+        if (TunnelBarAction.Tag?.ToString() != "tunnel")
+        {
+            StatusBar.Text = "请先在系统设置的平台接入里配置 Pi 隧道";
+            return;
+        }
+        var action = TunnelHealthy(_targets.TryGetValue("tunnel", out var t) ? t : null) ? "stop" : "restart";
+        await Send($"/v1/targets/tunnel/{action}");
     }
 
     // ---------------- 状态灯 ----------------

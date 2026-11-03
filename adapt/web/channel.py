@@ -17,7 +17,7 @@ WebChannel：用浏览器 WebSocket 替代 NapCat/QQ 作为消息通道。
         {"type": "create_session", "scope": "private|group",
          "user_id": "...", "user_name": "...", "session_name": "...",
          "role": "..."}
-        {"type": "delete_session", "session_id": "..."}
+        {"type": "delete_session", "session_id": "...", "scope": "private|group (可选)"}
         {"type": "get_messages", "session_id": "..."}
         {"type": "delete_message", "session_id": "...", "message_id": "..."}
         {"type": "delete_messages", "session_id": "...", "message_ids": ["...", ...]}
@@ -62,8 +62,9 @@ from adapt.protocol import (
     Platform,
     SessionScope,
 )
+from adapt.session_identity import join_session_id
 from .config import WebChannelConfig
-from .models import WebSession
+from .models import SessionRuntime, WebSession
 from .db_store import DBStore
 from .identity_store import IdentityStore
 from .identity_manager import IdentityManager, IdentityError
@@ -336,6 +337,34 @@ class WebChannel:
                     return s
         return None
 
+    async def _ensure_runtime(self, sess: WebSession) -> SessionRuntime:
+        """取会话的发送身份；缺 runtime 时按会话补齐。
+
+        Web 只是输入入口：选中哪个会话就代表以该会话的身份说话。
+        因此会话存在但 runtime 缺失（旧数据 / 平台前缀会话）时在这里补一个种子身份，
+        而不是拒绝发送。补写失败直接上抛，不静默降级。
+        """
+        from .models import Identity
+
+        rt = self._identity_store.get_runtime(sess.session_id)
+        if rt is not None:
+            return rt
+        if sess.scope == "private":
+            user_id = sess.user_id or sess.session_id
+            user_name = sess.user_name or user_id
+        else:
+            default = self._identity_store.get_default_identity()
+            user_id, user_name = default.user_id, default.user_name
+        seed = Identity(user_id=user_id, user_name=user_name, is_default=True,
+                        created_at=time.time())
+        rt = SessionRuntime(session_id=sess.session_id, scope=sess.scope,
+                            active_identity=seed, identity_lib=[seed])
+        self._identity_store.put_runtime(rt)
+        self._identity_store.save()
+        await self._broadcast_runtime(rt)
+        logger.info(f"[Web] 补建 runtime: {sess.scope}_{sess.session_id} -> ({user_id}, {user_name})")
+        return rt
+
     # --------------------------------------------------------
     # 生命周期
     # --------------------------------------------------------
@@ -419,6 +448,7 @@ class WebChannel:
             handle_logs_ws,
             handle_config_get,
             handle_config_put,
+            handle_config_test,
             handle_connections, handle_connection_check, handle_connections_apply,
             handle_core_shutdown_internal,
         )
@@ -431,6 +461,7 @@ class WebChannel:
         self._app.router.add_get("/system/ws/logs", handle_logs_ws)
         self._app.router.add_get("/system/config", handle_config_get)
         self._app.router.add_put("/system/config", handle_config_put)
+        self._app.router.add_post("/system/config/test", handle_config_test)
         self._app.router.add_get("/system/connections", handle_connections)
         self._app.router.add_post("/system/connections/check", handle_connection_check)
         self._app.router.add_post("/system/connections/apply", handle_connections_apply)
@@ -885,8 +916,10 @@ class WebChannel:
             role=role,
         )
 
-        # 给新建的会话初始化 runtime (如果之前没自动初始化)
-        rt = self._identity_store.get_runtime(user_id)
+        # 给新建的会话初始化 runtime (如果之前没自动初始化)。
+        # runtime 的键必须与会话裸 ID 一致（私聊即 user_id，群聊即群号）：
+        # 发消息时按会话裸 ID 取 runtime，用 user_id 当键会让群聊取不到身份。
+        rt = self._identity_store.get_runtime(bare_id)
         if rt is None:
             from .models import Identity
             import time as _t
@@ -898,7 +931,7 @@ class WebChannel:
             )
             from .models import SessionRuntime
             rt = SessionRuntime(
-                session_id=user_id,
+                session_id=bare_id,
                 scope=scope_raw,
                 active_identity=seed,
                 identity_lib=[seed],
@@ -919,14 +952,15 @@ class WebChannel:
 
     async def _handle_delete_session(self, data: Dict, ws: web.WebSocketResponse) -> None:
         sid = (data.get("session_id") or "").strip()
+        scope = (data.get("scope") or "").strip()
         if not sid:
             await self._send_error(ws, "session_id 必填")
             return
 
-        # 找会话
+        # 找会话：scope 可选，带上可避免不同 scope 下裸 ID 相同的会话被误删
         target = None
         for s in await self._list_sessions():
-            if s.session_id == sid:
+            if s.session_id == sid and (not scope or s.scope == scope):
                 target = s
                 break
         if target is None:
@@ -1063,12 +1097,8 @@ class WebChannel:
             await self._send_error(ws, f"会话 {sid} 不存在（请先 create_session）")
             return
 
-        # 取当前激活身份 (没 runtime 就报错, 防止空身份发消息)
-        runtime = self._identity_store.get_runtime(sid)
-        if runtime is None or not runtime.identity_lib:
-            await self._send_error(ws, "该会话没有任何可用身份, 无法发消息")
-            return
-        active = runtime.active_identity
+        # 取当前发送身份；会话存在即视为接受该会话，缺 runtime 时补齐而不是拒绝
+        active = (await self._ensure_runtime(sess)).active_identity
 
         text = (data.get("text") or "").strip()
         images = data.get("images") or []
@@ -1117,7 +1147,7 @@ class WebChannel:
         message_id = uuid.uuid4().hex
         now = int(time.time())
         scope = SessionScope(sess.scope)
-        normalized_session_id = f"{sess.scope}_{sid}"
+        normalized_session_id = join_session_id(sess.scope, sid)
         ev = NormalizedEvent(
             platform=self.platform,
             scope=scope,
@@ -1160,6 +1190,14 @@ class WebChannel:
             return
         try:
             payload = ev.to_system_message_dict()
+            # Web 只是输入入口：命中已有会话时沿用它自己的平台来源，不另立 web 来源。
+            # 否则 store_message 会判「会话来源冲突」并让 Core 直接崩溃。
+            route = await self._store.session_route(sess.scope, sid)
+            if route is not None:
+                payload["session_info"].update(
+                    platform=route["platform"], connection_id=route["connection_id"],
+                    remote_session_id=route["remote_session_id"], generation=route["generation"],
+                )
             await self._message_processor.process_message(payload)
             logger.debug(
                 f"[Web] dispatched: session={sid} user={sess.user_id} "

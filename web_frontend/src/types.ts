@@ -9,6 +9,7 @@ export interface WebSession {
   user_name: string
   session_name: string
   role: string | null
+  platform: string         // qq | wechat | web
   created_at: number
 }
 
@@ -134,7 +135,7 @@ export type ClientMessage =
       role?: string              // (已弃用, 角色由 IdentityBar 管理)
     }
   | { type: 'list_sessions' }
-  | { type: 'delete_session'; session_id: string }
+  | { type: 'delete_session'; session_id: string; scope?: string }
   | {
       type: 'get_messages'
       session_id: string

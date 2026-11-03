@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-向量嵌入服务（全异步，OpenAI 兼容 /embeddings 端点）
+向量嵌入服务（全异步）
 
-当前接入火山方舟 API（doubao-embedding-vision，2048 维），本地 Ollama 作为
-备用方案（见 config/settings.py 的 VectorConfig）。
+两种接入形态（按模型名自动判定）：
+- 多模态模型（doubao-embedding-vision 系列）：走火山方舟 /embeddings/multimodal，
+  一次请求只处理一条文本（该接口把整条 input 合成一个向量，不能批量）。
+- 文本模型（含本地 Ollama 备用）：走 OpenAI 兼容 /embeddings，按批请求。
+
 调用失败不吞错、不降级，直接上抛 NetworkError 崩溃阻断（防止检索静默失效）。
 """
 
@@ -36,6 +39,9 @@ class EmbeddingService:
         self.api_key = api_key
         self.api_base = api_base.rstrip('/')
         self.model = model
+        # 多模态嵌入模型只能单条请求：/embeddings/multimodal 会把整条 input 合成一个向量
+        self.multimodal = "vision" in model.lower()
+        self.max_batch = 1 if self.multimodal else self.MAX_BATCH_SIZE
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
@@ -61,8 +67,8 @@ class EmbeddingService:
                 raise ValueError("输入文本必须是非空字符串")
 
         vectors: List[List[float]] = []
-        for start in range(0, len(texts), self.MAX_BATCH_SIZE):
-            vectors.extend(await self._embed_chunk(texts[start:start + self.MAX_BATCH_SIZE]))
+        for start in range(0, len(texts), self.max_batch):
+            vectors.extend(await self._embed_chunk(texts[start:start + self.max_batch]))
         return vectors
 
     async def generate_embedding(self, text: str) -> List[float]:
@@ -70,7 +76,55 @@ class EmbeddingService:
         return (await self.generate_embeddings([text]))[0]
 
     async def _embed_chunk(self, texts: List[str]) -> List[List[float]]:
-        """对一块（≤ MAX_BATCH_SIZE 条）文本发一次 /embeddings 请求。"""
+        """对一块文本发嵌入请求（多模态逐条，文本模型整块一次）。"""
+        if self.multimodal:
+            return [await self._embed_multimodal(text) for text in texts]
+        return await self._embed_openai(texts)
+
+    async def _embed_multimodal(self, text: str) -> List[float]:
+        """火山方舟多模态嵌入接口：一条请求一条文本，返回单个向量。"""
+        start_time = time.time()
+        payload = {
+            "model": self.model,
+            "input": [{"type": "text", "text": text}],
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{self.api_base}/embeddings/multimodal",
+                headers=self.headers,
+                json=payload,
+            )
+
+        elapsed = time.time() - start_time
+        if response.status_code != 200:
+            raise NetworkError(
+                f"嵌入API返回 {response.status_code}: {response.text[:200]}",
+                details={"model": self.model, "elapsed": round(elapsed, 3)},
+            )
+
+        result = response.json()
+        data = result.get("data")
+        embedding = data.get("embedding") if isinstance(data, dict) else None
+        if not embedding:
+            raise NetworkError(
+                "API返回的嵌入结果为空",
+                details={"model": self.model, "response_keys": list(result.keys())},
+            )
+
+        from config.llm_settings import resolve_provider_label
+        from utils.llm_client_manager import record_embedding_usage
+        await record_embedding_usage(
+            model=self.model,
+            provider=resolve_provider_label(self.api_base),
+            usage=result.get("usage"),
+        )
+        logger.debug(
+            f"多模态嵌入生成成功，向量维度: {len(embedding)}，耗时: {elapsed:.3f}秒"
+        )
+        return embedding
+
+    async def _embed_openai(self, texts: List[str]) -> List[List[float]]:
+        """OpenAI 兼容 /embeddings：一次请求整块文本。"""
         start_time = time.time()
 
         payload = {

@@ -123,6 +123,8 @@ function addSession(s: WebSession) {
 
 function removeSession(sid: string) {
   state.sessions = state.sessions.filter(s => s.session_id !== sid)
+  // 聊天记录查看器与左侧列表共用同一个后端会话，删除后两侧同步移除
+  state.sessionDebugList = (state.sessionDebugList ?? []).filter(s => s.session_id !== sid)
   delete state.messagesBySession[sid]
   delete state.thinkingBySession[sid]
   delete state.loadingHistoryBySession[sid]
@@ -882,17 +884,13 @@ function createSession(payload: {
   channel.send({ type: 'create_session', ...payload })
 }
 
-function deleteSession(sid: string) {
-  channel.send({ type: 'delete_session', session_id: sid })
+function deleteSession(sid: string, scope?: string) {
+  channel.send({ type: 'delete_session', session_id: sid, ...(scope ? { scope } : {}) })
 }
 
 function sendMessage(args: { session_id: string; text: string; images: string[] }) {
-  const sid = args.session_id
-  const rt = state.runtimesBySession[sid]
-  if (!rt || !rt.identity_lib || rt.identity_lib.length === 0) {
-    pushWarning('no_identity', '该会话没有任何可用身份, 无法发消息')
-    return
-  }
+  // 选中会话即视为要在该会话发言：身份缺失由服务端按会话补齐，
+  // 前端不再拦截（否则旧会话/平台前缀会话永远发不出去）。
   channel.send({ type: 'message', ...args })
 }
 

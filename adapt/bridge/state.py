@@ -179,6 +179,12 @@ class BridgeState:
             db.execute("UPDATE outbox SET status='unknown' WHERE request_id=? AND connection_id=? "
                        "AND status NOT IN ('observed','rejected','failed')", (request_id, connection_id))
 
+    def mark_rejected(self, connection_id: str, request_id: str):
+        """确定从未提交到桥接（接入服务未认领）时置 rejected，避免留下永远不发的 prepared。"""
+        with self._db() as db:
+            db.execute("UPDATE outbox SET status='rejected' WHERE request_id=? AND connection_id=? "
+                       "AND status='prepared'", (request_id, connection_id))
+
     def pending_sends(self, connection_id: str) -> list[dict]:
         with self._db() as db:
             return [dict(row) for row in db.execute(

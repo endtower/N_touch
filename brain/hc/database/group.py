@@ -3,14 +3,16 @@
 群组操作类（SQLite）
 
 以 00000000（LLM 扮演的角色）为中心，管理 00000000 指向的群组。
-群组表字段：别名（JSON 数组）、印象（单值）、熟悉度（单值）、群组成员印象（单值）、
-联系方式（JSON 数组）、self_image（我在该群聊的形象）。
+群组行只存单值字段（印象、熟悉度、群组成员印象、self_image）；
+名称（主名 + 别名）与联系方式分别存在 entity_names / entity_contacts，
+由 entity_identity 统一读写，(类型, 名字) 与 session_id 都是主键。
 """
 
 import json
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, List, Dict, Any
 
+from . import entity_identity as identity
 from .core import get_memory_db, serialize_vector, deserialize_vector, cosine_similarity
 from .common import generate_timestamp_id
 from .vector_store import get_vector_store
@@ -30,68 +32,46 @@ class GroupOperations:
     # ============================================================
 
     async def create_group_node(self, name: str, uuid: str = None) -> str:
-        """创建群组节点。"""
+        """创建群组节点。传入 uuid 表示按既有 uuid 幂等写入（同名覆盖主名）。"""
         current_time = datetime.now().isoformat()
         if not uuid:
             uuid = generate_timestamp_id("Group")
 
         conn = await self.db._ensure_connection()
         await conn.execute(
-            """INSERT INTO groups (uuid, name, aliases, usage_count, last_used_at, created_at)
-               VALUES (?, ?, ?, 0, ?, ?)
-               ON CONFLICT(uuid) DO UPDATE SET name=excluded.name""",
-            (uuid, name, json.dumps([name], ensure_ascii=False), current_time, current_time),
+            """INSERT INTO groups (uuid, usage_count, last_used_at, created_at)
+               VALUES (?, 0, ?, ?)
+               ON CONFLICT(uuid) DO NOTHING""",
+            (uuid, current_time, current_time),
         )
+        await identity.set_primary_name(conn, identity.GROUP, uuid, name)
         await conn.commit()
         return uuid
 
     async def create_alias_node(self, name: str, owner_uuid: str) -> None:
-        """为群组添加别名（追加到 aliases JSON 数组）。"""
+        """为群组添加别名。"""
         conn = await self.db._ensure_connection()
-        cur = await conn.execute("SELECT aliases FROM groups WHERE uuid=?", (owner_uuid,))
-        row = await cur.fetchone()
-        if row is None:
-            return
-        aliases = json.loads(row["aliases"] or "[]")
-        if name not in aliases:
-            aliases.append(name)
-        await conn.execute(
-            "UPDATE groups SET aliases=? WHERE uuid=?",
-            (json.dumps(aliases, ensure_ascii=False), owner_uuid),
-        )
+        await identity.add_name(conn, identity.GROUP, owner_uuid, name)
         await conn.commit()
 
     async def create_contact_node(self, session_id: str, owner_uuid: str) -> None:
-        """为群组添加联系方式（追加到 contacts JSON 数组）。"""
+        """为群组添加联系方式。"""
         conn = await self.db._ensure_connection()
-        cur = await conn.execute("SELECT contacts FROM groups WHERE uuid=?", (owner_uuid,))
-        row = await cur.fetchone()
-        if row is None:
-            return
-        contacts = json.loads(row["contacts"] or "[]")
-        if not any(c.get("session_id") == session_id for c in contacts):
-            contacts.append({"session_id": session_id, "usage_count": 0})
-        await conn.execute(
-            "UPDATE groups SET contacts=? WHERE uuid=?",
-            (json.dumps(contacts, ensure_ascii=False), owner_uuid),
-        )
+        await identity.add_contact(conn, identity.GROUP, owner_uuid, session_id)
         await conn.commit()
 
     async def replace_aliases(self, owner_uuid: str, new_aliases: list) -> None:
-        """整组替换群组别名（覆盖 aliases JSON 数组）。"""
+        """整组替换群组名称（new_aliases[0] 为主名）。"""
         conn = await self.db._ensure_connection()
-        await conn.execute(
-            "UPDATE groups SET aliases=? WHERE uuid=?",
-            (json.dumps(new_aliases, ensure_ascii=False), owner_uuid),
-        )
+        await identity.replace_names(conn, identity.GROUP, owner_uuid, new_aliases)
         await conn.commit()
 
     async def update_group(self, uuid: str, **fields: Any) -> bool:
         """更新群组可编辑字段（名称/别名/印象/熟悉度/成员印象/self_image），成功后重新向量化。
 
         fields 支持:
-          name: str              — 群组名称
-          aliases: list[str]     — 别名（整组替换，覆盖 aliases JSON 数组）
+          name: str              — 主名（被其他群组占用则抛 NameConflictError）
+          aliases: list[str]     — 名称整组替换（首项为主名）
           impression: str        — 印象（单值）
           familiarity: str       — 熟悉度（单值）
           member_impression: str — 群组成员印象（单值）
@@ -110,12 +90,6 @@ class GroupOperations:
 
         sets: List[str] = []
         params: List[Any] = []
-        if fields.get("name") is not None:
-            sets.append("name=?")
-            params.append(fields["name"])
-        if fields.get("aliases") is not None:
-            sets.append("aliases=?")
-            params.append(json.dumps(fields["aliases"], ensure_ascii=False))
         if fields.get("impression") is not None:
             sets.append("impression=?")
             params.append(fields["impression"])
@@ -138,7 +112,13 @@ class GroupOperations:
                 f"UPDATE groups SET {', '.join(sets)} WHERE uuid=?",
                 params,
             )
-            await conn.commit()
+
+        if fields.get("aliases") is not None:
+            await identity.replace_names(conn, identity.GROUP, uuid, fields["aliases"])
+        elif fields.get("name") is not None:
+            await identity.set_primary_name(conn, identity.GROUP, uuid, fields["name"])
+
+        await conn.commit()
 
         # 仅切换放行开关不影响描述文本，避免无谓的向量重算
         if set(fields) - {"allow_conversation"}:
@@ -146,17 +126,17 @@ class GroupOperations:
         return True
 
     async def delete_group(self, uuid: str) -> bool:
-        """删除群组行。
-
-        别名 / 印象 / 熟悉度 / 成员印象 / 联系方式 / 群组自我形象 / 向量都在同一
-        行的 JSON/BLOB 列内，随行一并删除；返回 False 表示 uuid 不存在。
-        """
+        """删除群组行及其名称与联系方式；返回 False 表示 uuid 不存在。"""
         if not uuid:
             return False
         conn = await self.db._ensure_connection()
         cur = await conn.execute("DELETE FROM groups WHERE uuid=?", (uuid,))
+        if cur.rowcount == 0:
+            await conn.commit()
+            return False
+        await identity.delete_entity(conn, identity.GROUP, uuid)
         await conn.commit()
-        return cur.rowcount > 0
+        return True
 
     # ============================================================
     # 查询
@@ -171,23 +151,20 @@ class GroupOperations:
             return None
         return {
             "uuid": row["uuid"],
-            "name": row["name"],
+            "name": await identity.get_primary_name(conn, identity.GROUP, uuid),
             "usage_count": row["usage_count"],
             "last_used_at": row["last_used_at"],
             "created_at": row["created_at"],
         }
 
     async def get_group_by_contact(self, session_id: str) -> Optional[str]:
-        """根据会话 ID 查找对应群组 UUID。"""
+        """根据会话 ID 查找对应群组 UUID（只认群组，不认角色）。"""
         if not session_id:
             return None
         conn = await self.db._ensure_connection()
-        cur = await conn.execute("SELECT uuid, contacts FROM groups")
-        rows = await cur.fetchall()
-        for r in rows:
-            contacts = json.loads(r["contacts"] or "[]")
-            if any(c.get("session_id") == session_id for c in contacts):
-                return r["uuid"]
+        found = await identity.find_entity_by_contact(conn, session_id)
+        if found and found[0] == identity.GROUP:
+            return found[1]
         return None
 
     async def get_group_with_details(self, uuid: str) -> Optional[Dict[str, Any]]:
@@ -197,14 +174,15 @@ class GroupOperations:
         row = await cur.fetchone()
         if row is None:
             return None
+        names = await identity.get_names(conn, identity.GROUP, uuid)
         return {
             "uuid": row["uuid"],
-            "name": row["name"],
-            "aliases": [{"name": a, "usage_count": 0} for a in json.loads(row["aliases"] or "[]")],
+            "name": names[0] if names else "",
+            "aliases": [{"name": n, "usage_count": 0} for n in names],
             "impressions": [{"content": row["impression"]}] if row["impression"] else [],
             "familiarities": [{"content": row["familiarity"]}] if row["familiarity"] else [],
             "member_impressions": [{"content": row["member_impression"]}] if row["member_impression"] else [],
-            "contacts": json.loads(row["contacts"] or "[]"),
+            "contacts": await identity.get_contacts(conn, identity.GROUP, uuid),
             "relationships_with_default": [{"type": row["self_image"]}] if row["self_image"] else [],
             "allow_conversation": bool(row["allow_conversation"]),
             "usage_count": row["usage_count"],

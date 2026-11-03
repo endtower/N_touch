@@ -189,6 +189,8 @@ public partial class MainWindow
         Web.Visibility = Visibility.Collapsed;
         WebUnavailable.Visibility = Visibility.Visible;
         if (force) _navigationError = "";
+        UpdateTunnelBar(entry?.ManagedTarget == "tunnel" && _targets.TryGetValue("tunnel", out var tunnel)
+            ? tunnel : null);
         if (entry is null)
         {
             WebPageState.Text = "入口已移除";

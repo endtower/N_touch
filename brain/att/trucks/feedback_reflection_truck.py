@@ -29,7 +29,7 @@ class _FeedbackReflectionTruck(_BaseReflectionTruck):
         if not force and time.monotonic() - self._last_high_check < settings.CHECK_INTERVAL_SECONDS:
             return ""
         self._last_high_check = time.monotonic()
-        return f"{AXIS_NAMES[self.axis]} {state[self.value_key]:g}/100。可以使用 maintenance_action 登记{actions[0]}，填写相应内容和时间；登记后仅对应值重置为50。"
+        return f"{AXIS_NAMES[self.axis]} {state[self.value_key]:g}/100。可以使用 maintenance_action 登记{actions[0]}并立即执行，填写相应内容；登记后仅对应值重置为50。"
 
     async def get_truck_messages(self):
         # 执行前核对当前数值，避免排队期间已恢复或关闭仍然启动。

@@ -310,6 +310,11 @@ class MemoryAgent(LightweightAgent):
         """Agent 修改完毕后，重新拉取实体最新信息写入 temporary_memory（identifier = uuid）。"""
         if not session_id:
             return
+
+        # 印象刚被改写：先让通讯录丢掉该会话的旧描述，下次读取即重查。
+        from memory.address_book import get_address_book
+        await get_address_book().refresh_impression(session_id)
+
         compose = CharacterCompose()
         result = await compose.first_session_impression_search(name=None, session_id=session_id)
 
@@ -406,7 +411,7 @@ class MemoryAgent(LightweightAgent):
 
         current_primary = cleaned_name_list[0] if name_list is not None else primary_name
 
-        overwrite_kwargs = {"name": current_primary}
+        overwrite_kwargs = {"character_id": character_id}
         if impression:
             overwrite_kwargs["impression"] = impression
         if familiarity:
@@ -479,7 +484,7 @@ class MemoryAgent(LightweightAgent):
 
         current_primary = cleaned_name_list[0] if name_list is not None else primary_name
 
-        overwrite_kwargs = {"name": current_primary}
+        overwrite_kwargs = {"group_id": group_id}
         if impression:
             overwrite_kwargs["impression"] = impression
         if familiarity:

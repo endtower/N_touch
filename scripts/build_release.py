@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build reviewable Windows release files and independent component packages.
 
-This never modifies the installed dist/Abyss or the user's running processes.
+This never modifies the installed 常用版本 (compat link dist/Abyss) or the user's running processes.
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def main():
     # Preserve the established repository data root for this local build only.
     (program / "abyss-data-dir.txt").write_text(os.path.relpath(ROOT, program), encoding="utf-8")
     # dotnet/pyinstaller 的中转目录（bin/obj/build）会生成同名 EXE 副本，日常极易误点；
-    # 发布完成后一并清掉，磁盘上只留 dist/Abyss 与 dist/independent-updates（2026-10-15）。
+    # 发布完成后一并清掉，磁盘上只留 常用版本（兼容入口 dist/Abyss）与 dist/independent-updates（2026-10-15）。
     for intermediate in (ROOT / "launcher" / "bin", ROOT / "launcher" / "obj",
                          ROOT / "updater" / "bin", ROOT / "updater" / "obj",
                          ROOT / "updater-tests" / "bin", ROOT / "updater-tests" / "obj",

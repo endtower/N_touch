@@ -121,9 +121,18 @@ class BridgeIngressChannel(IngressChannel):
             result = await self._request("POST", "/v1/bridge/send", {"request_id": row["request_id"]})
             if result.get("request_id") != row["request_id"]:
                 raise NetworkError("桥接回执身份不匹配")
-        except NetworkError:
+        except NetworkError as exc:
             current = await asyncio.to_thread(self.state.send_record, row["request_id"])
-            if current["status"] in ("prepared", "submitting"):
+            if current["status"] == "prepared":
+                # 接入服务从未认领该请求（未写入 submitting），确定没有提交到桥接：
+                # 置 rejected 收尾（不留永远不发的 prepared），并直接报错阻断，
+                # 不写 unknown 冒充"可能已发出"，也不让上层当成已发送。
+                # 用 ValueError 交给工具层回给 LLM（NetworkError 会被路由层判为致命并退出进程）。
+                await asyncio.to_thread(self.state.mark_rejected,
+                                        self.config.connection_id, row["request_id"])
+                raise ValueError(f"微信桥接未就绪，本条未发送：{exc}") from exc
+            if current["status"] == "submitting":
+                # 已提交但响应丢失，是否执行无法判断，只能记 unknown 等后续 reconcile。
                 await asyncio.to_thread(self.state.mark_unknown, self.config.connection_id, row["request_id"])
         saved = await asyncio.to_thread(self.state.send_record, row["request_id"])
         return SendReceipt(saved["request_id"], saved["status"], saved["send_id"], saved["message_id"])

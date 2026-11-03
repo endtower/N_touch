@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy tested components to the established dist/Abyss, preserving user data.
+"""Deploy tested components to the established 常用版本 (compat link dist/Abyss), preserving user data.
 
 Uses the C# installer's backup and rollback transaction, including for the initial
 bootstrap from releases whose manager did not yet support update APIs.
@@ -33,9 +33,12 @@ def main():
                         default=["core", "ingress", "manager", "launcher"])
     args = parser.parse_args()
     release = ROOT / "dist/independent-updates"
-    target = ROOT / "dist/Abyss"
-    if not target.is_dir() or target.resolve() != ROOT / "dist/Abyss":
-        raise ValueError("Deployment target must be the existing dist/Abyss")
+    program = ROOT / "常用版本"
+    link = ROOT / "dist/Abyss"
+    if not link.is_dir() or link.resolve() != program.resolve():
+        raise ValueError("Deployment target must be the existing 常用版本 (linked as dist/Abyss)")
+    # 进程路径比较使用真实目录；兼容链接只用于保留旧脚本入口。
+    target = program
     folder = ROOT / "manager/updates/jobs" / ("bootstrap-" + uuid.uuid4().hex)
     folder.mkdir(parents=True)
     helper = folder / "AbyssUpdater.exe"
@@ -125,7 +128,12 @@ def main():
         for path in jobs:
             subprocess.run([str(helper), str(path), "--files-only"], check=True,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        shutil.copy2(ROOT / "component_versions.json", target / "component_versions.json")
+        # 只更新本次实际部署的组件版本；整份复制会把未部署组件（如 Core）
+        # 的基线版本改成仓库里的新版本，导致界面版本与真实程序不一致。
+        deployed = json.loads((target / "component_versions.json").read_text(encoding="utf-8")) \
+            if (target / "component_versions.json").is_file() else {}
+        deployed.update({name: versions[name] for name in args.components})
+        write_json(target / "component_versions.json", deployed)
         print(f"Deployed: {target}\nProgram backups: {folder}", flush=True)
     finally:
         if info or launchers:

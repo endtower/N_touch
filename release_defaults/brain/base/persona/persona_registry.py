@@ -233,14 +233,31 @@ def list_roster_personas() -> List[PersonaDef]:
     return [p for p in _PERSONAS.values() if p.persona_name != COMMON_PERSONA_NAME]
 
 
+def list_selectable_personas() -> List[PersonaDef]:
+    """列出可作为会话人格指定的人格（含基本人格条目）。
+
+    与 list_roster_personas 的分工：roster 用于内荐与人格清单展示，排除基本人格；
+    但基本人格本身是合法的会话人格——全新安装只有 common 时，
+    DEFAULT_PERSONA_MODE 就是它，工具入参也必须能通过校验。
+    """
+    return list(_PERSONAS.values())
+
+
 def render_persona_roster() -> str:
     """渲染人格清单文本（常备描述，供需要让 LLM 知晓可选人格的提示词嵌入）。
 
     只列参与内荐 / 可作会话人格的人格（不含基本人格条目），
     每行「人格名：适配场景」。切换人格不影响身份归属，仅换一套应对手段。
+    全新安装只有基本人格时，清单为空——此时明确说明，不输出空壳标题。
     """
+    roster = list_roster_personas()
+    if not roster:
+        return (
+            "你目前只有基本人格（common），没有额外人格可切换；"
+            "指定会话人格时留空即可，不要自行编造人格名。"
+        )
     lines = ["你具有以下人格。"]
-    lines += [f"{p.persona_name}：{p.scene}" for p in list_roster_personas()]
+    lines += [f"{p.persona_name}：{p.scene}" for p in roster]
     lines.append(
         "人格是一种应对特定方面事件的状态，切换人格仍然是你，"
         "只是切换了一套快速用于该类事件的经验集合与手段。"

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ast
 import importlib.metadata
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -29,20 +30,23 @@ role_config = RoleConfig()
 '''
 
 INITIALIZER_TEMPLATE = '''"""全新安装只建立必要身份，不导入开发者的群、经验或个人印象。"""
-import json
 from datetime import datetime
 class DefaultInitializer:
     @staticmethod
     async def initialize_all():
         from brain.hc.database.core import get_memory_db
+        from brain.hc.database import entity_identity
         from config.role_settings import role_config
         conn = await get_memory_db()._ensure_connection()
         now = datetime.now().isoformat()
-        identities = [("00000000", role_config.ASSISTANT_NAME, [])]
+        identities = [("00000000", role_config.ASSISTANT_NAME, "")]
         if role_config.MASTER_ID not in ("", "0"):
-            identities.append(("00000001", role_config.MASTER_NAME, [{"session_id": "private_" + role_config.MASTER_ID, "usage_count": 0}]))
-        for uuid, name, contacts in identities:
-            await conn.execute("INSERT OR IGNORE INTO characters (uuid,name,aliases,contacts,usage_count,last_used_at,created_at) VALUES (?,?,?,?,0,?,?)", (uuid,name,json.dumps([name],ensure_ascii=False),json.dumps(contacts),now,now))
+            identities.append(("00000001", role_config.MASTER_NAME, "private_" + role_config.MASTER_ID))
+        for uuid, name, session_id in identities:
+            await conn.execute("INSERT OR IGNORE INTO characters (uuid,usage_count,last_used_at,created_at) VALUES (?,0,?,?)", (uuid, now, now))
+            await entity_identity.set_primary_name(conn, entity_identity.CHARACTER, uuid, name)
+            if session_id:
+                await entity_identity.add_contact(conn, entity_identity.CHARACTER, uuid, session_id)
         await conn.commit()
 '''
 
@@ -82,6 +86,37 @@ def copy_sources(destination: Path):
     if not (frontend / "index.html").is_file():
         raise ValueError("请先构建 Web UI；源码 Core 必须携带与后端匹配的前端")
     shutil.copytree(frontend, destination / "web_frontend/dist")
+
+
+def _copy_package_without_record(dist, site: Path, name: str) -> None:
+    """手工放置的依赖常缺 RECORD（dist.files 为 None），按实际导入位置整体复制。
+
+    不能静默跳过：那会让发布的 runtime 少依赖，用户端首次用到才报
+    ModuleNotFoundError（例如向量比对缺 numpy / aiosqlite）。这里复制完整
+    包目录与 dist-info，并在构建输出里明确提示。
+    """
+    top = name.lower().replace("-", "_")
+    spec = importlib.util.find_spec(top)
+    if spec is None or (not spec.submodule_search_locations and not spec.origin):
+        raise ValueError(f"依赖 {name} 缺文件清单且无法定位导入位置，请重新安装 requirements.txt")
+    if spec.submodule_search_locations:
+        source = Path(list(spec.submodule_search_locations)[0])
+    else:
+        source = Path(spec.origin)
+    if not source.exists():
+        raise ValueError(f"依赖 {name} 的包内容不存在: {source}")
+    target = site / source.name
+    if source.is_dir():
+        shutil.copytree(source, target, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "tests"))
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    info = Path(str(getattr(dist, "_path", "")))
+    if info.is_dir():
+        shutil.copytree(info, site / info.name, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    print(f"依赖 {name} 缺少 RECORD，已按包目录整体复制: {source}", flush=True)
 
 
 def copy_runtime(destination: Path, reuse_standard_library=False):
@@ -124,6 +159,8 @@ def copy_runtime(destination: Path, reuse_standard_library=False):
         if key in found:
             continue
         found[key] = dist.version
+        if dist.files is None:
+            _copy_package_without_record(dist, site, requirement.name)
         for entry in dist.files or []:
             relative = Path(str(entry))
             if relative.is_absolute() or ".." in relative.parts or "__pycache__" in relative.parts or relative.suffix == ".pyc":

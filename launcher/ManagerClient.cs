@@ -73,6 +73,8 @@ public class ManagerClient
         public string LastError { get; set; } = "";
         public double? UptimeSec { get; set; }
         public bool? OneBotConnected { get; set; }
+        /// <summary>隧道类目标：端口由外部进程提供，本服务不接管。</summary>
+        public bool External { get; set; }
     }
 
     public static Target ParseTarget(JsonElement el)
@@ -95,6 +97,7 @@ public class ManagerClient
             UptimeSec = up,
             OneBotConnected = el.TryGetProperty("onebot_connected", out var connected)
                 && connected.ValueKind is JsonValueKind.True or JsonValueKind.False ? connected.GetBoolean() : null,
+            External = el.TryGetProperty("external", out var ext) && ext.ValueKind == JsonValueKind.True,
         };
     }
 }

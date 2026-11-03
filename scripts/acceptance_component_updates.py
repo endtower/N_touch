@@ -393,6 +393,45 @@ class UpdateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["managed_by"], "core")
         self.assertFalse(row["installable"])
 
+    async def test_snowluma_version_prefers_installed_package_over_stale_receipt(self):
+        target = self.root / "SnowLuma"
+        target.mkdir()
+        write_json(target / "package.json", {"version": "2.0.3"})
+        # 另一个 app_root（例如源码运行）留下的旧 receipt 指向同一目标目录。
+        write_json(self.updates.receipt_path("snowluma"),
+                   {"version": "1.14.22", "target_root": str(target), "files": {"index.mjs": "0" * 64}})
+        with patch.object(supervisor, "snowluma_root", return_value=target):
+            self.assertEqual(self.updates.version("snowluma"), "2.0.3")
+
+    async def test_snowluma_stale_receipt_scans_current_files_before_update(self):
+        target = self.root / "SnowLuma"
+        target.mkdir()
+        (target / "index.mjs").write_bytes(b"2.0.3")
+        (target / "node.exe").write_bytes(b"node")
+        (target / "client").mkdir()
+        (target / "client" / "old-asset.js").write_bytes(b"old")
+        write_json(target / "package.json", {"version": "2.0.3"})
+        # receipt 只记录更早的 1.14.22，不能据此漏掉当前版本的文件。
+        write_json(self.updates.receipt_path("snowluma"),
+                   {"version": "1.14.22", "target_root": str(target), "files": {"index.mjs": "0" * 64}})
+        source = self.root / "snow-source"
+        source.mkdir()
+        (source / "index.mjs").write_bytes(b"new")
+        (source / "node.exe").write_bytes(b"node")
+        (source / "client").mkdir()
+        (source / "client" / "new-asset.js").write_bytes(b"new")
+        write_json(source / "package.json", {"version": "2.1.0"})
+        archive = package("snowluma", "2.1.0", source, self.root / "snow-packages")
+        await self.updates.import_local("snowluma", str(archive))
+        (self.program / "updater").mkdir(exist_ok=True)
+        (self.program / "updater/AbyssUpdater.exe").write_bytes(b"fake-helper")
+        with patch.object(supervisor, "snowluma_root", return_value=target), \
+                patch.object(updates_module.subprocess, "Popen", return_value=types.SimpleNamespace(pid=123456)):
+            await self.updates.apply("snowluma")
+        job = updates_module.read_json(Path(self.updates.active()["job"]))
+        self.assertIn("index.mjs", job["previous_files"])
+        self.assertIn("client/old-asset.js", job["previous_files"])
+
     async def check_failed_startup(self, data_policy):
         folder = self.updates.root / "jobs/failed-startup"
         job_path = folder / "job.json"

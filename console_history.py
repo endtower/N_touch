@@ -39,18 +39,34 @@ def list_sessions() -> list[dict]:
     memory = root / "memory.db"
     if memory.exists():
         with closing(_connect(memory)) as conn:
-            for scope, table in (("private", "characters"), ("group", "groups")):
-                for name, aliases_json, contacts_json in conn.execute(
-                    f"SELECT name, aliases, contacts FROM {table} ORDER BY uuid"
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "entity_names" in tables and "entity_contacts" in tables:
+                # 新结构：名称与联系方式分别成表，主名即为显示名
+                for sid, display in conn.execute(
+                    """SELECT c.session_id, n.name
+                       FROM entity_contacts c
+                       JOIN entity_names n
+                         ON n.entity_type = c.entity_type
+                        AND n.entity_uuid = c.entity_uuid
+                        AND n.is_primary = 1
+                       ORDER BY c.rowid"""
                 ):
-                    aliases = json.loads(aliases_json or "[]")
-                    contacts = json.loads(contacts_json or "[]")
-                    first = aliases[0] if isinstance(aliases, list) and aliases else None
-                    display = (first.strip() if isinstance(first, str) else "") or name
-                    for contact in contacts if isinstance(contacts, list) else []:
-                        sid = contact.get("session_id") if isinstance(contact, dict) else None
-                        if display and isinstance(sid, str) and sid.startswith(scope + "_"):
-                            names.setdefault(sid, display)
+                    if isinstance(sid, str) and display:
+                        names.setdefault(sid, display)
+            else:
+                # 旧结构（尚未启动过新版 Core 做迁移）：沿用内联 JSON
+                for scope, table in (("private", "characters"), ("group", "groups")):
+                    for name, aliases_json, contacts_json in conn.execute(
+                        f"SELECT name, aliases, contacts FROM {table} ORDER BY uuid"
+                    ):
+                        aliases = json.loads(aliases_json or "[]")
+                        contacts = json.loads(contacts_json or "[]")
+                        first = aliases[0] if isinstance(aliases, list) and aliases else None
+                        display = (first.strip() if isinstance(first, str) else "") or name
+                        for contact in contacts if isinstance(contacts, list) else []:
+                            sid = contact.get("session_id") if isinstance(contact, dict) else None
+                            if display and isinstance(sid, str) and sid.startswith(scope + "_"):
+                                names.setdefault(sid, display)
     with closing(_connect(history)) as conn:
         rows = conn.execute("SELECT session_id, session_name, last_update_time FROM sessions ORDER BY last_update_time DESC").fetchall()
     sessions = []

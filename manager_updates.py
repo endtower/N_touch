@@ -158,6 +158,13 @@ class Updates:
         return app_root()
 
     def version(self, component):
+        if component == "snowluma":
+            # SnowLuma 程序目录可能被多个 app_root（源码运行 / 冻结安装）共用，
+            # 而 receipt 各自保存在 app_root 下，另一份可能落后于真实安装。
+            # 以目标目录里的 package.json 为准，避免更新后界面仍显示旧版本。
+            installed = read_json(self.target_root(component) / "package.json", {})
+            if installed.get("version"):
+                return installed["version"]
         receipt = read_json(self.receipt_path(component), {})
         if receipt.get("version"):
             return receipt["version"]
@@ -166,7 +173,7 @@ class Updates:
             installed = read_json(app_root() / "components/core/release.json", {})
             return installed.get("version", "未安装")
         if component == "snowluma":
-            return read_json(self.target_root(component) / "package.json", {}).get("version", "未安装")
+            return "未安装"
         baseline = read_json(app_root() / "component_versions.json") or read_json(resource_root() / "component_versions.json", {})
         return baseline.get(component, "未知")
 
@@ -640,9 +647,14 @@ class Updates:
                 (review["affected"] if review else [name] if name in self.service.controllers else [])
             target = self.target_root(name).resolve()
             old = read_json(self.receipt_path(name), {})
-            if old.get("files") and old.get("target_root") == str(target):
-                owned = list(old["files"])
-            else:
+            owned = list(old["files"]) if old.get("files") and old.get("target_root") == str(target) else []
+            if name == "snowluma" and owned:
+                # receipt 可能来自另一个 app_root 且落后于真实安装；按旧 receipt 计算
+                # 待删除文件会漏掉当前版本的文件。版本不一致时改为扫描目标目录。
+                installed = read_json(target / "package.json", {}).get("version")
+                if installed != old.get("version"):
+                    owned = []
+            if not owned:
                 owned = [p.relative_to(target).as_posix() for p in target.rglob("*") if p.is_file() and
                          allowed_file(name, p.relative_to(target).as_posix())]
             # Block new control commands before stopping, including the console routes.

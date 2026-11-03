@@ -72,6 +72,14 @@ def build_specs_safe() -> tuple[dict[str, ProcSpec], list[str]]:
             dependencies=("ingress",),
         ),
     }
+    # 隧道与 Core 配置无关（只读 BRIDGE_* 键），降级时照样按配置决定是否出现。
+    try:
+        from core.supervisor import tunnel_spec
+        tunnel = tunnel_spec()
+        if tunnel is not None:
+            specs["tunnel"] = tunnel
+    except Exception as e:
+        errors.append(f"Pi 隧道配置无效（{type(e).__name__}: {e}），本次不启用")
     return specs, errors
 
 
@@ -84,11 +92,12 @@ def _port_alive(port: int, timeout: float = 0.4) -> bool:
         return False
 
 
-def _health_ok(url: str) -> bool:
+def _health_ok(url: str, headers: dict | None = None) -> bool:
     if not url:
         return False
     try:
-        with urllib.request.urlopen(url, timeout=2) as resp:
+        request = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(request, timeout=2) as resp:
             return resp.status == 200
     except Exception:
         return False
@@ -109,6 +118,7 @@ class TargetSnapshot:
     managed: bool
     last_error: str
     uptime_sec: float | None
+    external: bool = False
 
 
 class TargetController:
@@ -127,6 +137,7 @@ class TargetController:
         self.last_error = ""
         self.epoch = 0
         self._last_command: str | None = None
+        self._last_probe = 0.0
         self._stop_event = threading.Event()
         self._worker = threading.Thread(target=self._run, daemon=True, name=f"ctl-{spec.name}")
         self._worker.start()
@@ -163,11 +174,13 @@ class TargetController:
         proc = self.proc
         alive = proc is not None and proc.poll() is None
         uptime = time.time() - self.started_at if (alive and self.started_at) else None
+        external = bool(self.spec.external_ok and not alive and self.state == "running")
         return TargetSnapshot(
             name=self.spec.name, state=self.state, desired=self.desired,
             pid=proc.pid if alive else None, ports=list(self.spec.ports),
-            ready=bool(alive and self.ready and self.state == "running"), managed=self.managed,
+            ready=bool(self.ready and self.state == "running"), managed=self.managed,
             last_error=self.last_error, uptime_sec=round(uptime, 1) if uptime else None,
+            external=external,
         )
 
     # ---------- 工作线程：手动命令与被动退出检测 ----------
@@ -227,6 +240,21 @@ class TargetController:
                     "message": "目标进程已在（本服务管理），不重复创建"}
         self._refresh_spec()
         if any(_port_alive(p) for p in self.spec.ports):
+            if self.spec.external_ok:
+                # 端口已经在（例如手动脚本拉起的隧道）：只报告状态，不接管、不重复创建。
+                healthy = _health_ok(self.spec.health_url, self.spec.health_headers) \
+                    if self.spec.health_url else True
+                self.managed = False
+                self.state = "running"
+                self.ready = healthy
+                self.started_at = 0.0
+                if healthy:
+                    self.last_error = ""
+                    return {"ok": True, "state": "running",
+                            "message": "已在运行（外部实例），未重复创建"}
+                self.last_error = "端口已在监听，但端到端检查未通过（Pi 端服务或令牌）"
+                return {"ok": False, "error_code": "not_ready", "state": "running",
+                        "message": self.last_error}
             self.state = "conflict"
             self.last_error = "端口被外部程序占用（不是本服务启动的实例），不自动接管"
             return {"ok": False, "error_code": "conflict", "state": self.state,
@@ -271,7 +299,17 @@ class TargetController:
                     return stopped
                 return {"ok": False, "error_code": "superseded", "state": self.state,
                         "message": "启动已取消（有更新的操作生效）"}
-            if _health_ok(self.spec.health_url) if self.spec.health_url \
+            if self.spec.external_ok:
+                # 隧道：本地端口在监听即代表 ssh 转发建立；端到端另外判定，不阻塞启动。
+                if any(_port_alive(p) for p in self.spec.ports):
+                    self.state = "running"
+                    self.ready = _health_ok(self.spec.health_url, self.spec.health_headers) \
+                        if self.spec.health_url else True
+                    self.last_error = "" if self.ready else \
+                        "隧道已建立，但 Pi 端桥接未响应（服务未启动或令牌不匹配）"
+                    return {"ok": True, "state": "running", "pid": proc.pid,
+                            "message": "已启动并就绪" if self.ready else self.last_error}
+            elif _health_ok(self.spec.health_url, self.spec.health_headers) if self.spec.health_url \
                     else any(_port_alive(p) for p in self.spec.ports):
                 self.state = "running"
                 self.ready = True
@@ -289,6 +327,14 @@ class TargetController:
         self.state = "stopping"
         if pid is None:
             if any(_port_alive(p) for p in self.spec.ports):
+                if self.spec.external_ok:
+                    # 外部实例（手动脚本拉起的隧道）：不接管也不终止别人的进程。
+                    self.state = "running"
+                    self.ready = _health_ok(self.spec.health_url, self.spec.health_headers) \
+                        if self.spec.health_url else True
+                    return {"ok": False, "error_code": "external_instance",
+                            "state": "running",
+                            "message": "该隧道由外部进程提供，本服务不接管；请手动结束对应 ssh 进程"}
                 # 进程已死但端口仍开放：目标已停 + 外部占用，两件事分开说（复核 R2）
                 self.state = "stopped"
                 self.ready = False
@@ -348,25 +394,63 @@ class TargetController:
     # ---------- 被动退出检测：报告失败，不创建进程 ----------
 
     def _check_exit(self) -> None:
-        if self.proc is None or self.state == "stopping":
+        if self.state == "stopping":
+            return
+        if self.proc is None:
+            # 外部实例（external_ok）：进程不归本服务，只能靠端口与端到端探活判断死活。
+            self._recheck_external()
             return
         code = self.proc.poll()
         if code is None:
             # A failed stop can leave ready=True with state='failed'. Health is a
             # fact about the existing process, independent of the last command.
             if self.state in ("starting", "failed") and (
-                    _health_ok(self.spec.health_url) if self.spec.health_url
+                    _health_ok(self.spec.health_url, self.spec.health_headers) if self.spec.health_url
                     else any(_port_alive(p) for p in self.spec.ports)):
                 self.ready = True
                 self.state = "running"
                 if self.desired == "running":
                     self.last_error = ""
+            elif self.state == "running" and self.spec.external_ok:
+                # 隧道进程还活着，但转发可能已废（端口不再监听）：以端口为准判断开。
+                if not any(_port_alive(p) for p in self.spec.ports):
+                    self.state = "failed"
+                    self.ready = False
+                    self.last_error = "ssh 进程仍在，但转发端口已失效；请重新连接"
+                else:
+                    self.ready = _health_ok(self.spec.health_url, self.spec.health_headers) \
+                        if self.spec.health_url else True
             return
         self.ready = False
         self.managed = False
         self.proc = None
         self.state = "failed"
         self.last_error = f"进程已退出 (exitcode={code})；请手动启动"
+
+    def _recheck_external(self) -> None:
+        """外部实例的状态复核：端口在 = 隧道通；再看端到端健康决定是否真就绪。
+
+        工作线程每轮都会调用一次，端到端探活带超时，因此这里节流，
+        避免 Pi 不通时把工作线程长时间堵住（stop 命令要靠它响应）。
+        """
+        if not self.spec.external_ok:
+            return
+        if not any(_port_alive(p) for p in self.spec.ports):
+            if self.state in ("running", "starting", "failed"):
+                self.state = "stopped"
+                self.ready = False
+            return
+        now = time.time()
+        if now - self._last_probe < 5.0:
+            return
+        self._last_probe = now
+        healthy = _health_ok(self.spec.health_url, self.spec.health_headers) \
+            if self.spec.health_url else True
+        if self.state != "running":
+            self.state = "running"
+        self.ready = healthy
+        # 端口在但端到端不通：保留提示，让用户分清「隧道没起」与「Pi 那边没响应」。
+        self.last_error = "" if healthy else "隧道端口在监听，但 Pi 端桥接未响应（服务未启动或令牌不匹配）"
 
 
 # ============================================================
