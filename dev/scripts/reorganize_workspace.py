@@ -113,7 +113,7 @@ def run(execute=False):
     journal_path = backup / "migration.json"
     journal = {"state": "preparing", "workspace": str(WORKSPACE), "moves": [], "files": {}}
     write(journal_path, journal)
-    for name in ("AGENTS.md", "README.md", ".gitignore", "启动Abyss.cmd", "data/manager/installations.json"):
+    for name in ("AGENTS.md", "README.md", ".gitignore", "启动弱链接.cmd", "data/manager/installations.json"):
         source = WORKSPACE / name
         if source.is_file():
             destination = backup / "files-before" / name

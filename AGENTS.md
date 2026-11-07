@@ -6,7 +6,7 @@
 
 **工作区目录约定（2026-11-03）**
 
-根目录只保留 `app / data / external / dev / cache / backups / private` 七个区域和入口说明。`app` 是运行版，`dev` 是开发工程；私人交接、参考图和实验项目位于 `private`。开发构建和隔离测试只写入 `cache`。旧的“常用版本”和 `dist/Abyss` 入口已撤除，日常使用根目录的 `启动Abyss.cmd` 或 `app/AbyssLauncher.exe`。
+根目录只保留 `app / data / external / dev / cache / backups / private` 七个区域和入口说明。`app` 是运行版，`dev` 是开发工程；私人交接、参考图和实验项目位于 `private`。开发构建和隔离测试只写入 `cache`。旧的“常用版本”和 `dist/Abyss` 入口已撤除，日常使用根目录的 `启动弱链接.cmd` 或 `app/AbyssLauncher.exe`。
 
 **Agent 修改与实际运行位置**
 

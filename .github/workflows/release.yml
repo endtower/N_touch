@@ -3,6 +3,11 @@ name: Release
 # 发布构建：生成单 EXE 入口与各组件更新包，并上传为该版本的 GitHub Release 资产。
 # 用户侧的「更新中心」直接读 latest release 的清单，因此每次发布必须包含全部组件的
 # latest / versions 清单；版本包同时保留在本版本的永久下载地址上。
+#
+# 产物发布到独立的公开仓库 endtower/weaklink-releases：本仓库含源码与开发历史，
+# 更新源只应指向只放构建产物的仓库，二者分开后更新地址稳定、也不会误发源码。
+# 需要在本仓库 Settings → Secrets → Actions 配置 RELEASE_TOKEN（对发布仓库有
+# contents:write 权限的令牌），默认的 github.token 只能写本仓库。
 
 on:
   workflow_dispatch:
@@ -29,7 +34,8 @@ jobs:
       run:
         working-directory: dev
     env:
-      GH_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      RELEASE_REPO: endtower/weaklink-releases
     steps:
       - uses: actions/checkout@v4
 
@@ -76,7 +82,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force ../cache/builds/previous-packages | Out-Null
           New-Item -ItemType Directory -Force ../cache/builds/previous-manifests | Out-Null
-          $prev = gh api "repos/${{ github.repository }}/releases?per_page=10" |
+          $prev = gh api "repos/${{ env.RELEASE_REPO }}/releases?per_page=10" |
             ConvertFrom-Json | Where-Object { $_.tag_name -ne "${{ steps.ver.outputs.tag }}" } |
             Select-Object -First 1
           if (-not $prev) { Write-Host "首次发布，无历史清单"; exit 0 }
@@ -104,8 +110,8 @@ jobs:
           $buildArgs = @(
             "scripts/build_public_release.py",
             "--output", "../cache/builds/public",
-            "--feed-base-url", "https://github.com/${{ github.repository }}/releases/latest/download",
-            "--package-base-url", "https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.tag }}",
+            "--feed-base-url", "https://github.com/${{ env.RELEASE_REPO }}/releases/latest/download",
+            "--package-base-url", "https://github.com/${{ env.RELEASE_REPO }}/releases/download/${{ steps.ver.outputs.tag }}",
             "--metadata", "${{ steps.ver.outputs.metadata }}"
           )
           if (Test-Path ../cache/builds/previous-packages/*.json) { $buildArgs += @("--previous-releases", "../cache/builds/previous-packages") }
@@ -144,9 +150,9 @@ jobs:
           $tag = "${{ steps.ver.outputs.tag }}"
           $assets = @("../cache/builds/public/download/AbyssLauncher.exe") + (Get-ChildItem ../cache/builds/public/packages -File | ForEach-Object FullName)
           $notes = "core ${{ steps.ver.outputs.core }} · 直接下载 AbyssLauncher.exe 即可安装与更新；更新中心读取本次发布的 latest 清单。"
-          gh release view $tag --repo "${{ github.repository }}" 2>$null
+          gh release view $tag --repo "${{ env.RELEASE_REPO }}" 2>$null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag @assets --repo "${{ github.repository }}" --clobber
+            gh release upload $tag @assets --repo "${{ env.RELEASE_REPO }}" --clobber
           } else {
-            gh release create $tag @assets --repo "${{ github.repository }}" --title "Abyss $tag" --notes $notes
+            gh release create $tag @assets --repo "${{ env.RELEASE_REPO }}" --title "Abyss $tag" --notes $notes
           }

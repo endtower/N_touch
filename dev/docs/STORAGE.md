@@ -80,7 +80,7 @@ SnowLuma 安装位置解析顺序：显式 `ABYSS_SNOWLUMA_DIR` → `data/manage
 
 ## 工作区顶层分区（2026-11-03）
 
-根目录为 `app / data / external / dev / cache / backups / private`。根 `README.md` 是日常导航，`AGENTS.md` 是接手说明，`启动Abyss.cmd` 打开 `app/AbyssLauncher.exe`。
+根目录为 `app / data / external / dev / cache / backups / private`。根 `README.md` 是日常导航，`AGENTS.md` 是接手说明，`启动弱链接.cmd` 打开 `app/AbyssLauncher.exe`。
 
 开发源码整体迁入 `dev/`，原有包之间的相对关系保留。`cache/builds/` 保存构建输出，`cache/tests/` 保存隔离验收，`cache/tools/` 保存开发工具链。旧构建、诊断和目录骨架归档到对应缓存子目录，完整实验项目、私人参考和历史交接保存到 `private/`。不使用根目录兼容链接，也不在根目录重新创建旧的源码目录。
 

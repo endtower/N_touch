@@ -1,6 +1,6 @@
-# Abyss / N_Touch
+# 弱链接 / WeakLink
 
-双击 **[启动Abyss.cmd](启动Abyss.cmd)**，或打开 [app/AbyssLauncher.exe](app/AbyssLauncher.exe)。启动器统一管理 Core、消息接入和 SnowLuma，并提供各项目的管理页面。
+双击 **[启动弱链接.cmd](启动弱链接.cmd)**，或打开 [app/AbyssLauncher.exe](app/AbyssLauncher.exe)。启动器统一管理 Core、消息接入和 SnowLuma，并提供各项目的管理页面。
 
 ## 目录导航
 

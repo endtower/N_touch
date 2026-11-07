@@ -32,7 +32,7 @@ public partial class App : Application
         }
         catch (Exception error)
         {
-            MessageBox.Show("首次安装未完成：" + error.Message, "Abyss", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show("首次安装未完成：" + error.Message, "弱链接", MessageBoxButton.OK, MessageBoxImage.Error);
             Shutdown(1); return;
         }
 
@@ -95,7 +95,7 @@ public partial class App : Application
         _tray = new System.Windows.Forms.NotifyIcon
         {
             Icon = DrawIcon(),
-            Text = "Abyss 管家",
+            Text = "弱链接",
             Visible = true,
             ContextMenuStrip = menu,
         };

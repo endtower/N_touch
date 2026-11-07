@@ -41,7 +41,7 @@ public partial class MainWindow
 
     private List<RowUi> Rows => _rows ??= new()
     {
-        new RowUi("core", "core", "core", "Abyss Core",
+        new RowUi("core", "core", "core", "弱链接 Core",
             CoreDot, CorePill, CoreState, CoreAction, CorePanel, CoreToggle,
             CoreSteps, CoreMessage, CoreParticipate, CoreContinue, CoreSkip),
         new RowUi("snowluma", "snowluma", "snowluma", "SnowLuma",
@@ -474,7 +474,7 @@ public partial class MainWindow
         else
         {
             var titles = new List<string>();
-            if (TargetRunning("core")) titles.Add("Abyss Core");
+            if (TargetRunning("core")) titles.Add("弱链接 Core");
             if (TargetRunning("ingress")) titles.Add("消息接入");
             if (TargetRunning("snowluma")) titles.Add("SnowLuma");
             if (_targets.ContainsKey("tunnel") && TargetRunning("tunnel")) titles.Add("Pi 桥接");
