@@ -25,6 +25,9 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: dev
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -38,7 +41,7 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: web_frontend/package-lock.json
+          cache-dependency-path: dev/web_frontend/package-lock.json
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -48,7 +51,7 @@ jobs:
         run: python -m pip install --upgrade pip; python -m pip install -r requirements.txt
 
       - name: 构建 Web UI（Core 源码组件必须携带匹配前端）
-        working-directory: web_frontend
+        working-directory: dev/web_frontend
         run: npm ci; npm run build
 
       - name: 计算发布版本
@@ -71,21 +74,21 @@ jobs:
       - name: 取回上一版清单（保留历史版本列表）
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force previous-packages | Out-Null
-          New-Item -ItemType Directory -Force previous-manifests | Out-Null
+          New-Item -ItemType Directory -Force ../cache/builds/previous-packages | Out-Null
+          New-Item -ItemType Directory -Force ../cache/builds/previous-manifests | Out-Null
           $prev = gh api "repos/${{ github.repository }}/releases?per_page=10" |
             ConvertFrom-Json | Where-Object { $_.tag_name -ne "${{ steps.ver.outputs.tag }}" } |
             Select-Object -First 1
           if (-not $prev) { Write-Host "首次发布，无历史清单"; exit 0 }
-          gh release download $prev.tag_name --pattern "*-versions.json" -D previous-manifests --clobber
+          gh release download $prev.tag_name --pattern "*-versions.json" -D ../cache/builds/previous-manifests --clobber
           Write-Host "历史清单来自 $($prev.tag_name)"
 
       - name: 拆分历史清单为单版本清单
         shell: python
         run: |
           import json, pathlib
-          src = pathlib.Path("previous-manifests")
-          dst = pathlib.Path("previous-packages")
+          src = pathlib.Path("../cache/builds/previous-manifests")
+          dst = pathlib.Path("../cache/builds/previous-packages")
           if not src.is_dir():
               raise SystemExit(0)
           for path in src.glob("*-versions.json"):
@@ -100,12 +103,12 @@ jobs:
         run: |
           $buildArgs = @(
             "scripts/build_public_release.py",
-            "--output", "dist/public",
+            "--output", "../cache/builds/public",
             "--feed-base-url", "https://github.com/${{ github.repository }}/releases/latest/download",
             "--package-base-url", "https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.tag }}",
             "--metadata", "${{ steps.ver.outputs.metadata }}"
           )
-          if (Test-Path previous-packages/*.json) { $buildArgs += @("--previous-releases", "previous-packages") }
+          if (Test-Path ../cache/builds/previous-packages/*.json) { $buildArgs += @("--previous-releases", "../cache/builds/previous-packages") }
           python @buildArgs
           if ($LASTEXITCODE -ne 0) { throw "构建失败" }
 
@@ -115,31 +118,31 @@ jobs:
           $expected = @("core", "manager", "launcher")
           foreach ($c in $expected) {
             foreach ($suffix in @("latest", "versions")) {
-              $f = "dist/public/packages/$c-$suffix.json"
+              $f = "../cache/builds/public/packages/$c-$suffix.json"
               if (-not (Test-Path $f)) { throw "缺少 $f" }
             }
           }
-          if (-not (Test-Path "dist/public/download/AbyssLauncher.exe")) { throw "缺少单 EXE 入口" }
+          if (-not (Test-Path "../cache/builds/public/download/AbyssLauncher.exe")) { throw "缺少单 EXE 入口" }
 
       - name: 校验 Core 运行环境可导入
         shell: pwsh
         run: |
           # 运行环境只装 requirements.txt 里的依赖；这里实际跑一遍导入，
           # 防止漏装依赖直到用户端才报 ModuleNotFoundError（如向量比对的库）。
-          $pkg = Get-ChildItem "dist/public/packages/core-*.zip" | Select-Object -First 1
+          $pkg = Get-ChildItem "../cache/builds/public/packages/core-*.zip" | Select-Object -First 1
           if (-not $pkg) { throw "缺少 Core 版本包" }
           $tmp = Join-Path $env:RUNNER_TEMP "core-runtime-check"
           Expand-Archive -Path $pkg.FullName -DestinationPath $tmp -Force
           $py = Join-Path $tmp "components/core/runtime/python.exe"
           if (-not (Test-Path $py)) { throw "Core 包缺少 runtime/python.exe" }
-          & $py -c "import fastapi, uvicorn, requests, aiohttp, aiofiles, aiosqlite, dotenv, pystray, PIL, pydantic, openai, httpx"
+          & $py -c "import fastapi, uvicorn, requests, aiohttp, aiofiles, aiosqlite, numpy, dotenv, pystray, PIL, pydantic, openai, httpx"
           if ($LASTEXITCODE -ne 0) { throw "Core 运行环境缺少依赖" }
 
       - name: 创建 Release 并上传资产
         shell: pwsh
         run: |
           $tag = "${{ steps.ver.outputs.tag }}"
-          $assets = @("dist/public/download/AbyssLauncher.exe") + (Get-ChildItem dist/public/packages -File | ForEach-Object FullName)
+          $assets = @("../cache/builds/public/download/AbyssLauncher.exe") + (Get-ChildItem ../cache/builds/public/packages -File | ForEach-Object FullName)
           $notes = "core ${{ steps.ver.outputs.core }} · 直接下载 AbyssLauncher.exe 即可安装与更新；更新中心读取本次发布的 latest 清单。"
           gh release view $tag --repo "${{ github.repository }}" 2>$null
           if ($LASTEXITCODE -eq 0) {

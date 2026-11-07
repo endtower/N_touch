@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "connections": [
+    {
+      "id": "snowluma",
+      "name": "SnowLuma",
+      "managedTarget": "snowluma"
+    }
+  ]
+}

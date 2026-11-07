@@ -1,215 +1,24 @@
-# Python
+# Local installation, user data, private material and reproducible output
+/app/
+/data/
+/external/
+/cache/
+/backups/
+/private/
+
+# Local tooling/editor state
+/.codex/
+/.screenshots/
+/.trae/
+/.zcode/
+/.vscode/
 __pycache__/
 *.py[cod]
-*$py.class
-
-# Distribution / packaging
-build/
-dist/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-venv/
-.env
-.env.*
-!.env.example
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-.venv/
-env/
-
-# Testing
-pytest_cache/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-.hypothesis/
-
-# Logs
-logs/
+node_modules/
+bin/
+obj/
 *.log
-
-# Runtime data
-user_settings/
-pids
-*.pid
-*.seed
-*.pid.lock
-
-# Editor directories and files
-.vscode/
-.idea/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-.DS_Store
-
-# OS generated files
-Thumbs.db
-.DS_Store
-
-# Local config files
-config.json
-config.yaml
-config.yml
-
-# Temporary files
 *.tmp
-*.temp
-.temp/
-.tmp/
-
-# Documentation build files
-docs/_build/
-docs/build/
-
-# CI/CD
-gitlab-ci.yml
-.travis.yml
-Jenkinsfile
-# 允许 GitHub Actions 工作流入库（发布构建在 CI 上跑）；其余 .github 内容仍忽略
-.github/*
-!.github/workflows/
-!.github/workflows/*.yml
-
-# ==================================================
-# Sanitized-project additions: exclude personal data
-# ==================================================
-
-# Frontend deps / build
-web_frontend/node_modules/
-web_frontend/dist/
-web_frontend/.env
-web_frontend/.env.local
-web_frontend/vite.config.js
-web_frontend/vite.config.d.ts
 *.tsbuildinfo
-
-# Memory 运行时数据（私有，不入库）；memory/*.py 运行模块恢复跟踪
-memory/chat_history/
-memory/pfcd/
-memory/social_agent/
-# 前端目录下的历史运行数据（曾误跟踪 145MB 聊天媒体）
-web_frontend/memory/
-memory/event_chains/
-memory/event_history/
-memory/llm_save/
-memory/backups/
-memory/*.db
-memory/*.db-wal
-memory/*.db-shm
-
-# Neo4j runtime data
-brain/hc/database/neo4j-chs-community-5.10.0-windows/data/
-brain/hc/database/neo4j-chs-community-5.10.0-windows/run/
-brain/hc/database/neo4j-chs-community-5.10.0-windows/logs/
-brain/hc/database/neo4j-chs-community-5.10.0-windows/*.log
-brain/hc/database/neo4j-chs-community-5.10.0-windows/__pycache__/
-
-# SnowLuma (private DB + logs)
-SnowLuma/data/
-SnowLuma/logs/
-SnowLuma/
-
-# Neo4j (entire directory excluded)
-brain/hc/database/neo4j-chs-community-5.10.0-windows/
-
-# Amy persistence (private state)
-brain/amy/persistence/*.json
-brain/amy/__pycache__/
-
-# Shortlight notepad records (private runtime data)
-brain/hc/shortlight/notes/
-
-# Linter / formatter caches
-.ruff_cache/
-.pytest_cache/
-
-# Test fixtures (private chat payloads)
-adapt/onebot/tests/fixtures/private_*.json
-
-# Runtime state (token stats, traces)
-token_stats.json
-token_trace.json
-
-# Adapt web runtime identity data (contains private user IDs/names)
-adapt/web/data/
-# ===== 本地敏感文件（永不入库）=====
-# （adapt_settings.py / llm_settings.py 的 key 已外置 .env.dev，恢复跟踪）
-config/settings.py
-config/role_settings.py
-config/truck_settings.py
-brain/hc/database/default_initializer.py
-/tests/
-_tmp_*
-
-# 人格注册表与人格文件（含人格内核提示词，涉隐私）
-brain/base/persona/persona_registry.py
-brain/base/persona/*.json
-brain/base/persona/history/
-
-# 运行时备份（含 memory.db / chat_history.db / 私聊笔记快照）
-backups/
-# 数据库就地迁移留下的一次性备份（含身份/聊天原始数据）
-memory/*.bak*
-*.db.bak*
-
-# 界面设计参考图与本地素材（仅个人比对用，不属于程序源码）
-reference/
-
-# LLM 速度基准脚本（源码含 API Key）
-scripts/benchmark_llm_speed.py
-
-# 全部 docs（涉隐私，仅本地保存，不入库）
-docs/
-
-# AI tooling (specs / plans)
-.trae/
-.zcode/
-
-# WPF 启动器构建产物与 WebView2 浏览数据（运行期可变，不入库）
-launcher/bin/
-launcher/obj/
-launcher/webview/
-
-# 本地构建工具链与运行凭据（第二轮复核：983MB SDK 与令牌误入库）
-.tools/
-manager/service_token.txt
-manager/trucks.json
-
-# 本机附件、验收产物与独立设计实验（不属于应用源码）
-/.codex-remote-attachments/
-/tmp/
-/output/
-/saved-animations/
-/launcher/ui.json
-/ecg-morph.html
-/ecg-pulse.html
-/neon-signal-animation.html
-/red-path-animation.html
-/red-path-horizontal.html
-/red-path.html
-/symbol-language-studies.html
-
-# Component update staging, settings, receipts, and helper builds
-updater/bin/
-updater/obj/
-updater/AbyssUpdater.exe
-updater-tests/bin/
-updater-tests/obj/
-manager/update_sources.json
-manager/updates/
-.versions/
-
-# 日常运行目录（自包含发布产物：EXE、运行时、组件安装副本，约 500MB，不入库）
-常用版本/
-dist/Abyss/
+.DS_Store
+Thumbs.db

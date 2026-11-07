@@ -4,6 +4,19 @@
 > 对象：完全不懂技术的普通用户（可以按“傻瓜”理解，但不是贬义）。
 > 目标：让用户用最少的点击完成安装、配置、更新和 QQ 接入；出问题时你能快速定位。
 
+**工作区目录约定（2026-11-03）**
+
+根目录只保留 `app / data / external / dev / cache / backups / private` 七个区域和入口说明。`app` 是运行版，`dev` 是开发工程；私人交接、参考图和实验项目位于 `private`。开发构建和隔离测试只写入 `cache`。旧的“常用版本”和 `dist/Abyss` 入口已撤除，日常使用根目录的 `启动Abyss.cmd` 或 `app/AbyssLauncher.exe`。
+
+**Agent 修改与实际运行位置**
+
+- 日常入口仍是 `app\AbyssLauncher.exe`，但管理服务、Core、消息接入均以组件内源码运行；不再使用独立的 manager/core/ingress EXE。
+- 修改前先通过 `GET /v1/storage` 确认实际源码和数据位置。`dev` 是开发源，修改仓库不会自动替换已经安装的运行源码。
+- 运行中的 Core 源码在 `app\components\core\source`，管理服务源码在 `app\components\manager\source`。
+- 可先调用 `POST /v1/updates/source-backup`（component 为 core 或 manager）保留当前代码，再直接修改。后端修改后重启对应服务；前端修改后由 Agent 构建对应组件的 `web_frontend`。
+- 历史数据已迁入工作区 `data`。SnowLuma 原安装位置由 `data\manager\installations.json` 登记，内部存储遵循上游。
+- 一键启动框架：实际脚本为 `app/components/manager/source/startup_plan.py`，执行器为同目录 `startup_workflow.py`；开发副本在 `dev`。外部 AI 直接编辑脚本，说明见 `dev/docs/STARTUP.md`。管理接口为 `GET /v1/startup` 和 `POST /v1/startup/{start|continue|retry|skip|cancel|enable|stop|reload}`，沿用管理令牌。打开 EXE 只展示界面，点击「一键启动」才执行已勾选链路；Pi 和 QQ 独立，失败可跳过或单独继续。改脚本可暂停流程后调用 reload，无须重新打包 EXE；改框架/进程控制仍需重启管理服务。
+
 **沟通原则**
 
 - 能用界面点出来的，绝不让用户敲命令、改代码、装 Python。
@@ -16,16 +29,21 @@
 
 ## 1. 先判现状（30 秒）
 
-安装版只有两个目录，都在当前用户下，不需要管理员权限：
+安装版按用途分区，都在当前用户下，不需要管理员权限：
 
 | 内容 | 路径 |
 |---|---|
 | 程序 | `%LOCALAPPDATA%\Abyss\app` |
 | 数据（记忆、配置、日志） | `%LOCALAPPDATA%\Abyss\data` |
+| 第三方默认安装区 | `%LOCALAPPDATA%\Abyss\external` |
+| 下载与安装暂存 | `%LOCALAPPDATA%\Abyss\cache` |
+| 源码与更新备份 | `%LOCALAPPDATA%\Abyss\backups` |
 
-`app` 里应能看到 `AbyssLauncher.exe`、`manager.exe`、`components\`、`.versions\`。
+已有旧数据目录、SnowLuma 安装位置和更新任务保持原位兼容。外部程序的数据布局由上游管理，不强制其写入 Abyss 的数据目录。完整规则见 `dev/docs/STORAGE.md`。
 
-**注意**：源码仓库里的日常运行目录是 `常用版本`（兼容入口 `dist\Abyss`），`dist\public-*\` 等是构建/测试产物，不是给朋友用的安装环境。不要把开发目录当成用户安装。
+`app` 里应能看到唯一的打包业务程序 `AbyssLauncher.exe`、`components\manager\source`、`components\core\source` 和 `.versions\`。各源码程序使用自带解释器，更新事务也由启动器执行。
+
+**注意**：源码仓库里的日常运行目录是 `app`；开发源码位于 `dev`，构建输出位于 `cache\builds`，`cache\builds\public-*\` 等是构建/测试产物，不是给朋友用的安装环境。不要把开发目录当成用户安装。
 
 判断是否已经在运行（AI 可执行，先征得用户同意）：
 
@@ -141,7 +159,8 @@ packages\                    ← 整个文件夹：*.zip 与同名 *.json 必须
 **Core 的两道确认**：下载和安装各自有一个确认窗口，显示版本说明、破坏性改动、最低组件版本要求、数据迁移说明。
 
 - **检测到本地改过 Core 源码时，安装会被阻止**。不要教用户绕过。正确做法：先把 `app\components\core\source` 整份复制备份；要更新就还原到官方基线，或在独立目录装新版做对比合并。
-- 安装前会自动把旧程序备份到 `data\manager\updates\jobs\<任务号>\backup\`，版本下拉里也能选回这些本机备份。
+- Core 展开区的「查看源码改动」「备份源码」用于保留 Agent 直接修改的程序；无需编写独立扩展代码。源码快照在 `backups\core-source\`，备份不会解除本地修改保护。
+- 新安装任务会把旧程序备份到 `backups\updates\<任务号>\backup\`，旧的 `data\manager\updates\jobs\` 继续识别，版本下拉里也能选回这些本机备份。
 - **程序可以回退，用户数据不会跟着回退**。记忆库、配置、人格不会被旧版本覆盖；需要恢复数据只能手动按备份处理。
 - 源码型 Core 安装会停止 Core 与消息接入，但保留 SnowLuma 登录。
 - 更新启动器会关闭并重开窗口；后台服务继续运行。更新管理服务会短暂停掉它管着的进程，之后恢复原运行状态。
@@ -220,7 +239,7 @@ packages\                    ← 整个文件夹：*.zip 与同名 *.json 必须
 | 启动器能开，网页空白 | Core 是否运行；WebView2 | 点标题栏刷新；启动 Core；必要时安装 WebView2 Runtime |
 | Core 一直“未安装” | 是否点过下载/导入 | 在线下载，或「导入本地包」（zip+同名 json） |
 | Core 启动失败 | 左侧「日志」→ Core / 启动输出 | 常见：端口被占（5000/5001/5002）、旧 Core 缺依赖 → 更新 Core |
-| 报 `WinError 10013` 绑定 5001 失败 | 端口占用或系统保留段 | 先关掉重复实例/占用 5001 的程序再启动；仍是 10013 时重启电脑重试。仅源码仓库用户可运行 `scripts\repair_tcp_port_range.ps1` 修复系统保留端口 |
+| 报 `WinError 10013` 绑定 5001 失败 | 端口占用或系统保留段 | 先关掉重复实例/占用 5001 的程序再启动；仍是 10013 时重启电脑重试。仅源码仓库用户可运行 `dev\scripts\repair_tcp_port_range.ps1` 修复系统保留端口 |
 | 首次配置窗口不出现 | 已存在 `MASTER_ID` 与 API Key | 要改身份就删 `data\.env.dev` 里对应行再启动 |
 | 测试连接 401/404 | 地址、模型名、Key | 核对 base URL（是否含 `/v1`）与模型 ID；确认 Key 属于该接入点 |
 | 测试连接超时 | 网络/代理；Core 是否运行 | 换网络或取消代理；确认 Core 在跑 |
@@ -248,7 +267,9 @@ packages\                    ← 整个文件夹：*.zip 与同名 *.json 必须
 | 日志 | `data\logs\`（Core 的 `app_*.log`、启动输出、SnowLuma、消息接入） |
 | 管理令牌 | `data\manager\service_token.txt` |
 | 更新源设置 | `data\manager\update_sources.json` |
-| 更新备份 | `data\manager\updates\jobs\` |
+| 新更新备份 / 旧任务兼容 | `backups\updates\` / `data\manager\updates\jobs\` |
+| 手动源码备份 | `backups\core-source\` |
+| 更新下载与解压暂存 | `cache\updates\` |
 | 启动器连接入口 | `data\launcher\connections.json` |
 | Core 源码 / 运行环境 | `app\components\core\source` / `app\components\core\runtime` |
 | 已安装版本记录 | `app\.versions\*.json` |
@@ -280,7 +301,7 @@ packages\                    ← 整个文件夹：*.zip 与同名 *.json 必须
 
 ## 12. 维护者备注（不面向普通用户）
 
-- 源码开发模式：`python manager.py` / `python main.py --dev`；仓库模式永远不会被组件安装覆盖。
-- 公开发布构建：`python scripts/build_public_release.py --output <新目录> --feed-base-url ... --package-base-url ... --metadata releases/core-<版本>.json`，产物是 `download\AbyssLauncher.exe` + `packages\`（ZIP 与同名 JSON 必须成对，先传包后传清单）。
-- CI 发布：改 `component_versions.json` 与 `releases/core-*.json`，推 `v*` 标签，`.github/workflows/release.yml` 构建并上传 Release。
-- 组件版本、更新源和安装边界的细节见 `updater/README.md`；QQ 接入的完整参数与排错见本文件第 7 节与 `config/adapt_settings.py` 注释。
+- 源码开发模式：先进入 `dev`，再运行 `python manager.py` / `python main.py --dev`；仓库模式永远不会被组件安装覆盖。
+- 公开发布构建：在 `dev` 执行 `python scripts/build_public_release.py --output ../cache/builds/<新目录> --feed-base-url ... --package-base-url ... --metadata releases/core-<版本>.json`，产物是 `download\AbyssLauncher.exe` + `packages\`（ZIP 与同名 JSON 必须成对，先传包后传清单）。
+- CI 发布：改 `dev/component_versions.json` 与 `dev/releases/core-*.json`，推 `v*` 标签，`.github/workflows/release.yml` 构建并上传 Release。
+- 组件版本、更新源和安装边界的细节见 `dev/updater/README.md`；QQ 接入的完整参数与排错见本文件第 7 节与 `dev/config/adapt_settings.py` 注释。

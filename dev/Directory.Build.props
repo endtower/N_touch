@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <AbyssWorkspaceRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\'))</AbyssWorkspaceRoot>
+    <BaseOutputPath>$(AbyssWorkspaceRoot)cache\builds\dotnet\$(MSBuildProjectName)\bin\</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(AbyssWorkspaceRoot)cache\builds\dotnet\$(MSBuildProjectName)\obj\</BaseIntermediateOutputPath>
+  </PropertyGroup>
+</Project>

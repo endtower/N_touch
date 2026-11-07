@@ -1,0 +1,69 @@
+<UserControl x:Class="AbyssLauncher.ComponentUpdateControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:AbyssLauncher">
+    <StackPanel>
+        <!-- 一行说清「装哪个版本、下一步点什么」：选版本 → 刷新 → 下载/安装 → 导入本地包。
+             更新源这些低频配置收在右边一个小开关后面，不占主行位置。 -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="版本" Style="{StaticResource TextLabel}" TextWrapping="NoWrap"
+                       VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <local:VersionSelectorControl Grid.Column="1" x:Name="VersionSelector"/>
+            <Button Grid.Column="2" x:Name="DownloadButton" Content="下载" Style="{StaticResource GhostButton}"
+                    MinWidth="64" Margin="6,0,0,0" Click="Download_Click"
+                    ToolTip="下载所选版本，下载完成后另行确认安装"/>
+            <Button Grid.Column="3" x:Name="ImportButton" Content="导入本地包" Style="{StaticResource GhostButton}"
+                    Margin="8,0,0,0" Click="Import_Click"
+                    ToolTip="选择与其他程序打包在一起的 ZIP（同目录需有同名 JSON 清单）"/>
+            <TextBlock Grid.Column="4" x:Name="Message" Text="等待检查版本" Style="{StaticResource TextLabel}"
+                       Margin="14,0,10,0" VerticalAlignment="Center"
+                       TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+            <ToggleButton Grid.Column="5" x:Name="SourceToggle" Style="{StaticResource ChevronToggle}"
+                          Click="SourceToggle_Click" ToolTip="更新源与源码工具"/>
+        </Grid>
+
+        <!-- 下载进度：只在真正下载时出现 -->
+        <ProgressBar x:Name="DownloadProgress" Minimum="0" Maximum="100" Height="3"
+                     Visibility="Collapsed" Margin="0,8,0,0"/>
+
+        <!-- 更新源 / 本地包相关工具：低频操作，点右边的箭头才展开 -->
+        <Grid x:Name="SourceRow" Visibility="Collapsed" Margin="0,10,0,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="更新源" Style="{StaticResource TextLabel}"
+                           VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Grid.Column="1" x:Name="SourceBox"
+                         ToolTip="组件版本清单或版本列表的 HTTPS 地址；留空表示本组件不联网检查"/>
+                <Button Grid.Column="2" x:Name="SaveSourceButton" Content="保存" Style="{StaticResource GhostButton}"
+                        Margin="8,0,0,0" Click="SaveSource_Click"/>
+            </Grid>
+            <TextBlock Grid.Row="1" Style="{StaticResource TextLabel}" TextWrapping="Wrap" Margin="0,7,0,0"
+                       Text="留空 = 不联网检查，只用手动下载或导入本地包。"/>
+            <StackPanel Grid.Row="2" x:Name="SourceActions" Visibility="Collapsed"
+                        Orientation="Horizontal" Margin="0,10,0,0">
+                <Button x:Name="SourceChangesButton" Content="查看源码改动" Style="{StaticResource GhostButton}"
+                        Click="SourceChanges_Click"/>
+                <Button x:Name="SourceBackupButton" Content="备份源码" Style="{StaticResource GhostButton}"
+                        Margin="8,0,0,0" Click="SourceBackup_Click"
+                        ToolTip="保留 Agent 修改过的源码；不替换当前程序，不备份运行环境或个人数据"/>
+            </StackPanel>
+        </Grid>
+    </StackPanel>
+</UserControl>
