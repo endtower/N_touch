@@ -42,7 +42,7 @@ public partial class MainWindow : Window
         {
             BuildStamp = buildStamp;
             BuildStampText.Text = "构建 " + buildStamp;
-            Title = "Abyss 桌面启动管理器 · 构建 " + buildStamp;
+            Title = "弱链接 · 构建 " + buildStamp;
         }
         ThemeManager.ThemeChanged += OnThemeChanged;
         UpdateThemeIcon();

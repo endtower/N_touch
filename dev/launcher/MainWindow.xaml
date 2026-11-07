@@ -61,7 +61,7 @@
                                    Foreground="{DynamicResource BrushTextOnAccent}"
                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
                     </local:ChamferBorder>
-                    <TextBlock Text="Abyss 桌面启动管理器" Margin="9,0,0,0"
+                    <TextBlock Text="弱链接" Margin="9,0,0,0"
                                VerticalAlignment="Center"
                                FontSize="{DynamicResource FontSizeSm}"
                                Foreground="{DynamicResource BrushTextSecondary}"/>
