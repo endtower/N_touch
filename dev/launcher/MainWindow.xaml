@@ -348,7 +348,7 @@
                                 <StackPanel>
 
                                     <!-- ================= Abyss Core ================= -->
-                                    <Border Style="{StaticResource ComponentRow}">
+                                    <Border x:Name="CoreRow" Style="{StaticResource ComponentRow}">
                                         <StackPanel>
                                             <Grid Background="Transparent" Cursor="Hand" Tag="core" MouseLeftButtonUp="RowHeader_Click">
                                                 <Grid.ColumnDefinitions>
@@ -361,7 +361,7 @@
                                                          Fill="{DynamicResource BrushTextDisabled}"/>
                                                 <StackPanel Grid.Column="1" Margin="11,0,12,0" VerticalAlignment="Center">
                                                     <StackPanel Orientation="Horizontal">
-                                                        <TextBlock Text="Abyss Core" Style="{StaticResource TextSection}"/>
+                                                        <TextBlock x:Name="CoreRowTitle" Text="弱链接 Core" Style="{StaticResource TextSection}"/>
                                                         <TextBlock x:Name="CoreVersion" Style="{StaticResource VersionChip}" Margin="9,0,0,0"/>
                                                     </StackPanel>
                                                     <TextBlock x:Name="CoreDetail" Style="{StaticResource RowMeta}" Text="—" Margin="0,2,0,0"/>
@@ -400,10 +400,10 @@
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>
-                                    <Border Height="1" Margin="6,0" Background="{DynamicResource BrushBorderSubtle}"/>
+                                    <Border x:Name="SnowDivider" Height="1" Margin="6,0" Background="{DynamicResource BrushBorderSubtle}"/>
 
                                     <!-- ================= SnowLuma · QQ ================= -->
-                                    <Border Style="{StaticResource ComponentRow}">
+                                    <Border x:Name="SnowRow" Style="{StaticResource ComponentRow}">
                                         <StackPanel>
                                             <Grid Background="Transparent" Cursor="Hand" Tag="snowluma" MouseLeftButtonUp="RowHeader_Click">
                                                 <Grid.ColumnDefinitions>
@@ -416,7 +416,7 @@
                                                          Fill="{DynamicResource BrushTextDisabled}"/>
                                                 <StackPanel Grid.Column="1" Margin="11,0,12,0" VerticalAlignment="Center">
                                                     <StackPanel Orientation="Horizontal">
-                                                        <TextBlock Text="SnowLuma · QQ" Style="{StaticResource TextSection}"/>
+                                                        <TextBlock x:Name="SnowRowTitle" Text="SnowLuma · QQ" Style="{StaticResource TextSection}"/>
                                                         <TextBlock x:Name="SnowVersion" Style="{StaticResource VersionChip}" Margin="9,0,0,0"/>
                                                     </StackPanel>
                                                     <TextBlock x:Name="SnowDetail" Style="{StaticResource RowMeta}" Text="—" Margin="0,2,0,0"/>
@@ -469,7 +469,7 @@
                                                 <Ellipse x:Name="PiDot" Width="9" Height="9" VerticalAlignment="Center"
                                                          Fill="{DynamicResource BrushTextDisabled}"/>
                                                 <StackPanel Grid.Column="1" Margin="11,0,12,0" VerticalAlignment="Center">
-                                                    <TextBlock Text="Pi · 个人桥接" Style="{StaticResource TextSection}"/>
+                                                    <TextBlock x:Name="PiRowTitle" Text="Pi · 个人桥接" Style="{StaticResource TextSection}"/>
                                                     <TextBlock x:Name="PiDetail" Style="{StaticResource RowMeta}" Text="—" Margin="0,2,0,0"/>
                                                 </StackPanel>
                                                 <Border Grid.Column="2" x:Name="PiPill" Style="{StaticResource StatusChip}" Margin="0,0,10,0">
@@ -506,11 +506,11 @@
 
                                     <!-- ================= 常驻服务 ================= -->
                                     <Border x:Name="ServiceDivider" Height="1" Margin="6,0" Background="{DynamicResource BrushBorderSubtle}"/>
-                                    <TextBlock Text="常驻服务 · 随启动器自动运行" Style="{StaticResource TextLabel}"
+                                    <TextBlock x:Name="ServiceHeader" Text="常驻服务 · 随启动器自动运行" Style="{StaticResource TextLabel}"
                                                Margin="6,10,6,4"/>
 
                                     <!-- 消息接入 -->
-                                    <Border Style="{StaticResource ComponentRow}">
+                                    <Border x:Name="IngressRow" Style="{StaticResource ComponentRow}">
                                         <StackPanel>
                                             <Grid Background="Transparent" Cursor="Hand" Tag="ingress" MouseLeftButtonUp="RowHeader_Click">
                                                 <Grid.ColumnDefinitions>
@@ -523,7 +523,7 @@
                                                          Fill="{DynamicResource BrushTextDisabled}"/>
                                                 <StackPanel Grid.Column="1" Margin="11,0,12,0" VerticalAlignment="Center">
                                                     <StackPanel Orientation="Horizontal">
-                                                        <TextBlock Text="消息接入" Style="{StaticResource TextSection}"/>
+                                                        <TextBlock x:Name="IngressRowTitle" Text="消息接入" Style="{StaticResource TextSection}"/>
                                                         <TextBlock x:Name="IngressVersion" Style="{StaticResource VersionChip}" Margin="9,0,0,0"/>
                                                     </StackPanel>
                                                     <TextBlock x:Name="IngressDetail" Style="{StaticResource RowMeta}" Text="—" Margin="0,2,0,0"/>
@@ -548,10 +548,10 @@
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>
-                                    <Border Height="1" Margin="6,0" Background="{DynamicResource BrushBorderSubtle}"/>
+                                    <Border x:Name="ManagerDivider" Height="1" Margin="6,0" Background="{DynamicResource BrushBorderSubtle}"/>
 
                                     <!-- 管理服务 -->
-                                    <Border Style="{StaticResource ComponentRow}">
+                                    <Border x:Name="ManagerRow" Style="{StaticResource ComponentRow}">
                                         <StackPanel>
                                             <Grid Background="Transparent" Cursor="Hand" Tag="manager" MouseLeftButtonUp="RowHeader_Click">
                                                 <Grid.ColumnDefinitions>
@@ -564,7 +564,7 @@
                                                          Fill="{DynamicResource BrushTextDisabled}"/>
                                                 <StackPanel Grid.Column="1" Margin="11,0,12,0" VerticalAlignment="Center">
                                                     <StackPanel Orientation="Horizontal">
-                                                        <TextBlock Text="管理服务" Style="{StaticResource TextSection}"/>
+                                                        <TextBlock x:Name="ManagerRowTitle" Text="管理服务" Style="{StaticResource TextSection}"/>
                                                         <TextBlock x:Name="ManagerVersion" Style="{StaticResource VersionChip}" Margin="9,0,0,0"/>
                                                     </StackPanel>
                                                     <TextBlock x:Name="ManagerDetail" Style="{StaticResource RowMeta}"
@@ -588,10 +588,10 @@
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>
-                                    <Border Height="1" Margin="6,0" Background="{DynamicResource BrushBorderSubtle}"/>
+                                    <Border x:Name="LauncherDivider" Height="1" Margin="6,0" Background="{DynamicResource BrushBorderSubtle}"/>
 
                                     <!-- 桌面启动器：本程序自身，只做版本更新 -->
-                                    <Border Style="{StaticResource ComponentRow}">
+                                    <Border x:Name="LauncherRow" Style="{StaticResource ComponentRow}">
                                         <StackPanel>
                                             <Grid Background="Transparent" Cursor="Hand" Tag="launcher" MouseLeftButtonUp="RowHeader_Click">
                                                 <Grid.ColumnDefinitions>
@@ -604,7 +604,7 @@
                                                          Fill="{DynamicResource BrushTagSuccess}"/>
                                                 <StackPanel Grid.Column="1" Margin="11,0,12,0" VerticalAlignment="Center">
                                                     <StackPanel Orientation="Horizontal">
-                                                        <TextBlock Text="桌面启动器" Style="{StaticResource TextSection}"/>
+                                                        <TextBlock x:Name="LauncherRowTitle" Text="桌面启动器" Style="{StaticResource TextSection}"/>
                                                         <TextBlock x:Name="LauncherVersion" Style="{StaticResource VersionChip}" Margin="9,0,0,0"/>
                                                     </StackPanel>
                                                     <TextBlock x:Name="LauncherDetail" Style="{StaticResource RowMeta}"

@@ -79,3 +79,36 @@ Chain("my_platform", "我的平台", (
 沿用本机 `X-Manager-Token` 鉴权。请求返回当前状态，步骤在后台执行；GUI 轮询进度。链路状态有 idle、pending、running、waiting、failed、blocked、done、skipped、cancelled。成功链路在同一轮重试中保留；单独点击已完成链路的启动会重新检查它，步骤必须幂等。
 
 启用选择存入 `data/manager/startup-settings.json`；脱敏状态快照在 `data/logs/manager/startup-state.json`，最多保留最近 100 条事件。服务重启后重新检查，不将历史“成功”冒充当前就绪。用户脚本在 `data` 下，不受任何组件更新保护逻辑约束；程序目录里的出厂样板仍受原有更新保护，不能重置安装基线来解除保护。
+
+## 界面本身也能改（`data/launcher/ui.json`）
+
+启动器不再把「有哪些程序」写死在界面里。每一行显示与否、叫什么名字，都由 `data/launcher/ui.json` 决定，改完重开启动器生效，**不需要重新编译 EXE**。这个文件同样属于用户数据，组件更新不覆盖；启动器首次运行时会自动在它旁边放一份 `README.md` 说明。
+
+```json
+{
+  "theme": "dark",
+  "closeToTray": false,
+  "rows": {
+    "snowluma": { "visible": false },
+    "core": { "title": "大脑" }
+  }
+}
+```
+
+| 键 | 作用 |
+|---|---|
+| `theme` | `"dark"` / `"light"`，与界面左下角切换等效 |
+| `closeToTray` | 点 × 收进托盘继续跑（`true`）还是停止全部并退出（`false`） |
+| `rows` | 按组件 id 覆盖：`visible`（`false` = 隐藏）与 `title`（换名字） |
+
+组件 id 是 `core` / `snowluma` / `pi` / `ingress` / `manager` / `launcher`。
+
+隐藏一行不只是看不见：
+
+- 那一行上面的分隔线一起收掉；隐藏 SnowLuma 或 Pi 时，日志页对应的来源标签也收起来，且如果正停在那个来源上会退回 Core。
+- 页头的「正在运行」和右上角状态不再把它算进去；它那条链路的失败/等待也不再在页头喊「需要处理」。
+- 它那条链路会被自动取消「参与一键启动」（必需链路 Core 除外）——用户关掉了那一行，点「一键启动」就不该还去拉它。
+
+判断「要不要显示」的唯一入口是 `MainWindow.IsRowShown()`：ui.json 开关 + 内置条件（Pi 需要后端真的有 tunnel 目标）。渲染、页头统计、日志来源、链路同步都查同一个结论，不要另写一份判断。
+
+**Pitfall**：区分「用户主动隐藏」和「运行时暂时没探测到」。Pi 行在没有 tunnel 目标时也不显示，但那是环境没配好，不是用户不要它。拿 `IsRowShown` 去同步「参与一键启动」会误关没配 Pi 的用户的 Pi 链路，必须用 `IsRowHiddenByUser()`（只看 ui.json）。

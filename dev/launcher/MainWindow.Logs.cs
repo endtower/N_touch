@@ -105,8 +105,27 @@ public partial class MainWindow
     private void UpdateLogTabs()
     {
         // 选中态交给 SegmentedTab 的 IsChecked 触发器，颜色不在代码里写死
-        foreach (var tab in new[] { LogTabCore, LogTabSnowluma, LogTabIngress, LogTabService })
+        foreach (var tab in new[] { LogTabCore, LogTabSnowluma, LogTabIngress, LogTabTunnel, LogTabService })
             tab.IsChecked = tab.Tag?.ToString() == _logSource;
+    }
+
+    /// <summary>
+    /// 某个日志来源被隐藏后，如果当前正停在它上面，就退回 Core。
+    /// 否则会停在一个看不见的 tab 上，日志区还照着它刷，用户完全不明白在显示什么。
+    /// </summary>
+    private void EnsureLogSourceVisible()
+    {
+        var hidden = _logSource switch
+        {
+            "snowluma" => !IsRowShown("snowluma"),
+            "tunnel" => !IsRowShown("pi"),
+            _ => false,
+        };
+        if (!hidden) return;
+        _logSource = "core";
+        _logText = ""; _logFiles = "";
+        UpdateLogTabs();
+        RenderLogs();
     }
 
     private async void LogTab_Click(object sender, RoutedEventArgs e)

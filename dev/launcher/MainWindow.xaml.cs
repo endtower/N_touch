@@ -58,6 +58,7 @@ public partial class MainWindow : Window
             var startSection = Environment.GetEnvironmentVariable("ABYSS_LAUNCHER_SECTION");
             ShowSection(string.IsNullOrWhiteSpace(startSection) || startSection == "updates" ? "overview" : startSection);
             UpdateLayout();               // 强制完成一次布局，保证快照内容完整
+            ApplyRowVisibility();         // 先按 ui.json 摆好哪些行显示，别等轮询回来才收拾
             ApplyCloseBehavior();         // 把设置里的"× 行为"反映到关闭键提示上
             if (IsSnapshotRun)
             {

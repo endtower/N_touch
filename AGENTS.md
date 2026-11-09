@@ -15,7 +15,8 @@
 - 运行中的 Core 源码在 `app\components\core\source`，管理服务源码在 `app\components\manager\source`。
 - 可先调用 `POST /v1/updates/source-backup`（component 为 core 或 manager）保留当前代码，再直接修改。后端修改后重启对应服务；前端修改后由 Agent 构建对应组件的 `web_frontend`。
 - 历史数据已迁入工作区 `data`。SnowLuma 原安装位置由 `data\manager\installations.json` 登记，内部存储遵循上游。
-- 一键启动框架：实际脚本为 `app/components/manager/source/startup_plan.py`，执行器为同目录 `startup_workflow.py`；开发副本在 `dev`。外部 AI 直接编辑脚本，说明见 `dev/docs/STARTUP.md`。管理接口为 `GET /v1/startup` 和 `POST /v1/startup/{start|continue|retry|skip|cancel|enable|stop|reload}`，沿用管理令牌。打开 EXE 只展示界面，点击「一键启动」才执行已勾选链路；Pi 和 QQ 独立，失败可跳过或单独继续。改脚本可暂停流程后调用 reload，无须重新打包 EXE；改框架/进程控制仍需重启管理服务。
+- 一键启动框架：实际脚本为 `app/components/manager/source/startup_plan.py`，执行器为同目录 `startup_workflow.py`；开发副本在 `dev`。外部 AI 直接编辑脚本，说明见 `dev/docs/STARTUP.md`（随包副本 `app/components/manager/source/docs/STARTUP.md`）。管理接口为 `GET /v1/startup` 和 `POST /v1/startup/{start|continue|retry|skip|cancel|enable|stop|reload}`，沿用管理令牌。打开 EXE 只展示界面，点击「一键启动」才执行已勾选链路；Pi 和 QQ 独立，失败可跳过或单独继续。改脚本可暂停流程后调用 reload，无须重新打包 EXE；改框架/进程控制仍需重启管理服务。
+- **启动器界面也是可配置的用户数据**：`data\launcher\ui.json` 控制主题、点 × 的行为，以及每个组件行是否显示、叫什么名字（`rows` → `visible` / `title`）。改完重开启动器生效，不需要重新编译 EXE。同目录 `README.md` 是给用户和 Agent 的说明，由启动器首次运行时自动放出。想看某个组件行消失后界面什么样，改这个文件即可 —— 不用动源码。
 
 **沟通原则**
 

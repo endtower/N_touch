@@ -96,6 +96,24 @@ public partial class MainWindow
         _ => "还没有执行过一键启动",
     };
 
+    /// <summary>
+    /// 服务端那句汇总状态是按**全部**链路算的。用户把某一行隐藏以后，
+    /// 那条链路的失败/等待就不该再挂在页头——用户没有入口去处理它。
+    /// 这里按「看得见的链路」重新算一遍，只在真的还有可见问题时才沿用 attention / paused。
+    /// </summary>
+    private string VisibleSummaryState(string serverState)
+    {
+        var visible = _chains.Where(pair => IsRowShown(pair.Key)).Select(pair => pair.Value).ToList();
+        var anyFailed = visible.Any(chain => chain.State == "failed");
+        var anyWaiting = visible.Any(chain => chain.State is "waiting" or "blocked");
+        var anyRunning = visible.Any(chain => chain.State is "running" or "pending");
+        var allDone = visible.Count > 0 && visible.All(chain => chain.State is "done" or "skipped" or "idle");
+
+        if (serverState == "attention") return anyFailed ? "attention" : allDone ? "done" : "partial";
+        if (serverState == "paused") return anyFailed || anyWaiting || anyRunning ? "paused" : "done";
+        return serverState;
+    }
+
     /// <summary>状态色只分四档：正常 / 进行中 / 需要处理 / 中性。
     /// 「正常」只用中性描边 —— 一切正常时整页不该有一排在喊的彩色胶囊，颜色留给要人管的那几行。</summary>
     private void SetPill(Border pill, TextBlock text, string label, string tone)
@@ -121,6 +139,38 @@ public partial class MainWindow
         _startupPoll.Start();
         Closed += (_, _) => _startupPoll.Stop();
         _ = RefreshStartup();
+    }
+
+    /// <summary>
+    /// 用户是否**主动**关掉了这一行（只看 ui.json，不看运行时探测结果）。
+    ///
+    /// 跟 <see cref="IsRowShown"/> 的区别很关键：Pi 行在还没探测到 tunnel 目标时也不显示，
+    /// 但那是「暂时没探测到」，不是「用户不要它」。拿 IsRowShown 去同步会把没配置 Pi 的
+    /// 用户的 Pi 链路误关掉 —— 用户什么都没做，状态栏却冒出「已从一键启动移除」。
+    /// </summary>
+    private static bool IsRowHiddenByUser(string id) => !UiSettings.Row(id).Visible;
+
+    private bool _hiddenChainsSynced;
+
+    /// <summary>
+    /// 被用户在 ui.json 里隐藏掉的链路，不该再参与一键启动 —— 否则用户明明关掉了那一行，
+    /// 点「一键启动」还是会去拉起它，失败了又在页头报错，等于没关掉。
+    ///
+    /// 只在第一次拿到链路快照后同步一次：这是「隐藏 = 我不用它」的落地，不是每次渲染都发请求。
+    /// 用户以后想重新启用，把行显示出来再勾选即可。
+    /// </summary>
+    private async Task SyncHiddenChainsAsync()
+    {
+        if (_hiddenChainsSynced || _chains.Count == 0) return;
+        _hiddenChainsSynced = true;
+        foreach (var row in Rows)
+        {
+            if (row.Chain.Length == 0 || !IsRowHiddenByUser(row.Id)) continue;
+            if (!_chains.TryGetValue(row.Chain, out var chain) || !chain.Enabled) continue;
+            // 必需链路（Core）不允许被移除参与资格，界面上它的勾选框本来就是禁用的
+            if (chain.Required) continue;
+            await RunStartup("enable", row.Chain, false);
+        }
     }
 
     private void RenderStartup(JsonElement status)
@@ -149,9 +199,10 @@ public partial class MainWindow
                 CanSkip = chain.GetProperty("can_skip").GetBoolean(),
             };
         }
-        StartupSummary.Text = SummaryText(status.TryGetProperty("state", out var state)
-            ? state.GetString() ?? "idle" : "idle");
+        StartupSummary.Text = SummaryText(VisibleSummaryState(
+            status.TryGetProperty("state", out var state) ? state.GetString() ?? "idle" : "idle"));
         RenderRows();
+        _ = SyncHiddenChainsAsync();
     }
 
     private async Task RefreshStartup()
@@ -209,6 +260,86 @@ public partial class MainWindow
         {
             row.Panel.Visibility = Visibility.Collapsed;
             row.Toggle.IsChecked = false;
+        }
+    }
+
+    // ---------------- 行的显示与否 ----------------
+
+    /// <summary>
+    /// 每一行对应的 Border 和它上面那条分隔线。分隔线跟着下面那一行走：
+    /// 把某行隐藏了，它上面那条线也要一起收掉，否则会留下两条相邻的分隔线。
+    /// </summary>
+    private IEnumerable<(string Id, Border? Row, Border? Divider)> RowChrome()
+    {
+        yield return ("core", CoreRow, null);              // 第一行，上面没有线
+        yield return ("snowluma", SnowRow, SnowDivider);
+        yield return ("pi", PiRow, PiDivider);
+        yield return ("ingress", IngressRow, ServiceDivider);
+        yield return ("manager", ManagerRow, ManagerDivider);
+        yield return ("launcher", LauncherRow, LauncherDivider);
+    }
+
+    private Dictionary<string, TextBlock> _rowTitles = new();
+
+    private void CacheRowTitles()
+    {
+        _rowTitles = new()
+        {
+            ["core"] = CoreRowTitle,
+            ["snowluma"] = SnowRowTitle,
+            ["pi"] = PiRowTitle,
+            ["ingress"] = IngressRowTitle,
+            ["manager"] = ManagerRowTitle,
+            ["launcher"] = LauncherRowTitle,
+        };
+    }
+
+    /// <summary>
+    /// 这一行现在该不该显示：内置条件（Pi 要有 tunnel 目标）+ 用户在 ui.json 里的开关。
+    /// 结论只此一处，渲染和点击都查它，避免两边判断不一致。
+    ///
+    /// 刻意**不**把「启动脚本里还有没有这条链路」算进来：脚本归用户，他删一条链路只是
+    /// 不让一键启动带它，不代表他想把这一行的安装/更新入口也一起弄没。
+    /// </summary>
+    private bool IsRowShown(string id)
+    {
+        if (!UiSettings.Row(id).Visible) return false;
+        if (id == "pi" && !_targets.ContainsKey("tunnel")) return false;
+        return true;
+    }
+
+    /// <summary>「常驻服务」那一组：三个都关掉时，整组标题和分隔线也不必留着。</summary>
+    private bool AnyServiceShown() =>
+        IsRowShown("ingress") || IsRowShown("manager") || IsRowShown("launcher");
+
+    /// <summary>把显示与否、标题文字应用到界面。标题可以由用户在 ui.json 里覆盖。</summary>
+    private void ApplyRowVisibility()
+    {
+        foreach (var (id, border, divider) in RowChrome())
+        {
+            var shown = IsRowShown(id);
+            if (border is not null)
+                border.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+            if (divider is not null)
+                divider.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        if (ServiceHeader is not null)
+            ServiceHeader.Visibility = AnyServiceShown() ? Visibility.Visible : Visibility.Collapsed;
+
+        // 日志来源标签跟着走：行都没了，还留着一个永远空的日志来源会让人困惑
+        if (LogTabSnowluma is not null)
+            LogTabSnowluma.Visibility = IsRowShown("snowluma") ? Visibility.Visible : Visibility.Collapsed;
+        if (LogTabTunnel is not null)
+            LogTabTunnel.Visibility = IsRowShown("pi") ? Visibility.Visible : Visibility.Collapsed;
+        EnsureLogSourceVisible();
+
+        if (_rowTitles.Count == 0) CacheRowTitles();
+        foreach (var (id, title) in _rowTitles)
+        {
+            var custom = UiSettings.Row(id).Title;
+            if (custom.Length == 0 || title is null) continue;
+            title.Text = custom;
         }
     }
 
@@ -271,17 +402,14 @@ public partial class MainWindow
     private void RenderRows()
     {
         if (!IsLoaded) return;
-        var tunnel = _targets.TryGetValue("tunnel", out var piTarget) ? piTarget : null;
-        var hasPi = tunnel is not null;
-        PiRow.Visibility = hasPi ? Visibility.Visible : Visibility.Collapsed;
-        PiDivider.Visibility = hasPi ? Visibility.Visible : Visibility.Collapsed;
+        ApplyRowVisibility();
 
         _startupRendering = true;
         try
         {
             foreach (var row in Rows)
             {
-                if (row.Id == "pi" && !hasPi) continue;
+                if (!IsRowShown(row.Id)) continue;
                 _chains.TryGetValue(row.Chain ?? "", out var chain);
                 _targets.TryGetValue(row.Target ?? "", out var target);
                 var running = target is not null && IsRunning(target);
@@ -453,16 +581,39 @@ public partial class MainWindow
         : seconds < 5400 ? $"{seconds / 60:0} 分钟"
         : $"{seconds / 3600:0.0} 小时";
 
+    /// <summary>某个组件行当前显示的名字：用户改过就用改过的，否则用内置默认。</summary>
+    private string RowTitleOf(string id)
+    {
+        var custom = UiSettings.Row(id).Title;
+        if (custom.Length > 0) return custom;
+        return id switch
+        {
+            "core" => "弱链接 Core",
+            "snowluma" => "SnowLuma",
+            "pi" => "Pi 桥接",
+            "ingress" => "消息接入",
+            "manager" => "管理服务",
+            "launcher" => "桌面启动器",
+            _ => id,
+        };
+    }
+
     /// <summary>页头那句「现在是什么状况」：优先说需要人处理的事，其次说在跑什么。</summary>
     private void UpdateOverviewHeadline()
     {
-        var names = new List<string> { "core", "snowluma", "ingress" };
-        if (_targets.ContainsKey("tunnel")) names.Add("tunnel");
+        // 只统计用户实际能看到的那几行：被 ui.json 隐藏的行不该出现在「正在运行」里
+        var names = new List<string>();
+        if (IsRowShown("core")) names.Add("core");
+        if (IsRowShown("snowluma")) names.Add("snowluma");
+        if (IsRowShown("ingress")) names.Add("ingress");
+        if (IsRowShown("pi")) names.Add("tunnel");
         var running = names.Count(TargetRunning);
 
         string headline;
-        var attention = _chains.Values.FirstOrDefault(chain => chain.State == "failed");
-        var waiting = _chains.Values.FirstOrDefault(chain => chain.State == "waiting");
+        // 只看用户看得见的那几行：某行被 ui.json 关掉了，它背后那条链路的报错
+        // 也不该继续占着页头喊「需要处理」—— 用户根本没有入口去处理它。
+        var attention = _chains.FirstOrDefault(pair => pair.Value.State == "failed" && IsRowShown(pair.Key)).Value;
+        var waiting = _chains.FirstOrDefault(pair => pair.Value.State == "waiting" && IsRowShown(pair.Key)).Value;
         if (!_serviceConnected)
             headline = "管理服务未连接，正在重试…";
         else if (attention is not null)
@@ -473,13 +624,15 @@ public partial class MainWindow
             headline = "现在没有程序在运行。点「一键启动」按顺序启动已勾选的程序。";
         else
         {
+            // 名字跟行标题保持一致：用户改过标题，这里也跟着改；隐藏的行不再点名
             var titles = new List<string>();
-            if (TargetRunning("core")) titles.Add("弱链接 Core");
-            if (TargetRunning("ingress")) titles.Add("消息接入");
-            if (TargetRunning("snowluma")) titles.Add("SnowLuma");
-            if (_targets.ContainsKey("tunnel") && TargetRunning("tunnel")) titles.Add("Pi 桥接");
-            headline = "正在运行：" + string.Join("、", titles)
-                + (running == names.Count ? "。全部就绪。" : "。");
+            if (IsRowShown("core") && TargetRunning("core")) titles.Add(RowTitleOf("core"));
+            if (IsRowShown("ingress") && TargetRunning("ingress")) titles.Add(RowTitleOf("ingress"));
+            if (IsRowShown("snowluma") && TargetRunning("snowluma")) titles.Add(RowTitleOf("snowluma"));
+            if (IsRowShown("pi") && TargetRunning("tunnel")) titles.Add(RowTitleOf("pi"));
+            headline = titles.Count == 0
+                ? "没有可见的程序在运行。"
+                : "正在运行：" + string.Join("、", titles) + (running == names.Count ? "。全部就绪。" : "。");
         }
         OverviewHeadline.Text = headline;
 
