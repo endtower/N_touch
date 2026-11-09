@@ -4,10 +4,8 @@ name: Release
 # 用户侧的「更新中心」直接读 latest release 的清单，因此每次发布必须包含全部组件的
 # latest / versions 清单；版本包同时保留在本版本的永久下载地址上。
 #
-# 产物发布到独立的公开仓库 endtower/weaklink-releases：本仓库含源码与开发历史，
-# 更新源只应指向只放构建产物的仓库，二者分开后更新地址稳定、也不会误发源码。
-# 需要在本仓库 Settings → Secrets → Actions 配置 RELEASE_TOKEN（对发布仓库有
-# contents:write 权限的令牌），默认的 github.token 只能写本仓库。
+# 产物直接发布到本仓库的 Release：用户从这里下载安装，更新中心读这里的 latest 清单。
+# 源码与产物同库，无需额外的跨仓库令牌，默认的 github.token 即可。
 
 on:
   workflow_dispatch:
@@ -34,8 +32,8 @@ jobs:
       run:
         working-directory: dev
     env:
-      GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-      RELEASE_REPO: endtower/weaklink-releases
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
 
@@ -154,5 +152,5 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @assets --repo "${{ env.RELEASE_REPO }}" --clobber
           } else {
-            gh release create $tag @assets --repo "${{ env.RELEASE_REPO }}" --title "Abyss $tag" --notes $notes
+            gh release create $tag @assets --repo "${{ env.RELEASE_REPO }}" --title "弱链接 $tag" --notes $notes
           }
