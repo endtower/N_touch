@@ -2,8 +2,8 @@
 
 双击 **[启动弱链接.cmd](启动弱链接.cmd)**，或打开 `app/AbyssLauncher.exe`。启动器统一管理 Core、消息接入和 SnowLuma，并提供各项目的管理页面。
 
-> **用户请去 [endtower/weaklink-releases](https://github.com/endtower/weaklink-releases) 下载。**
-> 本仓库是源码与开发工程，不含下载入口，也不存放构建产物。
+> **用户下载：[Releases](https://github.com/endtower/weaklink/releases/latest)。**
+> 本仓库同时是源码工程，源码在 [`dev/`](dev/) 下，按组件分目录。
 
 ## 源码在哪
 
@@ -54,6 +54,13 @@ Core、SnowLuma、启动器各自有独立的版本号和更新清单，**互不
 前六个以外的「唯一打包的自有业务程序」是 `app/AbyssLauncher.exe`；管理服务、Core 和消息接入以源码运行。Python、Node 等上游运行环境随程序提供。
 
 > `app / data / external / cache / backups / private` 都在 `.gitignore` 里，不进仓库。
+
+## 历史
+
+项目原名 N_Touch（界面叫 Abyss），2026-11 更名为「弱链接 / WeakLink」。
+改名前的最后状态保存在 tag [
+-touch-final](https://github.com/endtower/weaklink/releases/tag/n-touch-final) 对应的提交里，
+git checkout n-touch-final 即可回看。
 
 ## 给接手的 Agent
 
