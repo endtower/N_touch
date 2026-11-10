@@ -27,10 +27,7 @@ MAX_AGE_DAYS = 30                       # 30 天前的图不发（系统侧下�
 def _is_llm_saved_media(path: str) -> bool:
     """判定 path 是否位于 LLM 侧自存媒体根（memory/llm_save/{images,stickers}/）。
 
-    LLM 侧素材经 VisionAgent.save_image / save_sticker 写入，
-    落盘用 shutil.copy2 保留源 mtime —— mtime 即用户最早发图那一刻，
-    不是真正的"最近保存时刻"。30 天护栏对这类素材全杀，
-    必须按根路径豁免。
+    归档素材可长期使用。旧归档可能保留源文件的 mtime，也按根路径豁免。
 
     与 brain.attachments.resolver._get_llm_save_root() 的项目根算法保持一致：
         <项目根>/memory/llm_save
@@ -44,7 +41,7 @@ def _is_llm_saved_media(path: str) -> bool:
         return False
 
 
-def _is_valid_image_by_magic(path: str) -> bool:
+def is_valid_image_by_magic(path: str | Path) -> bool:
     """通过 magic bytes 验证文件真是图片（不是改名后的 exe 等）。"""
     try:
         with open(path, "rb") as f:
@@ -119,13 +116,20 @@ def preflight(path: str) -> Dict:
         return {"ok": False, "reason": f"unsupported format: {ext}", "path": path}
 
     # 2. magic bytes（防伪扩展名）
-    if not _is_valid_image_by_magic(path):
+    if not is_valid_image_by_magic(path):
         return {"ok": False, "reason": "file is not a valid image (magic bytes mismatch)", "path": path}
 
     # 3. 年龄（仅对系统侧下载适用；LLM 侧自存素材的 mtime 不代表保存时刻，全豁免）
     if not _is_llm_saved_media(path):
         if time.time() - os.path.getmtime(path) > MAX_AGE_DAYS * 86400:
-            return {"ok": False, "reason": f"file older than {MAX_AGE_DAYS} days", "path": path}
+            return {
+                "ok": False,
+                "reason": (
+                    f"当前引用的是超过 {MAX_AGE_DAYS} 天的聊天缓存副本，无法直接发送。"
+                    "如果要长期使用且文件仍在，可先保存到表情包库，再用保存工具返回的文件名发送。"
+                ),
+                "path": path,
+            }
 
     # 4. 大小 / 尺寸（自动压缩）
     try:

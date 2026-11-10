@@ -2,7 +2,7 @@
 
 五条断言：
 1. 空目录 → 自动播种且只播种一个 common.json（正文留空给用户写）；
-2. 空目录 → DEFAULT_PERSONA_MODE 回落到 common，取默认人格不再 KeyError；
+2. 空目录 → 默认人格回落到 common；
 3. 已有 common + normal → 不播种、DEFAULT 仍为 normal、原文件字节不变；
 4. 空目录 → 可入参人格（selectable）含 common，内荐清单仍排除它；
 5. 文件已存在但内容坏（缺字段 / 缺基本人格）→ 照旧崩溃阻断。
@@ -58,15 +58,15 @@ class PersonaSeedTests(unittest.TestCase):
         self.assertEqual(base.persona_name, "common")
         self.assertEqual(base.kernel_prompt, "")      # 人格信息默认没有，用户自己写
         self.assertTrue(base.scene)                   # 场景给占位，供人格清单展示
-        self.assertEqual(module.DEFAULT_PERSONA_MODE, "common")
-        module.get_persona(module.DEFAULT_PERSONA_MODE)  # 默认人格可取，不再 KeyError
+        self.assertEqual(module.get_default_persona_name(), "common")
+        self.assertEqual(module.get_session_persona("").persona_name, "common")
 
     def test_existing_personas_untouched(self):
         _write_persona(self.dir, "common", scene="验收", kernel_prompt="正文")
         _write_persona(self.dir, "normal", scene="验收", kernel_prompt="正文")
         before = (self.dir / "common.json").read_bytes()
         module = _load_registry(self.root, "persona_seed_existing")
-        self.assertEqual(module.DEFAULT_PERSONA_MODE, "normal")
+        self.assertEqual(module.get_default_persona_name(), "normal")
         self.assertEqual(len(list(self.dir.glob("*.json"))), 2)   # 未额外播种
         self.assertEqual((self.dir / "common.json").read_bytes(), before)
 

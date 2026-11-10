@@ -21,6 +21,7 @@ from typing import Dict, Any, Optional, List
 from utils.logger import get_logger
 from config.settings import chat_config
 from utils.error_handling import async_handle_errors
+from brain.hc.event_chain_permissions import SocialSendPolicy
 
 from brain.base.common_ways.input_helpers import (
     CONVERSATION_CONSUMER_ID,
@@ -40,20 +41,20 @@ _MODE_APPROVAL = (
     "主人回复『同意』才会真正发出；回复其他任何内容或超时都会拒绝本次发送。\n"
     "- 被拒 / 超时不是崩溃：与主人沟通调整后可再次尝试。\n"
     "- 单条消息的批准不会开启自由模式。可用 set_send_mode 申请自由发送（须主人回复『同意』）。\n"
-    "- 自由授权只限当前事件链的当前工作会话；再次进入该会话仍有效，链结束即失效，其他会话需另行申请。"
+    "- 自由授权只针对当前工作会话。主人可选择仅本事件链或限时授权，并决定发送后是否知会。"
 )
 _MODE_UNRESTRICTED = (
     "\n【发送模式：自由】\n"
     "- 你可以直接调用 send_to_target 向工作会话发送消息，无需逐条审批。\n"
-    "- 当前模式只限本事件链的当前工作会话；再次进入该会话仍有效，事件链结束后重新按配置初始化。\n"
     "- 如需恢复逐条审批，可调用 set_send_mode(mode=\"approval\")，立即生效。"
 )
 
 
-def _build_mode_block(mode: str) -> str:
+def _build_mode_block(mode: str, *, notify: bool = False, remaining_seconds: int | None = None) -> str:
     if mode == "unrestricted":
-        notice = "\n- 每条发出后系统会自动知会主人。" if chat_config.SOCIAL_CHAT_UNRESTRICTED_NOTIFY else ""
-        return _MODE_UNRESTRICTED + notice
+        duration = "当前事件链" if remaining_seconds is None else f"剩余约 {remaining_seconds} 秒"
+        notice = "自动知会主人" if notify else "不自动知会主人"
+        return _MODE_UNRESTRICTED + f"\n- 当前工作会话有效，{duration}。每次成功发送后{notice}。"
     if mode == "approval":
         return _MODE_APPROVAL
     raise ValueError(f"非法发送模式: {mode!r}")
@@ -139,11 +140,14 @@ class SocialChatInputManager:
         )
 
     def _current_send_mode(self) -> str:
+        return self._current_send_policy().mode
+
+    def _current_send_policy(self) -> SocialSendPolicy:
         if self._permissions is None or self._permission_scope != (
             self._social_chat_core.master_session_id, self._social_chat_core.working_session_id
         ):
             raise RuntimeError("Social Chat 输入未绑定当前事件链及目标会话")
-        return self._permissions.get_send_mode(*self._permission_scope)
+        return self._permissions.get_send_policy(*self._permission_scope)
 
     # ----------------- 对外接口 -----------------
     @async_handle_errors()
@@ -223,7 +227,10 @@ class SocialChatInputManager:
         task_block = f"【本次聊天任务】\n{self._task_purpose}"
 
         # 4) 发送模式
-        mode_block = _build_mode_block(self._current_send_mode())
+        policy = self._current_send_policy()
+        mode_block = _build_mode_block(
+            policy.mode, notify=policy.notify, remaining_seconds=policy.remaining_seconds
+        )
 
         # 5) amy_effect（表现侧出口：仅 NE/DA 两行激素描述 + 原因（仅非最终评价类想法），
         #    不含 SC 行——pfca 决策侧情绪体系与本模块隔离，见 docs/api/amy.md）
@@ -274,11 +281,11 @@ class SocialChatInputManager:
         人格由 social_chat_agent 经 social_chat_core.persona_name 传入（缺省正常人格），
         本段注入该人格提示词（公共聊天准则 + kernel_prompt，公共段在前），
         作为本次社交的语言与行为基准。
-        人格不存在属重大关键路径失败，get_persona 直接抛 KeyError 崩溃阻断（user_rules）。
+        已删除的人格回退到基本说话风格。
         """
-        from brain.base.persona.persona_registry import compose_persona_prompt, get_persona
+        from brain.base.persona.persona_registry import compose_persona_prompt, get_session_persona
 
-        persona = get_persona(self._social_chat_core.persona_name)
+        persona = get_session_persona(self._social_chat_core.persona_name)
         return f"【当前人格】{persona.persona_name}\n{compose_persona_prompt(persona)}"
 
     async def _fetch_one_history(

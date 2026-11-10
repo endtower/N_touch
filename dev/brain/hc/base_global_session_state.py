@@ -76,6 +76,7 @@ class BaseGlobalSessionState:
             self._event_chain_active = False
             self._current_event_chain = None
             self._event_chain_permissions = None
+            self._timed_social_grants = {}
             self._processed_by_hc = False
 
             # 统一数据字典：各数据子类读写自己的分区

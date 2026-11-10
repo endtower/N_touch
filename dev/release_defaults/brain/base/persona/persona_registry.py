@@ -7,12 +7,9 @@
 内核提示词（kernel_prompt），召唤时注入 PersonaAgent 的 system prompt，
 让 LLM 从该人格的立场与思考风格审视问题——类似脑内的天使与恶魔。
 
-存储（2026-09-28 起改为文件化）：每个人格一个 JSON 文件，存于本目录
-（brain/base/persona/*.json），文件含
-persona_name / scene / kernel_prompt / model_level。
-模块导入时同步加载全部 *.json 为注册表 _PERSONAS；运行时改动定义
-经 persist_persona 异步回写（同步 IO 用 asyncio.to_thread 包装，
-遵循项目全异步约定）。
+每个人格存为用户数据目录下 brain/base/persona/ 的一个 JSON 文件，包含
+persona_name / scene / kernel_prompt / model_level。启动时加载文件，
+人工页面的增删改同时更新文件与运行中的注册表。
 
 kernel_prompt 是人格定义的唯一来源（2026-09-29 移除经验挂载链路）：
 人格不再挂载经验 ID 列表——该链路既无运行时注入（人格 system prompt
@@ -22,8 +19,7 @@ kernel_prompt 是人格定义的唯一来源（2026-09-29 移除经验挂载链�
 
 基本人格（2026-09-29）：与普通人格平行的一条特殊人格条目，固定
 persona_name = "common"（存 common.json）。它按与其他人格完全相同的
-方式被查询，但不参与内荐（list_roster_personas 排除它），也不能作为
-会话人格使用。
+方式被查询。它可作为会话人格，且不参与内荐。
 拼装给会话的人格提示词 = 基本人格全文 + "\n" + 该人格 kernel_prompt
 （基本人格在前），经 compose_persona_prompt 输出给 conversation /
 social_chat 首条消息；人格自荐 Agent 仍只用 kernel_prompt，不拼基本人格。
@@ -33,7 +29,7 @@ social_chat 首条消息；人格自荐 Agent 仍只用 kernel_prompt，不拼�
   唯一可经工具修改的是基本人格 common 的 kernel_prompt——其语义收窄为
   「基本说话风格」：说人话式的普适性要求，旨在让 LLM 说话自然，不做
   逐字逐词的细则管制，硬预算 COMMON_STYLE_BUDGET 字符，超限拒绝。
-- 运行时覆盖写入前自动留档到 history/ 子目录（同名带时间戳），可回滚。
+- 运行时覆盖或删除前自动留档到 history/ 子目录（同名带时间戳），可回滚。
   history/ 不参与注册表加载（glob 仅取目录直属 *.json）。
 
 人格文件读取 / 解析失败属重大关键路径失败，直接上抛崩溃阻断，
@@ -46,15 +42,17 @@ social_chat 首条消息；人格自荐 Agent 仍只用 kernel_prompt，不拼�
 from paths import data_root
 import asyncio
 import json
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, replace
+from pathlib import Path, PureWindowsPath
+import re
+from threading import Lock
 from typing import Any, Dict, List
 
 from utils.logger import get_logger
 
 logger = get_logger('persona_registry', "INFO")
 
-# 人格文件目录：本模块同级目录，每个人格一个 <persona_id>.json
+# 用户数据中的人格文件目录
 PERSONA_DIR = data_root() / "brain" / "base" / "persona"
 PERSONA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -67,6 +65,8 @@ COMMON_STYLE_BUDGET = 300
 
 # 运行时改动留档目录（PERSONA_DIR/history/，同步 IO 在 to_thread 中执行）
 PERSONA_HISTORY_DIR = PERSONA_DIR / "history"
+_PERSONA_FILES: Dict[str, Path] = {}
+_WRITE_LOCK = Lock()
 
 
 @dataclass
@@ -101,8 +101,8 @@ class PersonaDef:
 # ==================== 加载 ====================
 
 def _persona_path(persona_name: str) -> Path:
-    """人格文件路径：<PERSONA_DIR>/<persona_name>.json。"""
-    return PERSONA_DIR / f"{persona_name}.json"
+    """保留已加载文件的原文件名，新条目使用人格名称。"""
+    return _PERSONA_FILES.get(persona_name, PERSONA_DIR / f"{persona_name}.json")
 
 
 def _write_persona_file(persona: PersonaDef) -> None:
@@ -143,7 +143,7 @@ def _seed_personas_if_empty() -> None:
 
 
 def _load_personas() -> Dict[str, PersonaDef]:
-    """从本目录全部 *.json 加载人格（模块导入时同步执行）。
+    """从用户人格目录加载全部 *.json（模块导入时同步执行）。
 
     目录为空时先播种基本人格模板（见 _seed_personas_if_empty）；
     任一文件缺失字段 / JSON 解析失败直接上抛崩溃阻断（user_rules）。
@@ -160,6 +160,7 @@ def _load_personas() -> Dict[str, PersonaDef]:
             model_level=data.get("model_level", "persona"),
         )
         personas[persona.persona_name] = persona
+        _PERSONA_FILES[persona.persona_name] = path
     if not personas:
         raise RuntimeError(f"人格目录无任何人格文件（*.json）: {PERSONA_DIR}")
     if COMMON_PERSONA_NAME not in personas:
@@ -192,19 +193,18 @@ def compose_persona_prompt(persona: PersonaDef) -> str:
     return f"{base}\n{persona.kernel_prompt}"
 
 
-# 缺省人格：调用方（conversation_agent / social_chat_agent）未指定 persona_id 时使用。
-# 2026-09-29 起人格改为逐会话显式指定：PFCA 不再持有 / 注入"当前人格"，
-# 由工具层把 persona_id 透传到对应会话，会话首条消息注入该人格内核。
-# 2026-10-15：全新数据目录只播种基本人格（_seed_personas_if_empty），
-# normal 不存在时缺省回落到基本人格 common，避免默认人格 KeyError 崩溃。
-DEFAULT_PERSONA_MODE = "normal" if "normal" in _PERSONAS else COMMON_PERSONA_NAME
+def get_default_persona_name() -> str:
+    """沿用已有安装的 normal 偏好；用户删除后自动使用基本说话风格。"""
+    return "normal" if "normal" in _PERSONAS else COMMON_PERSONA_NAME
+
+
+def get_session_persona(persona_name: str) -> PersonaDef:
+    """解析会话已选的人格，兼容运行中删除该人格的情况。"""
+    return _PERSONAS.get(persona_name or get_default_persona_name()) or get_base_persona()
 
 
 def register_persona(persona: PersonaDef) -> None:
-    """注册（或覆盖）一个人格到内存注册表（同 persona_name 覆盖旧定义）。
-
-    仅改内存，不落盘：如需持久化到人格文件，另调 persist_persona（异步）。
-    """
+    """将已加载或已保存的人格定义发布到内存注册表。"""
     _PERSONAS[persona.persona_name] = persona
     logger.info(f"人格已注册: {persona.persona_name}")
 
@@ -230,7 +230,7 @@ def list_personas() -> List[PersonaDef]:
 
 def list_roster_personas() -> List[PersonaDef]:
     """列出参与内荐 / 可作会话人格的人格（排除基本人格条目）。"""
-    return [p for p in _PERSONAS.values() if p.persona_name != COMMON_PERSONA_NAME]
+    return [p for p in list_personas() if p.persona_name != COMMON_PERSONA_NAME]
 
 
 def list_selectable_personas() -> List[PersonaDef]:
@@ -238,7 +238,7 @@ def list_selectable_personas() -> List[PersonaDef]:
 
     与 list_roster_personas 的分工：roster 用于内荐与人格清单展示，排除基本人格；
     但基本人格本身是合法的会话人格——全新安装只有 common 时，
-    DEFAULT_PERSONA_MODE 就是它，工具入参也必须能通过校验。
+    默认人格就是它，工具入参也必须能通过校验。
     """
     return list(_PERSONAS.values())
 
@@ -268,11 +268,6 @@ def render_persona_roster() -> str:
 
 # ==================== 持久化 ====================
 
-async def persist_persona(persona: PersonaDef) -> None:
-    """异步落盘单个人格（同步 IO 用 asyncio.to_thread 包装，项目全异步约定）。"""
-    await asyncio.to_thread(_write_persona_file, persona)
-
-
 def _snapshot_persona(persona_name: str) -> None:
     """运行时改动前留档：把当前人格文件复制到 history/<名>_<时间戳>.json。
 
@@ -286,7 +281,7 @@ def _snapshot_persona(persona_name: str) -> None:
     if not source.exists():
         return
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    dest = PERSONA_HISTORY_DIR / f"{persona_name}_{stamp}.json"
+    dest = PERSONA_HISTORY_DIR / f"{source.stem}_{stamp}.json"
     dest.write_bytes(source.read_bytes())
 
 
@@ -302,26 +297,66 @@ async def set_persona_kernel_prompt(persona_name: str, kernel_prompt: str) -> Pe
             f"人格 {persona_name!r} 的内核已冻结，仅基本人格 "
             f"（{COMMON_PERSONA_NAME}，基本说话风格区）可经此修改。"
         )
-    from dataclasses import replace
-    persona = replace(get_persona(persona_name), kernel_prompt=kernel_prompt)
-    await asyncio.to_thread(_snapshot_persona, persona_name)
-    await persist_persona(persona)
-    register_persona(persona)
-    logger.info(f"人格 {persona_name} 说话风格区已覆盖并落盘（旧版已留档）")
-    return persona
+    return await asyncio.to_thread(_update_persona, persona_name, {"kernel_prompt": kernel_prompt})
 
 
 async def update_persona_from_human(persona_name: str, changes: dict) -> PersonaDef:
     """仅由人工编辑 HTTP 入口调用；不解除 LLM 对普通人格内核的冻结。"""
-    from dataclasses import replace
     if not isinstance(changes, dict) or not changes or set(changes) - {"scene", "kernel_prompt"}:
         raise ValueError("人工编辑只接受适配场景和人格正文")
     if any(not isinstance(v, str) or not v.strip() for v in changes.values()):
         raise ValueError("人格字段必须为非空文字")
-    updated = replace(get_persona(persona_name), **{k: v.strip() for k, v in changes.items()})
-    if persona_name == COMMON_PERSONA_NAME and len(updated.kernel_prompt) > COMMON_STYLE_BUDGET:
-        raise ValueError(f"基本说话风格最多{COMMON_STYLE_BUDGET}字")
-    await asyncio.to_thread(_snapshot_persona, persona_name)
-    await persist_persona(updated)
-    register_persona(updated)
-    return updated
+    return await asyncio.to_thread(
+        _update_persona, persona_name, {k: v.strip() for k, v in changes.items()}
+    )
+
+
+def _update_persona(persona_name: str, changes: dict) -> PersonaDef:
+    with _WRITE_LOCK:
+        updated = replace(get_persona(persona_name), **changes)
+        if persona_name == COMMON_PERSONA_NAME and len(updated.kernel_prompt) > COMMON_STYLE_BUDGET:
+            raise ValueError(f"基本说话风格最多{COMMON_STYLE_BUDGET}字")
+        _snapshot_persona(persona_name)
+        _write_persona_file(updated)
+        register_persona(updated)
+        return updated
+
+
+async def create_persona_from_human(fields: dict) -> PersonaDef:
+    """新建一个会话和内荐均可使用的内心人格。"""
+    if not isinstance(fields, dict) or set(fields) != {"persona_name", "scene", "kernel_prompt"}:
+        raise ValueError("请填写人格名称、适配场景和人格正文")
+    if any(not isinstance(value, str) or not value.strip() for value in fields.values()):
+        raise ValueError("人格字段必须为非空文字")
+    persona = PersonaDef(**{key: value.strip() for key, value in fields.items()})
+    name = persona.persona_name
+    if not re.fullmatch(r"[\w-]{1,40}", name) or PureWindowsPath(f"{name}.json").is_reserved():
+        raise ValueError("人格名称限 1–40 个汉字、字母、数字、下划线或连字符，且须是可用文件名")
+    await asyncio.to_thread(_create_persona, persona)
+    return persona
+
+
+def _create_persona(persona: PersonaDef) -> None:
+    with _WRITE_LOCK:
+        name = persona.persona_name
+        path = _persona_path(name)
+        if any(old.casefold() == name.casefold() for old in _PERSONAS) or path.exists():
+            raise ValueError("该人格名称已存在")
+        _write_persona_file(persona)
+        register_persona(persona)
+
+
+async def delete_persona_from_human(persona_name: str) -> None:
+    """删除候选人格并保留最近版本；基本说话风格和系统人格受保护。"""
+    if persona_name == COMMON_PERSONA_NAME or persona_name.startswith("system:"):
+        raise ValueError("只能删除内心人格")
+    await asyncio.to_thread(_delete_persona, persona_name)
+
+
+def _delete_persona(persona_name: str) -> None:
+    with _WRITE_LOCK:
+        get_persona(persona_name)
+        _snapshot_persona(persona_name)
+        _persona_path(persona_name).unlink(missing_ok=True)
+        _PERSONA_FILES.pop(persona_name, None)
+        del _PERSONAS[persona_name]

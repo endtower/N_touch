@@ -154,7 +154,6 @@ class ConversationInputManager:
 
         # 人格段：本段会话由 conversation_agent 显式指定的人格（缺省 normal）。
         # 读取该人格提示词（基本人格 + kernel_prompt，基本人格在前）作为语言与行为基准；
-        # 人格不存在在 get_persona 直接抛 KeyError 崩溃阻断（user_rules）。
         persona_header = self._build_persona_header()
 
         # 按实际消息拼接顺序组装：人格 -> 聊天记录 -> 会话环境 -> 任务 -> 情绪
@@ -259,13 +258,13 @@ class ConversationInputManager:
         人格由 conversation_agent 经 conversation_core.persona_name 传入（缺省正常人格），
         本段注入该人格提示词（公共聊天准则 + kernel_prompt，公共段在前），
         作为本次对话的语言与行为基准。
-        人格不存在属重大关键路径失败，get_persona 直接抛 KeyError 崩溃阻断（user_rules）。
+        已删除的人格回退到基本说话风格。
         """
         from brain.chat.conversation.conversation_core import get_conversation_core
-        from brain.base.persona.persona_registry import compose_persona_prompt, get_persona
+        from brain.base.persona.persona_registry import compose_persona_prompt, get_session_persona
 
         core = get_conversation_core()
-        persona = get_persona(core.persona_name)
+        persona = get_session_persona(core.persona_name)
         return f"【当前人格】{persona.persona_name}\n{compose_persona_prompt(persona)}"
 
     async def _append_matched_bequests(self, mood_query: str, purpose_query: str, user_input: str) -> str:

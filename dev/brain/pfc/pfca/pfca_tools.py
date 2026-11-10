@@ -779,13 +779,13 @@ class PFCA_tool_manager(ToolManager):
         persona_name 缺失/非法属工具层入参问题，走 ValueError → LLM 自纠，不崩溃阻断。
         """
         from brain.base.persona.persona_registry import (
-            DEFAULT_PERSONA_MODE,
+            get_default_persona_name,
             list_selectable_personas,
         )
 
         key = (persona_name or "").strip()
         if not key:
-            return DEFAULT_PERSONA_MODE
+            return get_default_persona_name()
         # 用 list_selectable 而非 roster：roster 排除了基本人格，
         # 全新安装只有 common 时会把唯一合法人格也判为不存在。
         selectable = list_selectable_personas()
@@ -815,18 +815,20 @@ class PFCA_tool_manager(ToolManager):
         logger.info("执行summon_personas操作，唤起内心人格自荐")
 
         from brain.base.persona.persona_agent import PersonaAgent
-        from brain.base.persona.persona_registry import list_roster_personas
+        from brain.base.persona.persona_registry import PersonaDef, list_roster_personas
 
         # 内荐只由普通人格参与，基本人格条目（persona_name="common"）不参荐。
         personas = list_roster_personas()
+        if not personas:
+            return {"personas": [], "suggested": None, "message": "当前没有可征询的内心人格，可使用基本说话风格。"}
 
         # 完成顺序记录：分数相同者以此定胜负（先给出者排在前面）。
         # 事件循环单线程，各协程完成时 append，天然记录给出先后。
         completion_order: List[str] = []
 
-        async def _self_nominate(persona_name: str) -> Dict[str, Any]:
+        async def _self_nominate(persona: PersonaDef) -> Dict[str, Any]:
             result = await PersonaAgent(
-                persona_name=persona_name, current_summary=current_summary
+                persona=persona, current_summary=current_summary
             ).run()
             completion_order.append(result["persona_name"])
             logger.info(
@@ -838,7 +840,7 @@ class PFCA_tool_manager(ToolManager):
         # gather 结果序与输入序一致（completion_order 记录真实给出序）；
         # 任一人格失败（评分解析不出等）直接上抛阻断，不吞错继续（user_rules）。
         results = await asyncio.gather(
-            *(_self_nominate(p.persona_name) for p in personas)
+            *(_self_nominate(persona) for persona in personas)
         )
 
         best_score = max(r["score"] for r in results)

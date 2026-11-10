@@ -87,7 +87,7 @@ class ConversationCore(HeavyCore):
 
         人格为逐会话显式指定：本对话使用 persona_name 指定的人格，由
         conversation_input_manager 在本段会话首条消息注入该人格 kernel_prompt；
-        缺省用 persona_registry.DEFAULT_PERSONA_MODE。
+        缺省用 persona_registry.get_default_persona_name()。
         """
         return await self.start(
             session_id=session_id,
@@ -123,7 +123,7 @@ class ConversationCore(HeavyCore):
         不再单独传 extra_file。
         """
         from brain.chat.conversation.conversation_input_manager import get_conversation_input_manager
-        from brain.base.persona.persona_registry import DEFAULT_PERSONA_MODE
+        from brain.base.persona.persona_registry import get_default_persona_name
 
         # 上一轮会话已由骨架 start() 统一收尾（self._session 已清空），这里直接重置本轮状态
         self._pending_summary = ""
@@ -137,8 +137,7 @@ class ConversationCore(HeavyCore):
         self.purpose = purpose
         # 人格为逐会话显式指定：本段会话使用 conversation_agent 传入的 persona_name
         # （缺省 normal）；由 conversation_input_manager 在首条消息注入该人格 kernel_prompt，
-        # 未注册人格在那里由 get_persona 抛 KeyError 崩溃阻断。
-        self.persona_name = (persona_name or "").strip() or DEFAULT_PERSONA_MODE
+        self.persona_name = (persona_name or "").strip() or get_default_persona_name()
 
         self._get_session_info_from_focus()
         self._init_session_state()

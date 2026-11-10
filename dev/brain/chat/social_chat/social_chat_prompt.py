@@ -33,7 +33,7 @@ def get_social_chat_system_prompt() -> str:
 【发送模式】
 - 对外文字与图片分别经 send_to_target、send_image_to_target，读取同一发送权限。
 - 当前模式与切换规则见首条消息的模式 block：approval=逐条审批，unrestricted=自由发送。
-- 自由授权仅限当前事件链的当前工作会话；交还 PFCA 后再次进入该会话仍有效，链结束即失效。
+- 自由授权只针对当前工作会话，按主人选择在链结束或到期时失效，知会也按本次授权设置执行。
 
 【工作流程】
 1. 读首条消息，确认要达成的结果；意向不明时先用 send_to_master 与主人对齐。补充材料只是建议，怎么说不必逐条照做。

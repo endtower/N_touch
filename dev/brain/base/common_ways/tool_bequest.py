@@ -60,7 +60,7 @@ class ToolBequest:
     HARD_DUPLICATE_THRESHOLD = 0.80
     DUPLICATE_SIMILARITY_THRESHOLD = 0.70
 
-    # 类别枚举：schema 面向 LLM 用中文（同 ToolVision 惯例），数据库 category
+    # 类别枚举：schema 面向 LLM 用中文，数据库 category
     # 用英文，转换统一收口在 _resolve_category。
     _CATEGORY_TO_DB = {"话术": "speech", "风格": "style", "决策": "decision"}
 

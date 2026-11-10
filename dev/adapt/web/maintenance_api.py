@@ -1,7 +1,9 @@
 """人工维护统计及统一工具发布的维护申请，只读展示申请内的失败原因。"""
 from aiohttp import web
 from brain.hc.maintenance import MaintenanceService
-from brain.base.persona.persona_registry import list_personas, update_persona_from_human
+from brain.base.persona.persona_registry import (
+    create_persona_from_human, delete_persona_from_human, list_personas, update_persona_from_human,
+)
 from user_prompt_settings import list_user_system_personas, update_user_system_persona
 
 
@@ -55,6 +57,24 @@ async def handle_archive(request):
 async def handle_personas(request):
     # 系统人格只在人工页面中追加，不进入任何 LLM 可用的人格注册表。
     return web.json_response({"personas": [p.to_dict() for p in list_personas()] + list_user_system_personas()})
+
+
+async def handle_create_persona(request):
+    try:
+        persona = await create_persona_from_human(await request.json())
+        return web.json_response({"persona": persona.to_dict()}, status=201)
+    except ValueError as error:
+        return web.json_response({"error": str(error)}, status=400)
+
+
+async def handle_delete_persona(request):
+    try:
+        await delete_persona_from_human(request.match_info["persona_name"])
+        return web.json_response({"deleted": True})
+    except ValueError as error:
+        return web.json_response({"error": str(error)}, status=400)
+    except KeyError:
+        return web.json_response({"error": "人格不存在"}, status=404)
 
 
 async def handle_update_persona(request):

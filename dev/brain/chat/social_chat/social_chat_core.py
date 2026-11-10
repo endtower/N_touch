@@ -138,8 +138,8 @@ class SocialChatCore:
             )
         self._working_session_id = working_session_id.strip()
         # 人格：工具入参显式指定，缺省 normal；由 input_manager 在首条消息注入内核。
-        from brain.base.persona.persona_registry import DEFAULT_PERSONA_MODE
-        self._persona_name = (persona_name or "").strip() or DEFAULT_PERSONA_MODE
+        from brain.base.persona.persona_registry import get_default_persona_name
+        self._persona_name = (persona_name or "").strip() or get_default_persona_name()
         self._stop_requested = False
         self._transfer_summary = ""
         self._start_time = time.time()

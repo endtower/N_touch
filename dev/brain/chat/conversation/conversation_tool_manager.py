@@ -3,7 +3,10 @@ import json
 from typing import Dict, Any
 from utils.logger import get_logger
 from utils.error_handling import async_handle_errors
-from brain.base import ToolManager, ToolHandlers, ToolConversation, ToolVision, ToolHC, ToolBequest, CONVERSATION_CONSUMER_ID
+from brain.base import (
+    CONVERSATION_CONSUMER_ID, ToolBequest, ToolConversation, ToolHandlers,
+    ToolHC, ToolManager, ToolStickers, ToolVision,
+)
 from brain.amy.constants import ExternalInteractionAct, EvaluationAct, SelfActionAct
 
 # act 表 ↔ 工具 一一对应：
@@ -97,8 +100,9 @@ class ConversationToolManager(ToolManager):
             record_note_schema,
             ToolHC.get_query_note_tool_schema(),
             ToolBequest.get_query_bequest_tool_schema(),
-            ToolVision.get_vision_agent_tool_schema(),
-            ToolVision.get_vision_agent_adjust_tool_schema(),
+            ToolStickers.get_search_stickers_tool_schema(),
+            ToolStickers.get_manage_sticker_tool_schema(),
+            ToolVision.get_inspect_image_tool_schema(),
         ]
 
     def __init__(self, conversation_core):
@@ -112,8 +116,9 @@ class ConversationToolManager(ToolManager):
             "record_to_notepad": self.record_to_notepad,
             "query_note": self.query_note,
             "query_bequest": self.query_bequest,
-            "vision_agent": self.vision_agent,
-            "vision_agent_adjust": self.vision_agent_adjust,
+            "search_stickers": ToolStickers.search_stickers,
+            "manage_sticker": ToolStickers.manage_sticker,
+            "inspect_image": ToolVision.inspect_image,
         }
         logger.debug(f"ConversationToolManager 已初始化，包含 {len(self.tool_functions)} 个工具")
 
@@ -317,32 +322,3 @@ class ConversationToolManager(ToolManager):
         原始结构化输出（title / summary / similarity），不做激活去重，由 LLM 自行判断取用。
         """
         return await ToolBequest.query_bequest(query=query, top_k=top_k, category=category)
-
-    async def vision_agent(self, type: str, context: str = "", requirement: str = "") -> str:
-        """视觉查询工具，委托通用 ToolVision.vision_agent。
-
-        type 取「向量比对」（context=期望用途的表情包描述）/「识别图片」（context=图片标题/名称，
-        requirement=可选识别要求）。
-        """
-        from brain.base import ToolVision
-        return await ToolVision.vision_agent(type=type, context=context, requirement=requirement)
-
-    async def vision_agent_adjust(
-        self,
-        type: str,
-        target: str,
-        new_title: str = "",
-        summary: str = "",
-    ) -> str:
-        """表情包管理工具，委托通用 ToolVision.vision_agent_adjust。
-
-        type 取「保存」/「删除」/「修改」；target 传图片原标题或名称；
-        summary（简介）保存与修改必填、删除可留空。
-        """
-        from brain.base import ToolVision
-        return await ToolVision.vision_agent_adjust(
-            type=type,
-            target=target,
-            new_title=new_title,
-            summary=summary,
-        )

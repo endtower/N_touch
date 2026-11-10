@@ -46,6 +46,8 @@ class EventChainMixin:
         permissions = EventChainPermissions(
             chain_id or f"event_chain_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
             chat_config.SOCIAL_CHAT_SEND_MODE.strip().lower(),
+            default_notify=chat_config.SOCIAL_CHAT_UNRESTRICTED_NOTIFY,
+            timed_grants=self._timed_social_grants,
         )
         from brain.hc.shortlight import get_shortlight_notepad
         notepad = get_shortlight_notepad()

@@ -456,6 +456,42 @@ const records = computed<MemoryRecord[]>(() => {
   : (matchedObservations.value ?? observationItems.value).map(item => ({ id: item.note_id, name: item.text.split('\n')[0] || '见闻', category: '见闻录', snippet: item.text, raw: item })))]
 })
 const selectedRecord = computed(() => records.value.find(item => item.id === selectedRecordId.value))
+const canDeleteRecord = computed(() => {
+  const item = selectedRecord.value
+  return !!item && (activeView.value !== 'personas' || (!item.raw.user_only && item.id !== 'common'))
+})
+const personaCreateOpen = ref(false)
+const personaCreating = ref(false)
+const personaCreateError = ref('')
+const personaForm = ref({ persona_name: '', scene: '', kernel_prompt: '' })
+
+function openPersonaCreate() {
+  personaForm.value = { persona_name: '', scene: '', kernel_prompt: '' }
+  personaCreateError.value = ''
+  personaCreateOpen.value = true
+}
+
+async function createPersona() {
+  if (personaCreating.value) return
+  personaCreating.value = true
+  personaCreateError.value = ''
+  try {
+    const { persona } = await memoryRequest('/memory/personas', 'POST', personaForm.value)
+    personaCreateOpen.value = false
+    if (activeView.value === 'personas') {
+      searchKeyword.value = ''
+      recordCollapsed.value['内心人格'] = false
+      await loadRecords()
+      if (activeView.value === 'personas') selectedRecordId.value = persona.persona_name
+    }
+    ElMessage.success('内心人格已加入候选')
+  } catch (err: any) {
+    personaCreateError.value = err.message || String(err)
+  } finally {
+    personaCreating.value = false
+  }
+}
+
 const recordGroups = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
   const list = records.value.filter(item => [item.name, item.category, item.snippet].some(value => value.toLowerCase().includes(keyword)))
@@ -524,19 +560,26 @@ async function saveRecordField(key: string, value: string | string[] | boolean) 
 }
 async function deleteRecord() {
   const item = selectedRecord.value, view = activeView.value
-  if (!item || recordDeleting.value) return
+  if (!item || !canDeleteRecord.value || recordDeleting.value) return
   if (memoryDraft(item.id)) { removeMemoryDraft(item.id); selectedRecordId.value = ''; return }
-  try { await ElMessageBox.confirm(`确定删除这条${recordLabel.value}吗？删除后不可恢复。`, `删除${recordLabel.value}`, { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }) } catch { return }
+  const message = view === 'personas'
+    ? `确定删除「${item.name}」吗？它会从候选中移除，旧版定义会留档。`
+    : `确定删除这条${recordLabel.value}吗？删除后不可恢复。`
+  try { await ElMessageBox.confirm(message, `删除${recordLabel.value}`, { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }) } catch { return }
   recordDeleting.value = true
   try {
-    await memoryRequest(`/memory/${view === 'kits' ? 'kits' : 'observations'}/${encodeURIComponent(item.id)}`, 'DELETE')
+    await memoryRequest(`/memory/${view}/${encodeURIComponent(item.id)}`, 'DELETE')
     if (view === 'kits') kitItems.value = kitItems.value.filter(old => old.kit_id !== item.id)
+    else if (view === 'personas') {
+      personaItems.value = personaItems.value.filter(old => old.persona_name !== item.id)
+      if (view === activeView.value) await loadRecords()
+    }
     else {
       observationItems.value = observationItems.value.filter(old => old.note_id !== item.id)
       ++matchVersion; matching.value = false
       if (matchedObservations.value) matchedObservations.value = matchedObservations.value.filter(old => old.note_id !== item.id)
     }
-    if (view === activeView.value) selectedRecordId.value = ''
+    if (view === activeView.value && selectedRecordId.value === item.id) selectedRecordId.value = ''
     ElMessage.success('已删除')
   } catch (err: any) { ElMessage.error(err.message || String(err)) }
   finally { recordDeleting.value = false }
@@ -757,7 +800,8 @@ function colorFor(n: SocialNode): string {
             新建
             <template #dropdown><el-dropdown-menu><el-dropdown-item command="character">新建角色</el-dropdown-item><el-dropdown-item command="group">新建群组</el-dropdown-item><el-dropdown-item command="fuzzy_role">新建模糊角色</el-dropdown-item></el-dropdown-menu></template>
           </el-dropdown>
-          <el-button v-else-if="activeView !== 'personas' && activeView !== 'maintenance'" :icon="Plus" size="small" @click="openCreate()">新建</el-button>
+          <el-button v-else-if="activeView === 'personas'" :icon="Plus" size="small" @click="openPersonaCreate">新建内心人格</el-button>
+          <el-button v-else-if="activeView !== 'maintenance'" :icon="Plus" size="small" @click="openCreate()">新建</el-button>
           <el-button v-if="activeView === 'experience'" :icon="Tools" size="small" :loading="expBatchBusy" :disabled="!expTotal" @click="reviewAllExperiences">全部维护</el-button>
           <el-button v-if="activeView === 'experience'" :icon="Delete" size="small" :disabled="!expTotal || expBatchDeleting" @click="toggleExpSelectMode">{{ expSelectMode ? '退出批量' : '批量删除' }}</el-button>
           <el-button :icon="Refresh" size="small" @click="reload">刷新</el-button>
@@ -1071,7 +1115,7 @@ function colorFor(n: SocialNode): string {
         <section class="memory-detail">
           <div v-if="!selectedRecord" class="memory-detail-empty"><el-icon :size="26"><Search /></el-icon><div>未选中{{ recordLabel }}</div><div class="memory-empty-sub">点击左侧条目查看详情，点击字段值即可修改。</div></div>
           <template v-else>
-            <div class="memory-detail-head"><span class="memory-type-badge">{{ recordLabel }}</span><span class="memory-detail-name">{{ selectedRecord.name }}</span><span class="memory-edit-tip">点击字段值即可修改</span><el-button v-if="activeView !== 'personas'" class="memory-detail-delete" size="small" type="danger" plain :icon="Delete" :loading="recordDeleting" @click="deleteRecord">删除</el-button></div>
+            <div class="memory-detail-head"><span class="memory-type-badge">{{ recordLabel }}</span><span class="memory-detail-name">{{ selectedRecord.name }}</span><span class="memory-edit-tip">点击字段值即可修改</span><el-button v-if="canDeleteRecord" class="memory-detail-delete" size="small" type="danger" plain :icon="Delete" :loading="recordDeleting" @click="deleteRecord">删除</el-button></div>
             <div class="memory-detail-body">
               <div v-if="activeView === 'personas' && selectedRecord.raw.user_only" class="memory-system-persona-note">
                 <strong>仅用户可编辑</strong>
@@ -1081,7 +1125,7 @@ function colorFor(n: SocialNode): string {
               <dl class="kv">
                 <dt>编号</dt><dd><code>{{ memoryDraft(selectedRecord.id) ? '草稿' : selectedRecord.id }}</code></dd>
                 <MemoryFields :record-id="selectedRecord.id" :autofocus-key="firstDraftField(selectedRecord.id)" :rows="recordRows" :save="saveRecordField" />
-                <template v-if="!selectedRecord.raw.user_only"><dt>记录时间</dt><dd>{{ timeShort(selectedRecord.raw.created_at || selectedRecord.raw.record_time) }}</dd></template>
+                <template v-if="activeView !== 'personas'"><dt>记录时间</dt><dd>{{ timeShort(selectedRecord.raw.created_at || selectedRecord.raw.record_time) }}</dd></template>
                 <dt v-if="selectedRecord.raw.updated_at">更新时间</dt><dd v-if="selectedRecord.raw.updated_at">{{ timeShort(selectedRecord.raw.updated_at) }}</dd>
                 <template v-if="activeView === 'observations'"><dt>来源</dt><dd>{{ selectedRecord.raw.source === 'human' ? '人工记录' : selectedRecord.raw.source === 'reflection' ? '反思记录' : '历史记录' }}</dd><template v-if="selectedRecord.raw.similarity != null"><dt>相似度</dt><dd>{{ selectedRecord.raw.similarity.toFixed(3) }}</dd></template></template>
               </dl>
@@ -1095,6 +1139,28 @@ function colorFor(n: SocialNode): string {
         </section>
       </template>
     </div>
+  </AppDialog>
+
+  <AppDialog
+    v-model="personaCreateOpen" title="新建内心人格" append-to-body
+    :show-close="!personaCreating" :close-on-press-escape="!personaCreating"
+  >
+    <el-form label-position="top" :disabled="personaCreating" @submit.prevent="createPersona">
+      <el-form-item label="人格名称">
+        <el-input v-model="personaForm.persona_name" maxlength="40" placeholder="例如 冷静参谋" />
+      </el-form-item>
+      <el-form-item label="适配场景">
+        <el-input v-model="personaForm.scene" placeholder="例如 在冲突中厘清事实和下一步" />
+      </el-form-item>
+      <el-form-item label="人格正文">
+        <el-input v-model="personaForm.kernel_prompt" type="textarea" :autosize="{ minRows: 5, maxRows: 12 }" placeholder="写下这个人格的立场、思考方式和表达风格" />
+      </el-form-item>
+      <p v-if="personaCreateError" class="kv-edit-error" role="alert">{{ personaCreateError }}</p>
+      <div class="kv-edit-actions">
+        <el-button type="primary" native-type="submit" :loading="personaCreating">创建</el-button>
+        <el-button :disabled="personaCreating" @click="personaCreateOpen = false">取消</el-button>
+      </div>
+    </el-form>
   </AppDialog>
 
 </template>

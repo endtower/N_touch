@@ -45,7 +45,7 @@ import re
 from typing import Dict, List, Any, Optional
 
 from brain.base.light_agent.lightweight_agent import LightweightAgent
-from brain.base.persona.persona_registry import get_persona
+from brain.base.persona.persona_registry import PersonaDef
 from brain.amy.feedback_state import get_feedback_state
 from brain.amy.decision_feelings import build_decision_feedback_prompt
 from utils.logger import get_logger
@@ -61,17 +61,15 @@ _PLAN_PATTERN = re.compile(r"行动[:：]\s*(.+)")
 class PersonaAgent(LightweightAgent):
     """内心人格自荐 Agent。
 
-    每次召唤实例化一个，按 persona_name 渲染人格内核 system prompt，
-    产出该人格对当前现状的参与度评分（内荐核心）；
-    人格不存在属重大关键路径失败，构造时直接 KeyError 崩溃阻断（user_rules）。
+    每次召唤使用当时的人格定义渲染 system prompt，产出该人格对现状的参与度评分。
     """
 
-    def __init__(self, persona_name: str, current_summary: str = ""):
-        self.persona = get_persona(persona_name)
+    def __init__(self, persona: PersonaDef, current_summary: str = ""):
+        self.persona = persona
         self.current_summary = current_summary
         # 事件链上下文前缀按人格粒度区分（persona_assistant / persona_normal / ...），
         # 前端 /context 同一链下显示为多种独立 kind，一眼区分是哪个格
-        self.history_prefix = f"persona_{persona_name}"
+        self.history_prefix = f"persona_{persona.persona_name}"
         super().__init__()
 
     def _initialize_tool_functions(self) -> Dict[str, Any]:

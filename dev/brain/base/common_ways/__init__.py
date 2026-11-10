@@ -5,7 +5,8 @@
 - input_helpers：input 通用方法（如 build_session_environment）+ 共享消费者游标常量
 - tool_handlers：tool 通用方法基类（ToolHandlers：wait_and_observe / peek_unread）
 - tool_conversation：会话发送类通用工具（ToolConversation：send_message / send_image 及发送原语）
-- tool_vision：vision 通用工具（ToolVision：vision_agent 查询 / vision_agent_adjust 表情包管理）
+- tool_stickers：表情包检索和管理（ToolStickers）
+- tool_vision：按需识图（ToolVision）
 - tool_hc：hc 通用工具（ToolHC：灵光一现记事本 列出/查询/记录；record_to_notepad
   按 category 分类记录）
 - tool_social：社交环境查询工具（ToolSocial：通讯录 / 会话历史，以 PFCA 实现为基准）
@@ -29,6 +30,7 @@ from brain.base.common_ways.input_helpers import (
 )
 from brain.base.common_ways.tool_handlers import ToolHandlers
 from brain.base.common_ways.tool_conversation import ToolConversation
+from brain.base.common_ways.tool_stickers import ToolStickers
 from brain.base.common_ways.tool_vision import ToolVision
 from brain.base.common_ways.tool_hc import ToolHC
 from brain.base.common_ways.tool_social import ToolSocial
@@ -44,6 +46,7 @@ __all__ = [
     'build_social_chat_environment',
     'ToolHandlers',
     'ToolConversation',
+    'ToolStickers',
     'ToolVision',
     'ToolHC',
     'ToolSocial',

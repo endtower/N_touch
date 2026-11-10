@@ -111,6 +111,7 @@ class ToolConversation(ToolHandlers):
         message: str,
         typing_delay_per_char: float = TYPING_DELAY_PER_CHAR,
         on_sent: Optional[Callable[[str], None]] = None,
+        before_send: Optional[Callable[[], None]] = None,
     ) -> str:
         """发送纯文字消息：message 内换行拆成多条独立消息，按真人节奏逐条发出。
 
@@ -145,6 +146,7 @@ class ToolConversation(ToolHandlers):
             scope, target_id, out_segments,
             typing_delay_per_char=typing_delay_per_char,
             session_id=session_id,
+            before_send=before_send,
         )
         bridge_receipts = [receipt for receipt in (receipts or []) if isinstance(receipt, SendReceipt)]
         if on_sent is not None and (not bridge_receipts or all(r.status == "observed" for r in bridge_receipts)):
@@ -208,6 +210,7 @@ class ToolConversation(ToolHandlers):
         out_segments: List[Any],
         typing_delay_per_char: float = TYPING_DELAY_PER_CHAR,
         session_id: str | None = None,
+        before_send: Optional[Callable[[], None]] = None,
     ) -> List[str | SendReceipt]:
         """带打字节奏逐条发送的机械原语（fail-fast：任何条发送失败直接抛错阻断）。
 
@@ -234,6 +237,8 @@ class ToolConversation(ToolHandlers):
             raise ValueError("send_segments_with_typing 没有任何待发送条")
 
         router = await get_outbound_router()
+        if before_send is not None:
+            before_send()
         message_ids: List[str | SendReceipt] = []
 
         for idx, seg in enumerate(out_segments):

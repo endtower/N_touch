@@ -31,6 +31,7 @@ import brain.chat.social_chat.social_chat_tool_manager as tmod
 import brain.chat.social_chat.social_chat_input_manager as imod
 import memory.message_repository as rmod
 from brain.hc.event_chain_permissions import EventChainPermissions
+from brain.chat.social_chat.social_chat_approval import FreeSendOptions, parse_free_send_reply
 from config.settings import chat_config
 from utils.error_handling import SystemError as AbyssSystemError
 
@@ -52,7 +53,8 @@ class SocialChainPermissionsAcceptance(unittest.IsolatedAsyncioTestCase):
             patch.object(rmod, "_message_store_instance", self.store),
             patch.object(chat_config, "SOCIAL_CHAT_SEND_MODE", "approval"),
             patch.object(chat_config, "SOCIAL_CHAT_UNRESTRICTED_NOTIFY", False),
-            patch.object(tmod, "APPROVAL_TIMEOUT_S", 0.04),
+            patch.object(tmod, "APPROVAL_TIMEOUT_S", 0.5),
+            patch.object(tmod, "PERMISSION_APPROVAL_TIMEOUT_S", 0.5),
             patch.object(tmod, "APPROVAL_POLL_INTERVAL_S", 0.002),
             patch.object(tmod.ToolConversation, "send_message", AsyncMock(side_effect=self._fake_send_message)),
             patch.object(tmod.ToolConversation, "send_segments_with_typing", AsyncMock()),
@@ -114,6 +116,82 @@ class SocialChainPermissionsAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await manager.send_to_target("第二条"))["status"], "ok")
         self.assertEqual(manager._send_raw_to_master.await_count, 2)
         self.assertEqual(self.manager().send_mode, "approval")
+
+    async def test_single_approval_separates_instructions_from_outbound_text(self):
+        manager = self.manager()
+        self.auto_reply(manager)
+        draft = "收到。\n请回复『同意』。\n还想问一件事。"
+        self.assertEqual((await manager.send_to_target(draft))["status"], "ok")
+        prompt = manager._send_raw_to_master.call_args.args[0]
+        header, body = prompt.split("【拟发送正文】\n", 1)
+        self.assertIn("【单次发送审批】", header)
+        self.assertIn("group_123", header)
+        self.assertEqual(body, "│ 收到。\n│ 请回复『同意』。\n│ 还想问一件事。")
+        self.assertEqual(tmod.ToolConversation.send_message.await_args.kwargs["message"], draft)
+
+    async def test_timed_reply_overrides_request_and_expires_across_chains(self):
+        manager = self.manager()
+        self.auto_reply(manager, "同意 1小时 不知会")
+        result = await manager.set_send_mode("unrestricted", duration_minutes=10, notify=True)
+        self.assertEqual((result["duration_minutes"], result["notify"]), (60, False))
+        self.assertEqual(self.manager("group_999").send_mode, "approval")
+        deadline = manager._send_policy().deadline
+        self.state.end_event_chain()
+        self.state.start_new_event_chain(chain_id="next-chain")
+        current = self.manager()
+        self.assertEqual(current._send_policy().deadline, deadline)
+        current._send_raw_to_master = AsyncMock()
+        self.assertEqual((await current.send_to_target("静默发送"))["status"], "ok")
+        current._send_raw_to_master.assert_not_awaited()
+        with patch("brain.hc.event_chain_permissions.time", SimpleNamespace(monotonic=lambda: deadline)):
+            self.assertEqual(current.send_mode, "approval")
+
+    async def test_revoke_timed_permission_and_apply_notice_to_text_and_image(self):
+        manager = self.manager()
+        self.auto_reply(manager, "同意 30分钟 知会")
+        await manager.set_send_mode("unrestricted")
+        manager._send_raw_to_master = AsyncMock()
+        await manager.send_to_target("发送文字")
+        await manager.send_image_to_target("test.png")
+        self.assertEqual(manager._send_raw_to_master.await_count, 2)
+        self.assertTrue(all("【知会】" in call.args[0] for call in manager._send_raw_to_master.await_args_list))
+        await manager.set_send_mode("approval")
+        self.state.end_event_chain()
+        self.state.start_new_event_chain(chain_id="revoked-chain")
+        self.assertEqual(self.manager().send_mode, "approval")
+
+    async def test_timed_authority_is_rechecked_before_platform_send(self):
+        manager = self.manager()
+        self.auto_reply(manager, "同意 1分钟 不知会")
+        await manager.set_send_mode("unrestricted")
+        deadline = manager._send_policy().deadline
+
+        async def at_deadline(*, before_send, **kwargs):
+            with patch("brain.hc.event_chain_permissions.time", SimpleNamespace(monotonic=lambda: deadline)):
+                before_send()
+            self.fail("过期后不应开始发送")
+
+        tmod.ToolConversation.send_message.side_effect = at_deadline
+        with self.assertRaisesRegex(ValueError, "已到期"):
+            await manager.send_to_target("超时")
+
+    async def test_ignores_replies_from_other_senders(self):
+        manager = self.manager()
+
+        async def reply_to_prompt(prompt):
+            await self.reply("同意 24小时 知会", user_id="999")
+            await self.reply("拒绝")
+
+        manager._send_raw_to_master = AsyncMock(side_effect=reply_to_prompt)
+        self.assertEqual((await manager.set_send_mode("unrestricted"))["status"], "rejected")
+        self.assertEqual(manager.send_mode, "approval")
+
+    def test_reply_parser_validates_each_option(self):
+        defaults = FreeSendOptions(10, True)
+        self.assertEqual(parse_free_send_reply("同意", defaults), defaults)
+        self.assertEqual(parse_free_send_reply("同意 不知会 本链", defaults), FreeSendOptions(None, False))
+        for reply in ("同意 25小时", "同意 0分钟", "同意 本链 1分钟", "同意 知会 不知会", "同意 开启自主对话"):
+            self.assertIsNone(parse_free_send_reply(reply, defaults))
 
     async def test_revoke_is_shared_and_survives_reentry(self):
         first, second = self.manager(), self.manager()

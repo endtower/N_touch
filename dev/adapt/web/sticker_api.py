@@ -13,33 +13,25 @@ LLM 自存表情包管理接口（memory/llm_save/stickers/）。
 
 只针对 LLM 自存表情包目录（memory/llm_save/stickers/），与前端 InputArea 的表情包
 管理菜单对齐。命中关键失败（路径越界、文件缺失）直接抛异常阻断，不用 try-ex 吞错蔓延。
-向量生成逻辑复用 ToolVision（与「向量比对」检索侧共用同一份文本与索引）。
+向量生成逻辑复用 ToolStickers，与会话检索共用同一份文本与索引。
 """
 
 from __future__ import annotations
-from paths import data_root
-
 import json
 from pathlib import Path
 from typing import Any, Dict
 
 from aiohttp import web
 
-from brain.base.common_ways.tool_vision import ToolVision
+from brain.attachments.preflight import ALLOWED_EXTS
+from brain.attachments.sticker_store import STICKER_DIR
+from brain.base.common_ways.tool_stickers import ToolStickers
 from utils.logger import get_logger
 
 logger = get_logger(__name__, "DEBUG")
 
-# 当前文件位于: N_Touch/adapt/web/sticker_api.py
-# parents[0]=web, [1]=adapt, [2]=N_Touch
-LLM_SAVE_ROOT = data_root() / "memory" / "llm_save"
-STICKER_DIR = LLM_SAVE_ROOT / "stickers"
-
-_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-
-
 def _sanitize_filename(title: str, max_len: int = 50) -> str:
-    """把标题清洗成可作为文件名的字符串（与 VisionAgent._sanitize_filename 同源）。"""
+    """用归档工具共用的规则把标题清洗为文件名。"""
     from brain.attachments import normalize_filename_component
     return normalize_filename_component(title, max_len)
 
@@ -83,12 +75,12 @@ def _sticker_entry(img_path: Path) -> Dict[str, Any]:
 async def handle_list_stickers(_request: web.Request) -> web.Response:
     """列出 LLM 自存表情包，按 saved_at 倒序；附 `vectorized`（已向量化且未过期）。"""
     STICKER_DIR.mkdir(parents=True, exist_ok=True)
-    status = ToolVision.vectorization_status()
+    status = ToolStickers.vectorization_status()
     stickers: list[Dict[str, Any]] = []
     for img_path in STICKER_DIR.iterdir():
         if not img_path.is_file():
             continue
-        if img_path.suffix.lower() not in _IMAGE_SUFFIXES:
+        if img_path.suffix.lower() not in ALLOWED_EXTS:
             continue
         entry = _sticker_entry(img_path)
         entry["vectorized"] = status.get(entry["filename"], False)
@@ -116,7 +108,7 @@ async def handle_vectorize_stickers(request: web.Request) -> web.Response:
         body = await request.json()
         if isinstance(body, dict):
             force = bool(body.get("force"))
-    result = await ToolVision.vectorize_all_stickers(force=force)
+    result = await ToolStickers.vectorize_all_stickers(force=force)
     return web.json_response(result)
 
 
@@ -149,19 +141,18 @@ async def handle_update_sticker(request: web.Request) -> web.Response:
         suffix = target.suffix.lower() or ".jpg"
         new_target = STICKER_DIR / f"{safe_title}{suffix}"
         new_meta_path = new_target.with_suffix(".json")
-        if new_target.exists() and new_target != target:
+        old_meta_path = target.with_suffix(".json")
+        if (new_target.exists() and new_target != target) or (
+            new_meta_path.exists() and new_meta_path != old_meta_path
+        ):
             return web.json_response(
                 {"error": f"目标文件已存在 {new_target.name}，请换一个新标题"},
                 status=409,
             )
-        target.rename(new_target)
-        if new_meta_path.exists():
-            # 同名 .json 若已有（不该发生）则直接阻断，避免覆盖
-            raise FileExistsError(f"sticker meta already exists: {new_meta_path}")
-        old_meta_path = target.with_suffix(".json")
-        # target 已被 rename，但旧 meta 仍在原位置，改名到新位置
-        if old_meta_path.exists():
-            old_meta_path.rename(new_meta_path)
+        if new_target != target:
+            target.rename(new_target)
+            if old_meta_path.exists() and new_meta_path != old_meta_path:
+                old_meta_path.rename(new_meta_path)
 
     new_meta = {
         "sticker_title": sticker_title,
@@ -180,7 +171,7 @@ async def handle_update_sticker(request: web.Request) -> web.Response:
 
     # 文字描述改动后原向量即过期（指纹不一致），如实回传当前状态给前端
     entry = _sticker_entry(new_target)
-    entry["vectorized"] = ToolVision.is_vectorized({**new_meta, "filename": new_target.name})
+    entry["vectorized"] = ToolStickers.is_vectorized({**new_meta, "filename": new_target.name})
     return web.json_response({"sticker": entry})
 
 

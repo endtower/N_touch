@@ -85,7 +85,7 @@ _CJK_PUNCT_MAP = {
 def normalize_filename_component(text: str, max_len: int = 50) -> str:
     """把任意标题/文本归一化为「可安全落盘 且 能通过 FILENAME_PATTERN」的文件名主干。
 
-    保存侧（VisionAgent / sticker_api）与发送侧（FILENAME_PATTERN）同源：
+    保存侧（表情包归档与网页管理）与发送侧（FILENAME_PATTERN）同源：
     本函数的输出字符集严格 ⊆ FILENAME_PATTERN 允许集，因此「存得下」必然「发得出」。
 
     规则：
@@ -162,6 +162,7 @@ def _search_in_root(
     Returns:
         命中的绝对路径字符串；未命中返回 None。
     """
+    dated_hits = []
     for subdir in allowed_subdirs:
         if nested_by_date:
             # 系统侧：<root>/<subdir>/<YYYY-MM-DD>/<filename>
@@ -170,18 +171,13 @@ def _search_in_root(
             subdir_path = media_root / subdir
             if not subdir_path.is_dir():
                 continue
-            for day_dir in sorted(subdir_path.iterdir()):
+            for day_dir in subdir_path.iterdir():
                 if not day_dir.is_dir():
                     continue
                 candidate = day_dir / filename
                 if not candidate.is_file():
                     continue
-                resolved = candidate.resolve()
-                try:
-                    resolved.relative_to(media_root)
-                except ValueError:
-                    raise PermissionError(f"path outside media whitelist: {resolved}")
-                return str(resolved)
+                dated_hits.append(candidate)
         else:
             # LLM 侧：<root>/<subdir>/<filename>  （平铺）
             candidate = media_root / subdir / filename
@@ -192,6 +188,16 @@ def _search_in_root(
                 except ValueError:
                     raise PermissionError(f"path outside llm_save whitelist: {resolved}")
                 return str(resolved)
+    if dated_hits:
+        # QQ 重发同一张图会复用文件名。优先选最近收到的那份，跨 images / stickers 比较。
+        latest = max(dated_hits, key=lambda path: (
+            path.parent.name if re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.parent.name) else "",
+            path.stat().st_mtime,
+        ))
+        resolved = latest.resolve()
+        if not resolved.is_relative_to(media_root):
+            raise PermissionError(f"path outside media whitelist: {resolved}")
+        return str(resolved)
     return None
 
 
@@ -200,15 +206,7 @@ def resolve_media_file(filename: str) -> str:
     1) LLM 侧（自存归档）：memory/llm_save/{images,stickers}/   平铺
     2) 系统侧（NapCat 下载）：memory/chat_history/media/{images,stickers}/<YYYY-MM-DD>/
 
-    优先命中 LLM 侧（自存优先）。
-
-    设计动机：
-    - LLM 侧是 LLM 主动 save_image / save_sticker 归档的素材，通常是 LLM
-      明确知道"我可以用"的资源（表情包 / 自己存的梗图等），mtime 也是近期。
-    - 系统侧是 NapCat 下载的历史原图，mtime 可能因备份 / 迁移被破坏成老时间，
-      会被 preflight 的 30 天年龄护栏挡掉。
-    - 优先 LLM 侧能避免"系统侧历史同名旧图被预检拦截、而 LLM 侧同一文件
-      用不到"的死锁。
+    优先命中 LLM 侧（自存优先）；系统侧同名时优先使用最近收到的副本。
 
     Args:
         filename: 纯文件名（含扩展名），如 '30FBB...F76.gif'

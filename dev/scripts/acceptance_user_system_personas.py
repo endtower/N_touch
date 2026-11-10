@@ -20,10 +20,13 @@ Path(DATA.name, ".env.dev").touch()
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 import user_prompt_settings as settings
-from adapt.web.maintenance_api import handle_personas, handle_update_persona
+from adapt.web.maintenance_api import (
+    handle_create_persona, handle_delete_persona, handle_personas, handle_update_persona,
+)
 from brain.base.persona import persona_registry
 from brain.base.common_ways.tool_persona import ToolPersona
 from brain.pfc.pfca.pfca_prompt import get_full_system_prompt as pfca_prompt
+from brain.pfc.pfca.pfca_tools import PFCA_tool_manager
 from brain.pfc.reflection.reflection_prompt import get_full_system_prompt as reflection_prompt
 
 
@@ -35,7 +38,9 @@ class SystemPersonaTests(unittest.IsolatedAsyncioTestCase):
         self.env.start()
         app = web.Application()
         app.router.add_get("/memory/personas", handle_personas)
+        app.router.add_post("/memory/personas", handle_create_persona)
         app.router.add_patch("/memory/personas/{persona_name}", handle_update_persona)
+        app.router.add_delete("/memory/personas/{persona_name}", handle_delete_persona)
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
 
@@ -103,6 +108,37 @@ class SystemPersonaTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("人工保护内容", str(ToolPersona.query_common_persona()))
         self.assertNotIn("人工保护内容", roster)
         self.assertTrue(pfca_prompt().endswith("人工保护内容"))
+
+    async def test_inner_persona_lifecycle_updates_candidate_and_fallback(self):
+        path = "/memory/personas"
+        record = path + "/normal"
+        fields = {"persona_name": "normal", "scene": "日常", "kernel_prompt": "保持简洁"}
+        for invalid in ("../escape", "CON", "system:pfca", "Common"):
+            response = await self.client.post(path, json={**fields, "persona_name": invalid})
+            self.assertEqual(response.status, 400)
+        response = await self.client.post(path, json=fields)
+        self.assertEqual(response.status, 201, await response.text())
+        try:
+            response = await self.client.post(path, json=fields)
+            self.assertEqual(response.status, 400)
+            self.assertEqual(PFCA_tool_manager._resolve_persona_name(""), "normal")
+            self.assertIn("normal：日常", persona_registry.render_persona_roster())
+            response = await self.client.patch(record, json={"kernel_prompt": "改用短句"})
+            self.assertEqual(response.status, 200)
+            self.assertEqual(persona_registry.get_session_persona("normal").kernel_prompt, "改用短句")
+        finally:
+            response = await self.client.delete(record)
+            self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual(PFCA_tool_manager._resolve_persona_name(""), "common")
+        self.assertEqual(persona_registry.get_session_persona("normal").persona_name, "common")
+        self.assertNotIn("normal", persona_registry.render_persona_roster())
+        self.assertIsNone((await PFCA_tool_manager.summon_personas(None))["suggested"])
+        self.assertFalse((persona_registry.PERSONA_DIR / "normal.json").exists())
+        archived = list(persona_registry.PERSONA_HISTORY_DIR.glob("normal_*.json"))
+        self.assertTrue(any("改用短句" in file.read_text(encoding="utf-8") for file in archived))
+        for protected in ("common", "system%3Apfca"):
+            response = await self.client.delete(f"{path}/{protected}")
+            self.assertEqual(response.status, 400)
 
     async def test_invalid_updates_are_rejected_without_changing_saved_content(self):
         await self.update("pfca", "保留正文")

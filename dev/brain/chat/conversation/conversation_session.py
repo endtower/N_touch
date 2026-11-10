@@ -138,7 +138,7 @@ class ConversationSession(HeavySession):
             return messages
 
         from brain.attachments import resolve_media_file
-        from brain.base.light_agent.vision_agent import VisionAgent
+        from brain.attachments.image_input import image_to_data_url
 
         text = content
         parts: List[Dict] = []
@@ -152,7 +152,7 @@ class ConversationSession(HeavySession):
                 text = text.replace(f"[图片:{filename}]", f"[图片:{filename}（已删除）]")
                 logger.warning(f"图片已被删除，本次跳过附件: {filename}")
                 continue
-            data_url = VisionAgent._image_to_data_url(
+            data_url = image_to_data_url(
                 real_path,
                 max_side=VisionConfig.IMAGE_MAX_SIDE,
                 quality=VisionConfig.IMAGE_JPEG_QUALITY,

@@ -406,7 +406,8 @@ class WebChannel:
         )
         from .maintenance_api import (
             handle_maintenance, handle_maintenance_items, handle_review, handle_review_all,
-            handle_archive, handle_personas, handle_update_persona,
+            handle_archive, handle_personas, handle_create_persona,
+            handle_update_persona, handle_delete_persona,
         )
         from .graph_api import (
             handle_list_tasks,
@@ -488,7 +489,9 @@ class WebChannel:
         self._app.router.add_post("/memory/maintenance/reviews/all", handle_review_all)
         self._app.router.add_post("/memory/maintenance/archive", handle_archive)
         self._app.router.add_get("/memory/personas", handle_personas)
+        self._app.router.add_post("/memory/personas", handle_create_persona)
         self._app.router.add_patch("/memory/personas/{persona_name}", handle_update_persona)
+        self._app.router.add_delete("/memory/personas/{persona_name}", handle_delete_persona)
         self._app.router.add_post("/memory/kits", handle_create_kit)
         self._app.router.add_patch("/memory/kits/{kit_id}", handle_update_kit)
         self._app.router.add_delete("/memory/kits/{kit_id}", handle_delete_kit)
