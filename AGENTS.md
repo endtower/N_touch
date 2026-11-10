@@ -17,6 +17,7 @@
 - 历史数据已迁入工作区 `data`。SnowLuma 原安装位置由 `data\manager\installations.json` 登记，内部存储遵循上游。
 - 一键启动框架：实际脚本为 `app/components/manager/source/startup_plan.py`，执行器为同目录 `startup_workflow.py`；开发副本在 `dev`。外部 AI 直接编辑脚本，说明见 `dev/docs/STARTUP.md`（随包副本 `app/components/manager/source/docs/STARTUP.md`）。管理接口为 `GET /v1/startup` 和 `POST /v1/startup/{start|continue|retry|skip|cancel|enable|stop|reload}`，沿用管理令牌。打开 EXE 只展示界面，点击「一键启动」才执行已勾选链路；Pi 和 QQ 独立，失败可跳过或单独继续。改脚本可暂停流程后调用 reload，无须重新打包 EXE；改框架/进程控制仍需重启管理服务。
 - **启动器界面也是可配置的用户数据**：`data\launcher\ui.json` 控制主题、点 × 的行为，以及每个组件行是否显示、叫什么名字（`rows` → `visible` / `title`）。改完重开启动器生效，不需要重新编译 EXE。同目录 `README.md` 是给用户和 Agent 的说明，由启动器首次运行时自动放出。想看某个组件行消失后界面什么样，改这个文件即可 —— 不用动源码。
+- **日志页同样可配置**：`data\launcher\logs.json` 决定日志页左边有哪些来源、每个来源读哪些文件（`sources` → `id` / `title` / `row` / `streams`）。想给用户自己另起的程序加一格日志，在这个文件里加一条即可，不用编译。日志来源的显隐跟着 `row` 指定的组件行走。同目录 `README.md` 里有完整字段说明。
 
 **沟通原则**
 
@@ -272,6 +273,8 @@ packages\                    ← 整个文件夹：*.zip 与同名 *.json 必须
 | 手动源码备份 | `backups\core-source\` |
 | 更新下载与解压暂存 | `cache\updates\` |
 | 启动器连接入口 | `data\launcher\connections.json` |
+| 启动器界面设置（主题/行显隐/行名） | `data\launcher\ui.json`（说明见同目录 `README.md`） |
+| 日志页来源定义 | `data\launcher\logs.json`（说明见同目录 `README.md`） |
 | Core 源码 / 运行环境 | `app\components\core\source` / `app\components\core\runtime` |
 | 已安装版本记录 | `app\.versions\*.json` |
 

@@ -5,62 +5,14 @@ using System.Text.RegularExpressions;
 namespace AbyssLauncher;
 
 // Bounded file tails and colour parsing are independent of the window and process controller.
+// 读哪些文件由 <see cref="LogSources"/> 决定，这里只管「怎么读」和「怎么上色」。
 public static class LogPresentation
 {
     public record Segment(string Text, string Colour, bool Underline = false, string? Background = null);
-    public record Snapshot(string Text, string Files);
     private static readonly Regex Escape = new(@"\x1B\[[0-?]*[ -/]*[@-~]|\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)");
     private static readonly Regex Logger = new(@"^(\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]) ([^|]+)(\|.*)$");
     private static readonly string[] Colours = ["#64748B", "#F87171", "#34D399", "#FBBF24", "#60A5FA", "#C084FC", "#22D3EE", "#CBD5E1"];
     public static string Plain(string text) => Escape.Replace(text, "");
-
-    public static Snapshot Read(string dataRoot, string source)
-    {
-        var folder = Path.Combine(dataRoot, "logs", "manager");
-        string[] files;
-        if (source == "service")
-        {
-            // Older developer launches redirect to timestamped files. Read their stderr too.
-            var outputs = Directory.Exists(folder)
-                ? Directory.GetFiles(folder, "service*.out.log") : [];
-            var output = outputs.OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault()
-                ?? Path.Combine(folder, "service.out.log");
-            files = [output, output.Replace(".out.log", ".err.log", StringComparison.Ordinal)];
-        }
-        else if (source is "core" or "snowluma" or "ingress")
-        {
-            var primary = Path.Combine(folder, source + ".out.log");
-            if (source == "core")
-            {
-                // core 的 stdout 落点随启动方式变化：manager 托管时写 manager/core.out.log，
-                // 但冻结版 core.exe 会把 stdout 重定向到 logs/core_stdout.log，同时 root logger
-                // 写入 logs/app_*.log。若只认死 core.out.log，进程切换落点后这里会长期停留在旧文件
-                // （表现为日志面板显示好几天前的内容）。改为按 mtime 选取最新的真实落点。
-                var logs = Path.Combine(dataRoot, "logs");
-                // 排除轮转分片（app_*.log.1/.2…）：Windows 的 *.log 通配会连带命中它们，
-                // 这里只取最新的当天主文件；分片是同一日志的旧片段，不在预览范围内。
-                var candidates = new List<string> { primary, Path.Combine(logs, "core_stdout.log") };
-                if (Directory.Exists(logs))
-                    candidates.AddRange(Directory.GetFiles(logs, "app_*.log")
-                        .Where(f => !Regex.IsMatch(Path.GetFileName(f), @"\.\d+$")));
-                var newest = candidates.Where(File.Exists)
-                    .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
-                // 全部候选都不存在时保留 primary，交由下方 File.Exists 过滤为空快照。
-                files = [newest ?? primary];
-            }
-            else files = [primary];
-        }
-        else throw new ArgumentException("Unknown log source", nameof(source));
-        var text = new StringBuilder();
-        foreach (var file in files.Where(File.Exists))
-        {
-            var tail = Tail(file);
-            if (tail.Length == 0) continue;
-            if (text.Length > 0) text.AppendLine().AppendLine("[stderr]");
-            text.Append(tail);
-        }
-        return new(text.ToString(), string.Join(" · ", files.Select(Path.GetFileName)));
-    }
 
     public static string Tail(string path)
     {

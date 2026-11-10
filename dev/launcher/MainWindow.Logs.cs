@@ -17,8 +17,59 @@ public partial class MainWindow
     private bool _logReading;
     private bool _logRefreshPending;
 
+    /// <summary>日志页左边那排来源标签，顺序与 data\launcher\logs.json 一致。</summary>
+    private readonly List<RadioButton> _logTabs = [];
+
+    /// <summary>
+    /// 按 logs.json 建来源标签。文件改了要重开启动器才生效 —— 这里只在启动时跑一次，
+    /// 不做热加载：日志来源是低频配置，为它加一套文件监视不划算。
+    /// </summary>
+    private void BuildLogTabs()
+    {
+        if (LogSourceTabs is null) return;
+        LogSourceTabs.Children.Clear();
+        _logTabs.Clear();
+
+        foreach (var source in LogSources.Current)
+        {
+            var button = new RadioButton
+            {
+                GroupName = "LogSource",
+                Style = (Style)FindResource("SegmentedTab"),
+                Tag = source.Id,
+                Content = source.Title,
+                Visibility = Visibility.Visible,
+            };
+            button.Click += LogTab_Click;
+            LogSourceTabs.Children.Add(button);
+            _logTabs.Add(button);
+        }
+
+        // 诊断用：ABYSS_LAUNCHER_LOG_SOURCE 指定进日志页时先停在哪个来源。
+        // 和 ABYSS_LAUNCHER_SECTION / ABYSS_LAUNCHER_EXPAND 一样，只给无头截图验证用。
+        if (Environment.GetEnvironmentVariable("ABYSS_LAUNCHER_LOG_SOURCE") is { Length: > 0 } initial
+            && LogSources.Find(initial) is not null)
+            _logSource = initial;
+
+        // 进来的来源可能已经被删掉（用户改了 logs.json），退回第一个可用的
+        if (LogSources.Find(_logSource) is null)
+            _logSource = LogSources.Current.FirstOrDefault()?.Id ?? "core";
+    }
+
+    /// <summary>
+    /// 某个来源现在该不该显示：绑定了组件行的话，跟着那一行的显示与否走。
+    ///
+    /// 这里查的是「用户有没有在 ui.json 里关掉那一行」，不是 IsRowShown —— 后者还带一条
+    /// 内置条件（Pi 行要有 tunnel 目标才显示）。日志不该跟着这个条件走：tunnel 没配置时
+    /// <c>logs\manager\tunnel.out.log</c> 可能仍然有内容，那正是用户翻日志的时候；
+    /// 而且 targets 还没拉回来时 IsRowShown 会短暂为 false，会让已经选中的来源被踢走。
+    /// </summary>
+    private bool IsLogSourceShown(LogSources.Source source) =>
+        source.Row.Length == 0 || !IsRowHiddenByUser(source.Row);
+
     private void StartLogPoll()
     {
+        BuildLogTabs();
         UpdateLogTabs();
         _logPoll = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _logPoll.Tick += async (_, _) =>
@@ -37,7 +88,7 @@ public partial class MainWindow
         try
         {
             var root = AppPaths.DataRoot();
-            var snapshot = await Task.Run(() => LogPresentation.Read(root, source));
+            var snapshot = await Task.Run(() => LogSources.Read(root, source));
             if (source != _logSource) return;
             var changed = _logText != snapshot.Text || _logFiles != snapshot.Files;
             _logText = snapshot.Text;
@@ -105,24 +156,24 @@ public partial class MainWindow
     private void UpdateLogTabs()
     {
         // 选中态交给 SegmentedTab 的 IsChecked 触发器，颜色不在代码里写死
-        foreach (var tab in new[] { LogTabCore, LogTabSnowluma, LogTabIngress, LogTabTunnel, LogTabService })
+        foreach (var tab in _logTabs)
+        {
+            var source = LogSources.Find(tab.Tag?.ToString() ?? "");
+            tab.Visibility = source is null || IsLogSourceShown(source) ? Visibility.Visible : Visibility.Collapsed;
             tab.IsChecked = tab.Tag?.ToString() == _logSource;
+        }
     }
 
     /// <summary>
-    /// 某个日志来源被隐藏后，如果当前正停在它上面，就退回 Core。
+    /// 某个日志来源被隐藏后，如果当前正停在它上面，就退回第一个可见来源。
     /// 否则会停在一个看不见的 tab 上，日志区还照着它刷，用户完全不明白在显示什么。
     /// </summary>
     private void EnsureLogSourceVisible()
     {
-        var hidden = _logSource switch
-        {
-            "snowluma" => !IsRowShown("snowluma"),
-            "tunnel" => !IsRowShown("pi"),
-            _ => false,
-        };
-        if (!hidden) return;
-        _logSource = "core";
+        var current = LogSources.Find(_logSource);
+        if (current is not null && IsLogSourceShown(current)) return;
+
+        _logSource = LogSources.Current.FirstOrDefault(IsLogSourceShown)?.Id ?? _logSource;
         _logText = ""; _logFiles = "";
         UpdateLogTabs();
         RenderLogs();
@@ -155,7 +206,9 @@ public partial class MainWindow
     {
         try
         {
-            var folder = Path.Combine(AppPaths.DataRoot(), "logs");
+            // 打开的是当前来源第一条实际存在的日志所在目录 —— 用户点「打开日志目录」
+            // 想看的显然是他正在看的那份，不是笼统的 logs 根
+            var folder = LogSources.FolderFor(AppPaths.DataRoot(), _logSource);
             Directory.CreateDirectory(folder);
             Process.Start(new ProcessStartInfo(folder) { UseShellExecute = true });
         }

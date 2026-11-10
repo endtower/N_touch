@@ -105,12 +105,15 @@ public static class UiSettings
             var readme = Path.Combine(dir, "README.md");
             if (File.Exists(readme)) return;
             File.WriteAllText(readme, """
-# 启动器界面设置（ui.json）
+# 启动器界面设置（ui.json / logs.json）
 
-这个文件控制「弱链接」启动器的外观，改完保存、重开启动器生效，**不需要重新编译**。
-它属于用户数据，组件更新不会覆盖。
+这两个文件控制「弱链接」启动器的外观，改完保存、重开启动器生效，**不需要重新编译**。
+它们属于用户数据，组件更新不会覆盖。
 
-## 能改什么
+- `ui.json` —— 主题、点 × 的行为、每个组件行的显示与名字
+- `logs.json` —— 日志页左边有哪些来源、每个来源读哪些文件
+
+## ui.json
 
 ```json
 {
@@ -143,9 +146,52 @@ public static class UiSettings
   它失败也不会再在页头喊「需要处理」。
 - 想恢复：把 `visible` 改回 `true` 或删掉那一项，重开启动器，需要的话再勾上「参与一键启动」。
 
+## logs.json
+
+日志页左边那排来源（Core / SnowLuma / 消息接入 / Pi 隧道 / 管理服务）不是写死在程序里的，
+整份来源表就是这个文件。加一个来源、改名字、换读哪个文件，都不用改程序。
+
+```json
+{
+  "sources": [
+    {
+      "id": "core",
+      "title": "Core",
+      "row": "core",
+      "streams": [
+        { "files": ["logs/manager/core.out.log", "logs/core_stdout.log", "logs/app_*.log"],
+          "pick": "newest" }
+      ]
+    }
+  ]
+}
+```
+
+| 字段 | 作用 |
+|---|---|
+| `id` | 唯一标识，程序内部用它记住「上次看的是哪个」。改 id 等于换一个新的 |
+| `title` | 标签上显示的名字，随便写 |
+| `row` | 绑到哪个组件行（`core` / `snowluma` / `pi` / `ingress` / `manager`）。那一行被隐藏时，这个来源跟着隐藏。留空 = 一直显示 |
+| `streams` | 这个来源由几段日志拼成，按顺序排 |
+
+每条 `stream`：
+
+| 字段 | 作用 |
+|---|---|
+| `files` | 文件路径，相对数据根（`data\`）。支持 `*` 和 `?`；也可以写绝对路径 |
+| `pick` | `"newest"` = 只读最新的那一个；`"all"` = 匹配到的全部按时间从旧到新拼起来 |
+| `label` | 只有多段拼在一起时才会显示，标出下面这段来自哪里，默认 `stderr` |
+
+- 轮转出来的旧分片（`xxx.log.1`、`xxx.log.2`）会自动跳过，不用写排除规则。
+- 什么都不匹配、或者文件是空的，这一格就是空日志，不会报错。
+- 常见用法：自己另起了个程序并让它把输出写进 `data\logs\`，加一条
+  `{ "id": "mine", "title": "我的脚本", "row": "", "streams": [{ "files": ["logs/mine.log"] }] }`
+  就能在日志页直接看，不用去文件夹里翻。
+- 「打开日志目录」打开的是当前来源第一份实际存在的日志所在目录。
+
 ## 注意
 
-- 文件用 UTF-8（不带 BOM）保存。
+- 两个文件都用 UTF-8（不带 BOM）保存。
 - JSON 写坏不会拦着启动，程序按默认值跑；改不动就删掉这个文件，重开启动器会重新生成。
 - 只认上面这几个键，其它键原样保留。
 """);
@@ -164,19 +210,10 @@ public static class UiSettings
     {
         try
         {
-            var path = SettingsPath();
-            var dir = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-
             // 只在既有对象上改自己关心的键，未知字段自然保留
             _root["theme"] = Theme;
             _root["closeToTray"] = CloseToTray;
-            File.WriteAllText(path, _root.ToJsonString(new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                // 中文标题不该被转义成 \uXXXX，用户要直接读得懂
-                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-            }));
+            JsonFile.Write(SettingsPath(), _root);
         }
         catch
         {

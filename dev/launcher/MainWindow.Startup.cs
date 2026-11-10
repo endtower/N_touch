@@ -327,11 +327,9 @@ public partial class MainWindow
         if (ServiceHeader is not null)
             ServiceHeader.Visibility = AnyServiceShown() ? Visibility.Visible : Visibility.Collapsed;
 
-        // 日志来源标签跟着走：行都没了，还留着一个永远空的日志来源会让人困惑
-        if (LogTabSnowluma is not null)
-            LogTabSnowluma.Visibility = IsRowShown("snowluma") ? Visibility.Visible : Visibility.Collapsed;
-        if (LogTabTunnel is not null)
-            LogTabTunnel.Visibility = IsRowShown("pi") ? Visibility.Visible : Visibility.Collapsed;
+        // 日志来源标签跟着走：行都没了，还留着一个永远空的日志来源会让人困惑。
+        // 哪些来源绑在哪一行由 logs.json 的 row 字段决定，代码里不再写死名单。
+        UpdateLogTabs();
         EnsureLogSourceVisible();
 
         if (_rowTitles.Count == 0) CacheRowTitles();

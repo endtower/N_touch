@@ -109,6 +109,46 @@ Chain("my_platform", "我的平台", (
 - 页头的「正在运行」和右上角状态不再把它算进去；它那条链路的失败/等待也不再在页头喊「需要处理」。
 - 它那条链路会被自动取消「参与一键启动」（必需链路 Core 除外）——用户关掉了那一行，点「一键启动」就不该还去拉它。
 
-判断「要不要显示」的唯一入口是 `MainWindow.IsRowShown()`：ui.json 开关 + 内置条件（Pi 需要后端真的有 tunnel 目标）。渲染、页头统计、日志来源、链路同步都查同一个结论，不要另写一份判断。
+判断「要不要显示」的唯一入口是 `MainWindow.IsRowShown()`：ui.json 开关 + 内置条件（Pi 需要后端真的有 tunnel 目标）。渲染、页头统计、链路同步都查同一个结论，不要另写一份判断。
 
-**Pitfall**：区分「用户主动隐藏」和「运行时暂时没探测到」。Pi 行在没有 tunnel 目标时也不显示，但那是环境没配好，不是用户不要它。拿 `IsRowShown` 去同步「参与一键启动」会误关没配 Pi 的用户的 Pi 链路，必须用 `IsRowHiddenByUser()`（只看 ui.json）。
+**Pitfall**：区分「用户主动隐藏」和「运行时暂时没探测到」。Pi 行在没有 tunnel 目标时也不显示，但那是环境没配好，不是用户不要它。拿 `IsRowShown` 去同步「参与一键启动」会误关没配 Pi 的用户的 Pi 链路，必须用 `IsRowHiddenByUser()`（只看 ui.json）。日志来源的显隐同理用它 —— 后端还没返回 targets 的那一瞬间 `IsRowShown` 为 false，会把用户已经选中的来源踢走。
+
+## 日志页也是配置（`data/launcher/logs.json`）
+
+日志页左边那排来源（Core / SnowLuma / 消息接入 / Pi 隧道 / 管理服务）原本在三个地方各写死一份：XAML 里五个 `RadioButton`、`MainWindow.Logs.cs` 里一个数组、`LogPresentation.Read()` 里一串 `if (source == ...)`。现在整份来源表都来自 `data/launcher/logs.json`，由 `LogSources` 读取；代码里只剩一份**内置默认值**，用于文件不存在时落盘。加来源、改名字、换读哪个文件，都不需要重新编译 EXE。
+
+```json
+{
+  "sources": [
+    {
+      "id": "core",
+      "title": "Core",
+      "row": "core",
+      "streams": [
+        { "files": ["logs/manager/core.out.log", "logs/core_stdout.log", "logs/app_*.log"],
+          "pick": "newest" }
+      ]
+    }
+  ]
+}
+```
+
+| 字段 | 作用 |
+|---|---|
+| `id` | 唯一标识；程序用它记住「上次看的是哪个」，改 id 等于换新来源 |
+| `title` | 标签文字 |
+| `row` | 绑到哪个组件行；那行被隐藏时本来源跟着隐藏。空 = 始终显示 |
+| `streams` | 由几段日志拼成，按顺序 |
+
+每条 `stream`：`files`（相对数据根的路径模式，支持 `*` / `?`，也可写绝对路径）、`pick`（`"newest"` 取最新一份 / `"all"` 全部按时间从旧到新拼）、`label`（多段拼接时的分隔标记，默认 `stderr`）。
+
+几处容易踩的地方：
+
+- **路径相对数据根，不是程序目录。** 写 `logs/manager/core.out.log`，不要写 `app\...`。
+- **轮转分片自动跳过。** Windows 的 `*.log` 通配会连带命中 `app_x.log.1`，那是一份旧片段；`LogSources` 统一过滤 `\.\d+$`，配置里不用写排除。
+- **Core 要写三个候选再让 `newest` 挑。** Core 的 stdout 落点随启动方式变化（manager 托管 / 冻结版 core.exe / root logger 各写一处），只认死其中一个，进程换落点后会长期显示旧文件。
+- **JSON 写坏不炸。** 解析失败退回内置默认，且**不覆写**用户文件；只有整份 `sources` 解析不出任何一条时才用默认值跑本期。
+- **`sources: []` 等于空日志页。** 想恢复内置五个，删掉文件重开启动器即可重新生成。
+- **`IsLogSourceShown()` 走 `IsRowHiddenByUser()`**，理由见上一节结尾。
+
+写 JSON 统一用 `JsonFile.Write()`（`dev/launcher/JsonFile.cs`）。**不要**在别处直接 `node.ToJsonString(new JsonSerializerOptions { WriteIndented = true })` —— .NET 8 里只要节点里有嵌套的 `JsonArray`/`JsonObject` 就会抛 `JsonSerializerOptions instance must specify a TypeInfoResolver setting before being marked as read-only`（扁平对象侥幸不炸，很容易漏测）。`JsonFile.Write` 用 `Utf8JsonWriter` 自己写，不经过那套反射。
