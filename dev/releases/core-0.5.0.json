@@ -1,8 +1,0 @@
-{
-  "format": "source-v1",
-  "notes": "仅启动器作为业务 EXE 打包；Core、消息接入与管理服务以源码和受管 Python 环境运行。个人数据、缓存和备份分区，第三方数据布局遵循上游。",
-  "breaking_changes": ["需要源码式管理服务 0.11.0 与启动器 0.8.0；旧本机运行版需要完成布局迁移。"],
-  "data_policy": "compatible",
-  "migration_notes": "不改变数据库结构或会话内容。本机布局迁移由单独迁移工具保存副本后执行，程序回退不会自动覆盖用户数据。",
-  "requires": {"manager": "0.11.0", "launcher": "0.8.0"}
-}
