@@ -471,6 +471,50 @@ function openPersonaCreate() {
   personaCreateOpen.value = true
 }
 
+// ============ 分类行内的「+」新增入口 ============
+// 分类标题右侧固定一个小加号：点谁的新建，就归到谁名下。
+// 受保护的分类（基本说话风格、系统人格）不给加号——它们不能新增，
+// 与其点了才报错，不如一开始就不显示。
+const SOCIAL_KIND_BY_GROUP: Record<string, MemoryDraftKind> = {
+  Character: 'character', Group: 'group', FuzzyRole: 'fuzzy_role',
+}
+
+function canCreateInGroup(category: string): boolean {
+  if (activeView.value === 'personas') return category === '内心人格'
+  return true
+}
+
+function groupAddHint(category: string): string {
+  if (activeView.value === 'personas') return '新建内心人格'
+  if (activeView.value === 'kits') return '新建锦囊'
+  if (activeView.value === 'observations') return '新建见闻'
+  const kind = SOCIAL_KIND_BY_GROUP[category]
+  if (kind === 'character') return '新建角色'
+  if (kind === 'group') return '新建群组'
+  if (kind === 'fuzzy_role') return '新建模糊角色'
+  return '新建'
+}
+
+// 按分类分发到对应的新建动作：
+// - 人格 → 弹出人格表单（需要名称/场景/正文，不能是空白草稿）
+// - 社交三类 → 直接建对应 kind 的空白草稿并选中
+// - 锦囊/见闻 → 现有草稿机制
+function openCreateForGroup(category: string) {
+  if (activeView.value === 'personas') {
+    if (category !== '内心人格') return
+    searchKeyword.value = ''
+    openPersonaCreate()
+    return
+  }
+  if (activeView.value === 'social') {
+    const kind = SOCIAL_KIND_BY_GROUP[category]
+    if (kind) openCreate(kind)
+    return
+  }
+  if (activeView.value === 'kits') { openCreate('kit'); return }
+  if (activeView.value === 'observations') { openCreate('observation'); return }
+}
+
 async function createPersona() {
   if (personaCreating.value) return
   personaCreating.value = true
@@ -800,7 +844,6 @@ function colorFor(n: SocialNode): string {
             新建
             <template #dropdown><el-dropdown-menu><el-dropdown-item command="character">新建角色</el-dropdown-item><el-dropdown-item command="group">新建群组</el-dropdown-item><el-dropdown-item command="fuzzy_role">新建模糊角色</el-dropdown-item></el-dropdown-menu></template>
           </el-dropdown>
-          <el-button v-else-if="activeView === 'personas'" :icon="Plus" size="small" @click="openPersonaCreate">新建内心人格</el-button>
           <el-button v-else-if="activeView !== 'maintenance'" :icon="Plus" size="small" @click="openCreate()">新建</el-button>
           <el-button v-if="activeView === 'experience'" :icon="Tools" size="small" :loading="expBatchBusy" :disabled="!expTotal" @click="reviewAllExperiences">全部维护</el-button>
           <el-button v-if="activeView === 'experience'" :icon="Delete" size="small" :disabled="!expTotal || expBatchDeleting" @click="toggleExpSelectMode">{{ expSelectMode ? '退出批量' : '批量删除' }}</el-button>
@@ -842,23 +885,34 @@ function colorFor(n: SocialNode): string {
 
           <div class="memory-groups">
             <section v-for="g in groups" :key="g.def.key" class="memory-group">
-              <button
-                class="memory-group-head"
-                type="button"
-                :aria-expanded="!isCollapsed(g.def.key)"
-                @click="toggleGroup(g.def.key)"
-              >
-                <el-icon
-                  :size="10"
-                  class="memory-group-chevron"
-                  :class="{ open: !isCollapsed(g.def.key) }"
+              <div class="memory-group-head-row">
+                <button
+                  class="memory-group-head"
+                  type="button"
+                  :aria-expanded="!isCollapsed(g.def.key)"
+                  @click="toggleGroup(g.def.key)"
                 >
-                  <ArrowRight />
-                </el-icon>
-                <el-icon :size="12" :style="{ color: g.def.color }"><component :is="g.def.icon" /></el-icon>
-                <span class="memory-group-title">{{ g.def.title }}</span>
-                <span class="memory-group-count">{{ g.nodes.length }}</span>
-              </button>
+                  <el-icon
+                    :size="10"
+                    class="memory-group-chevron"
+                    :class="{ open: !isCollapsed(g.def.key) }"
+                  >
+                    <ArrowRight />
+                  </el-icon>
+                  <el-icon :size="12" :style="{ color: g.def.color }"><component :is="g.def.icon" /></el-icon>
+                  <span class="memory-group-title">{{ g.def.title }}</span>
+                  <span class="memory-group-count">{{ g.nodes.length }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="memory-group-add"
+                  :title="`新建${g.def.title}`"
+                  :aria-label="`新建${g.def.title}`"
+                  @click.stop="openCreateForGroup(g.def.key)"
+                >
+                  <el-icon :size="12"><Plus /></el-icon>
+                </button>
+              </div>
               <div v-if="!isCollapsed(g.def.key)" class="memory-group-items">
                 <button
                   v-for="n in g.nodes"
@@ -1099,10 +1153,22 @@ function colorFor(n: SocialNode): string {
           <div v-else-if="!recordLoading && !recordGroups.length" class="memory-empty"><div class="memory-empty-title">{{ records.length ? '没有匹配的条目' : `记忆里还没有${recordLabel}` }}</div><div class="memory-empty-sub">点击“新建”创建空白{{ recordLabel }}</div></div>
           <div v-else class="memory-groups">
             <section v-for="group in recordGroups" :key="group.category" class="memory-group">
-              <button type="button" class="memory-group-head" :aria-expanded="!recordCollapsed[group.category]" @click="recordCollapsed[group.category] = !recordCollapsed[group.category]">
-                <el-icon :size="10" class="memory-group-chevron" :class="{ open: !recordCollapsed[group.category] }"><ArrowRight /></el-icon>
-                <span class="memory-group-dot" style="background: var(--tag-special);"></span><span class="memory-group-title">{{ group.category }}</span><span class="memory-group-count">{{ group.items.length }}</span>
-              </button>
+              <div class="memory-group-head-row">
+                <button type="button" class="memory-group-head" :aria-expanded="!recordCollapsed[group.category]" @click="recordCollapsed[group.category] = !recordCollapsed[group.category]">
+                  <el-icon :size="10" class="memory-group-chevron" :class="{ open: !recordCollapsed[group.category] }"><ArrowRight /></el-icon>
+                  <span class="memory-group-dot" style="background: var(--tag-special);"></span><span class="memory-group-title">{{ group.category }}</span><span class="memory-group-count">{{ group.items.length }}</span>
+                </button>
+                <button
+                  v-if="canCreateInGroup(group.category)"
+                  type="button"
+                  class="memory-group-add"
+                  :title="groupAddHint(group.category)"
+                  :aria-label="groupAddHint(group.category)"
+                  @click.stop="openCreateForGroup(group.category)"
+                >
+                  <el-icon :size="12"><Plus /></el-icon>
+                </button>
+              </div>
               <div v-if="!recordCollapsed[group.category]" class="memory-group-items">
                 <button v-for="item in group.items" :key="item.id" class="memory-item" :class="{ active: item.id === selectedRecordId }" @click="selectedRecordId = item.id">
                   <span class="memory-item-dot" style="background: var(--tag-special);"></span>
@@ -1307,6 +1373,39 @@ function colorFor(n: SocialNode): string {
 }
 
 .memory-groups { display: flex; flex-direction: column; gap: 4px; }
+/* 分类行：标题按钮占满剩余宽度，加号固定在右侧 */
+.memory-group-head-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.memory-group-head-row .memory-group-head { flex: 1 1 auto; min-width: 0; }
+.memory-group-add {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-md);
+  color: var(--text-3);
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.memory-group-add:hover {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--bg-subtle);
+}
+.memory-group-add:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .memory-group-head {
   display: flex;
   align-items: center;

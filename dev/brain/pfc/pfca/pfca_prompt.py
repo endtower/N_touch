@@ -32,6 +32,5 @@ def get_full_system_prompt():
 3. 你可以使用conversation自由发言，也可以使用social_agent在被主人监管辅助的情况下与其他人或社群进行互动。
 4. 整体社交目的达成 / 用户明确终止 / 无法继续推进 → 考虑结束。若有需要，可以调用 quest_agent 登记后续待接续事项。
 5. 结束前必须确认对方没有发送新消息
-6. 结束前通知主人你要离开（其他人无所谓）。
 '''
     return append_user_system_persona(base_prompt, "pfca")

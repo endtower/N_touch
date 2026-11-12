@@ -9,8 +9,9 @@ pfca模块的工具定义与处理
 3. 工具调用的路由和分发
 配置由上层pre/core.py统一管理，被pfca_core.py调用。
 
-会话标识统一使用 session_id，格式为 "type_id"，例如 "private_1234567890" / "group_198431299"。
-LLM 工具入参也统一为 session_id，不再单独传 session_type。
+会话标识统一使用 session_id，2026-10-16 起带平台前缀，格式为 "platform_type_id"，
+例如 "wechat_private_10003" / "qq_group_198431299"；旧的无前缀格式仅作读取兼容。
+LLM 工具入参必须逐字照抄通讯录给出的完整 id，不再单独传 session_type。
 """
 
 import json
@@ -56,7 +57,7 @@ class PFCA_tool_manager(ToolManager):
                         "properties": {
                             "session_id": {
                                 "type": "string",
-                                "description": "目标会话 id，格式 'type_id'，例如 'private_xxx' / 'group_yyy'。"
+                                "description": "目标会话 id，必须逐字照抄通讯录里给出的完整 session_id（含平台前缀），例如 'qq_private_1234567890' / 'wechat_private_10003' / 'group_198431299'。不要自行增删前缀。"
                             },
                             "purpose": {
                                 "type": "string",
@@ -90,7 +91,7 @@ class PFCA_tool_manager(ToolManager):
                         "properties": {
                             "session_id": {
                                 "type": "string",
-                                "description": "工作会话 id，格式 'type_id'（如 'group_xxx' / 'private_yyy'）。不能是主人的私聊会话（主人私聊用 conversation_agent）。"
+                                "description": "工作会话 id，必须逐字照抄通讯录里给出的完整 session_id（含平台前缀），例如 'qq_group_198431299' / 'wechat_private_10003'。不能是主人的私聊会话（主人私聊用 conversation_agent）。"
                             },
                             "purpose": {
                                 "type": "string",
@@ -152,7 +153,7 @@ class PFCA_tool_manager(ToolManager):
                         "properties": {
                             "session_id": {
                                 "type": "string",
-                                "description": "目标会话 id，格式 'type_id'，例如 'private_xxx' / 'group_yyy'。"
+                                "description": "目标会话 id，必须逐字照抄通讯录里给出的完整 session_id（含平台前缀），例如 'qq_private_1234567890' / 'wechat_private_10003' / 'group_198431299'。不要自行增删前缀。"
                             },
                             "seconds": {
                                 "type": "number",
@@ -370,7 +371,13 @@ class PFCA_tool_manager(ToolManager):
         from brain.hc.global_session_state import get_global_session_state
         from brain.chat.conversation.conversation_core import get_conversation_core
 
-        session_id = (session_id or "").strip() or f"private_{RoleConfig.MASTER_ID}"
+        explicit_session = (session_id or "").strip()
+        session_id = explicit_session or f"private_{RoleConfig.MASTER_ID}"
+        # 未指定时走主人私聊，不需要校验；显式指定时必须真实存在，
+        # 否则会把错误 id 一路带到路由层才报错（2026-11-11 事故）。
+        if explicit_session:
+            from memory.session_guard import require_existing_session
+            await require_existing_session(session_id)
         persona_name = self._resolve_persona_name(persona_name)
 
         # 保护模式：仅允许对主人私聊会话 + 白名单会话 + 记忆中勾选放行的实体会话对话，
@@ -432,7 +439,8 @@ class PFCA_tool_manager(ToolManager):
         由 social_chat 在本段首条消息注入该人格 kernel_prompt；人格不再随 PFCA 全局切换。
 
         Args:
-            session_id: 工作会话 id，格式 "type_id"（如 "group_xxx" / "private_yyy"）。
+            session_id: 工作会话 id，必须逐字照抄通讯录给出的完整 id（含平台前缀，
+                如 "wechat_private_10003" / "qq_group_198431299"），不要自行增删前缀。
                 不能是主人的私聊会话（主人私聊请用 conversation_agent）。
             purpose: 这次社交要达成的结果，一两句话，像标题。
             extra_info: 可选参考材料（消息原文、人物印象、前因后果），可以写长，仅作建议。
@@ -445,6 +453,10 @@ class PFCA_tool_manager(ToolManager):
             raise ValueError("session_id 必填")
         if not purpose or not purpose.strip():
             raise ValueError("purpose 必填")
+        # 入口校验：会话必须真实存在，否则会注册出不存在的 pfca_session
+        # 并在记忆库里造出幽灵实体（2026-11-11 事故）。
+        from memory.session_guard import require_existing_session
+        await require_existing_session(session_id)
 
         persona_name = self._resolve_persona_name(persona_name)
 
@@ -484,7 +496,8 @@ class PFCA_tool_manager(ToolManager):
         4. 超时无回复：游标不动（无消息可消费）。
 
         Args:
-            session_id: 目标会话 id，格式 "type_id"，如 "private_xxx" / "group_xxx"。
+            session_id: 目标会话 id，必须逐字照抄通讯录给出的完整 id（含平台前缀，
+                如 "wechat_private_10003" / "qq_private_1234567890"）。
             seconds: 最长等待秒数（10-30，越界收敛到边界）。
 
         Returns:
@@ -494,6 +507,8 @@ class PFCA_tool_manager(ToolManager):
         session_id = (session_id or "").strip()
         if not session_id:
             raise ValueError("wait_and_observe 缺少必填参数 session_id")
+        from memory.session_guard import require_existing_session
+        await require_existing_session(session_id)
         seconds = min(max(float(seconds), 10.0), 30.0)
 
         from memory.message_repository import get_message_store
@@ -717,7 +732,8 @@ class PFCA_tool_manager(ToolManager):
             preview += [
                 "",
                 "结束前，你需要确认是否可以提升别人对你的评价，请注意，强行要求他人评价"
-                "可能导致评价反而降低，并选择确认是否要通知重要人物是否知道你要离开。",
+                "可能导致评价反而降低，并选择确认是否要通知重要人物是否知道你要离开。"
+                "频繁提及或自言自语会带来负面评价，使用表情包则不在此限制或要求之内。",
             ]
             return "\n".join(preview)
 
