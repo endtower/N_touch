@@ -3,7 +3,9 @@
 """
 通讯录模块，用于管理和查询联系人信息
 
-会话标识统一使用 session_id，格式为 "type_id"，例如 "private_1234567890" / "group_198431299"。
+会话标识统一使用 session_id。2026-10-16 起新会话带平台前缀，格式为
+"platform_type_id"，例如 "wechat_private_10003" / "qq_group_198431299"；
+旧的无前缀格式（"private_1234567890" / "group_198431299"）仅作读取兼容。
 通讯录内部仍按类型分桶（private / group），但通过 session_id 前缀过滤。
 
 纯异步实现：所有数据加载、查询均为 async
@@ -291,7 +293,13 @@ class AddressBook:
 
             formatted_contacts.append(contact_str)
 
-        return "你查看了通讯录，返回了以下信息：\n" + "\n".join(formatted_contacts)
+        return (
+            "你查看了通讯录，返回了以下信息：\n"
+            + "\n".join(formatted_contacts)
+            + "\n\n（调用工具时 session_id 必须逐字照抄上面的值，"
+              "包括 qq_ / wechat_ 等平台前缀和 private_ / group_ 类型段；"
+              "自行删减前缀会指向一个不存在的会话，发送会被拒绝。）"
+        )
 
 
 _address_book_instance: Optional[AddressBook] = None

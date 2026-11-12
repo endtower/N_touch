@@ -127,6 +127,11 @@ class SocialChatCore:
         if not isinstance(working_session_id, str) or not working_session_id.strip():
             raise ValueError(f"start() 收到非法 working_session_id: {working_session_id!r}")
 
+        # 深度防御：working_session_id 必须真实存在。否则下面的 add_pfca_session
+        # 会顺手在记忆库里为这个不存在的会话造出幽灵角色（2026-11-11 事故）。
+        from memory.session_guard import require_existing_session
+        await require_existing_session(working_session_id.strip())
+
         # single source of truth：master_session_id 由 RoleConfig.MASTER_ID 派生，
         # working_session_id 由调用方传入。
         # 任何模块（input_manager / tool_manager / session / _build_result）

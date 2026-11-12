@@ -347,6 +347,22 @@ class CharacterCompose:
         # 4. 全部未命中 → 直接按联系方式 + 名称创建节点
         if not entity_uuid:
             if session_id:
+                # 不给不存在的会话新建实体：查询通讯录等只读路径也会走到这里，
+                # 一旦盲目建节点就会留下指向幽灵会话的联系方式（2026-11-11 事故）。
+                # 这里只跳过建实体，仍返回一个不落库的说明，避免阻断通讯录渲染。
+                from memory.message_repository import get_message_store
+                if not await get_message_store().session_exists(session_id):
+                    return {
+                        'uuid': None,
+                        'created': False,
+                        'info': None,
+                        'formatted_info': (
+                            f"会话「{session_id}」在消息库中不存在，未建立实体。"
+                            if not name else
+                            f"「{name}」（会话 {session_id}）在消息库中不存在，未建立实体。"
+                        ),
+                        'found_by': 'none',
+                    }
                 created_name = name if name else session_id
                 if is_group:
                     from .group import GroupOperations

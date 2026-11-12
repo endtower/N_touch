@@ -110,8 +110,12 @@ class LLMConfig:
     MAX_SELF_LOOPS = 10  # 最大自我循环次数
     RESPONSE_INTERVAL_MIN = 2  # 最小响应间隔（秒）
     MAX_NO_TOOL_CALLS = 3  # 最大无工具调用次数
-    ERROR_RETRY_MAX = 3  # 错误重试次数
-    ERROR_RETRY_INTERVAL = 0.0  # 错误重试间隔（秒）
+    # LLM 调用失败重试（2026-11-11 接入；此前是定义了但无人引用的死配置）。
+    # 语义：首次调用之外的额外重试次数，即最多总共尝试 ERROR_RETRY_MAX + 1 次。
+    # 覆盖范围见 utils/llm_client_manager.py 的 _retryable_error() 白名单——
+    # 只有上游可恢复错误才重试，参数/鉴权类错误立即抛出，不做无意义重试。
+    ERROR_RETRY_MAX = 5  # 重试次数
+    ERROR_RETRY_INTERVAL = 1.0  # 每次重试间隔（秒，固定间隔，不递增）
 
     # ===================== 系统提示配置 =====================
     SYSTEM_PROMPT = "你是深度思考人格，你需要结合自身的特点，自主决策并制定行动计划。你必须使用工具来处理请求，否则会出现系统级错误。注意，同时应对多件事务是很难的，所以一次只能使用一个工具。"  # 系统提示词

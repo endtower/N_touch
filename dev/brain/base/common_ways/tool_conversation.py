@@ -116,7 +116,8 @@ class ToolConversation(ToolHandlers):
         """发送纯文字消息：message 内换行拆成多条独立消息，按真人节奏逐条发出。
 
         Args:
-            session_id: 目标会话标识，格式 "type_id"，如 "private_xxx" / "group_xxx"。
+            session_id: 目标会话标识，必须逐字照抄通讯录给出的完整 id（含平台前缀），
+                如 "wechat_private_10003" / "qq_private_1234567890" / "qq_group_198431299"。
             message: 要发送的文字内容，换行分隔多条短句；全空 raise ValueError。
             typing_delay_per_char: 每字符打字延迟（秒），由调用方按会话类型注入。
 

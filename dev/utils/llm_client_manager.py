@@ -205,7 +205,12 @@ class LLMClient:
             headers.update(extra_headers)
         # 导入工具/启动 Web 时不创建网络客户端；证书及代理初始化留到实际模型调用。
         self._client = None
-        self._client_options = dict(api_key=api_key, base_url=base_url, default_headers=headers or None)
+        # max_retries=0：重试统一由 _create_with_retry 按 LLMConfig 控制。
+        # 否则 SDK 默认 2 次 × 本层 5 次 = 最多 18 次请求，退避时间不可控。
+        self._client_options = dict(
+            api_key=api_key, base_url=base_url, default_headers=headers or None,
+            max_retries=0,
+        )
     
     async def chat(self, model: str, messages: List[Dict], extra_body: Dict = None,
                   caller_file: str = None, caller_name: str = None, caller_line: int = None, **kwargs):
@@ -229,7 +234,7 @@ class LLMClient:
 
         if self._client is None:
             self._client = openai.AsyncOpenAI(**self._client_options)
-        response = await self._client.chat.completions.create(**request_params)
+        response = await self._create_with_retry(request_params)
 
         if budget is not None and response.usage is not None:
             budget.record(response.usage.total_tokens)
@@ -248,6 +253,66 @@ class LLMClient:
         )
 
         return response
+
+    @staticmethod
+    def _retryable_error(exc: BaseException) -> bool:
+        """判断异常是否属于"上游可恢复"、值得重试。
+
+        只重试服务端/网络侧故障；参数错、鉴权错、余额错重试多少次都一样，
+        立即抛出，避免把 3 秒的重试窗口浪费在必然失败上。
+        """
+        # 连接类：网络抖动、超时（Transient）
+        if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
+            return True
+        # 限流：退避后大概率恢复
+        if isinstance(exc, openai.RateLimitError):
+            return True
+        # 5xx 服务端错误：含 "failed to evaluate membership entitlement" 这类
+        # 上游内部故障（InternalServerError 是 APIStatusError 子类，status_code >= 500）
+        if isinstance(exc, openai.InternalServerError):
+            return True
+        if isinstance(exc, openai.APIStatusError):
+            code = getattr(exc, "status_code", None)
+            return isinstance(code, int) and code >= 500
+        return False
+
+    async def _create_with_retry(self, request_params: Dict[str, Any]):
+        """带固定间隔重试的调用包装。
+
+        重试策略来自 config.llm_settings.LLMConfig：
+          ERROR_RETRY_MAX      首次之外的重试次数（当前 5）
+          ERROR_RETRY_INTERVAL 每次重试前固定等待（当前 1.0 秒，不递增）
+
+        注意：SDK 自身也有 max_retries 默认 2 次。为让本层成为唯一重试入口、
+        避免 3x6 的乘法放大，客户端显式把 SDK 重试设为 0，交由本方法统一控制。
+        """
+        attempts = LLMConfig.ERROR_RETRY_MAX + 1  # 首次 + 重试
+        interval = LLMConfig.ERROR_RETRY_INTERVAL
+        last_exc: Optional[BaseException] = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                if attempt > 1:
+                    logger.warning(
+                        f"LLM 调用失败，{interval:g}s 后第 {attempt - 1}/{attempts - 1} 次重试"
+                    )
+                    await asyncio.sleep(interval)
+                return await self._client.chat.completions.create(**request_params)
+            except BaseException as exc:
+                last_exc = exc
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                if not self._retryable_error(exc):
+                    raise
+                if attempt >= attempts:
+                    logger.error(
+                        f"LLM 调用连续 {attempts} 次失败（已重试 "
+                        f"{attempts - 1} 次），放弃本次调用: {exc}"
+                    )
+                    raise
+                logger.warning(f"LLM 调用第 {attempt}/{attempts} 次失败: {exc}")
+        # 理论不可达
+        raise last_exc  # type: ignore[misc]
 
     @staticmethod
     def _caller_label(caller_file: Optional[str]) -> str:
