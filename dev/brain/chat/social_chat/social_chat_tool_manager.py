@@ -1011,7 +1011,10 @@ class SocialChatToolManager(ToolManager):
                 return self._expired_approval()
             self._require_permission_scope()
             if time.monotonic() >= deadline:
-                return {"result": "timeout", "content": "", "reason": f"主人 {timeout:g} 秒内未回复，审批超时"}
+                return {
+                    "result": "timeout", "content": "",
+                    "reason": f"{timeout:g} 秒无回应，已按不通过处理。可能是主人不想发这条。",
+                }
             for message in messages:
                 if str(message.get("user_id")) != master_user_id:
                     continue

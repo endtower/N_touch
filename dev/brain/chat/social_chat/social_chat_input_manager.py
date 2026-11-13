@@ -300,10 +300,13 @@ class SocialChatInputManager:
         首次（游标 -1）会拉取该会话最近的 max_unread 条；之后只拉游标之后的新消息。
         关键路径（fetch）失败一律直接 raise，符合 user_rules 关键方法失败应崩溃阻断。
 
-        exclude_system=True（2026-11-13）：审批请求/知会这类由系统发给主人的
-        出站提示也落在主人会话里（user_id='system'），此前会被当成聊天内容注入
-        模型上下文，既占篇幅又让它误以为这些话是自己说过的。这类提示只有主人
-        需要看，模型不需要；过滤只影响渲染，游标照常按未读推进。
+        审批类提示按内容精确过滤（2026-11-13）：审批请求、知会、自由发送申请
+        是「系统发给主人看」的出站提示，落库时 user_id='system'，但和真实聊天
+        混在同一条会话里。之前用 exclude_system=True 整体剔除，会连 AI 自己的
+        历史发言一起删掉（那些同样记在 system 名下），上下文就不再是完整对话。
+
+        现在只丢掉这几种提示正文，其余 system 消息照常保留；
+        过滤只影响渲染，游标仍按未读原始列表推进，审批轮询走原始数据不受影响。
         """
         from memory.session_history import (
             get_global_session_history,
@@ -320,7 +323,8 @@ class SocialChatInputManager:
                 message_format=MessageFormatOptions(
                     show_new_marker=True,
                     show_timestamp=True,
-                    exclude_system=True,
+                    # 保留 system 消息，下面再按内容剔除审批提示。
+                    exclude_system=False,
                 ),
             ),
             advance_cursor=True,
@@ -328,8 +332,25 @@ class SocialChatInputManager:
             min_messages=min_messages,
         )
 
-        lines = result.formatted_lines or []
+        lines = [
+            line for line in (result.formatted_lines or [])
+            if not self._is_approval_prompt(line)
+        ]
         return "\n".join(lines) if lines else ""
+
+    @staticmethod
+    def _is_approval_prompt(line: str) -> bool:
+        """这条渲染行是否是「系统发给主人的审批/知会提示」。
+
+        只认正文特征，不认 user_id：审批提示的 user_id 也是 system，
+        而那一名下同样存着 AI 自己的真实发言。
+        """
+        body = line.split(":", 1)[-1] if ":" in line else line
+        body = body.lstrip()
+        return body.startswith(
+            ("【单次发送审批】", "【知会】", "【自由发送申请】", "AI 想在")
+        )
+
 
     async def _get_first_social_history(self, master_name: str, working_name: str) -> str:
         """拉取主人会话与工作会话的近期记录（渲染顺序固定：主人会话在前）。

@@ -268,6 +268,22 @@ class SocialChainPermissionsAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await manager.set_send_mode("unrestricted"))["approval"], "rejected")
         self.assertEqual(manager.send_mode, "approval")
 
+    async def test_timeout_reason_suggests_master_may_have_declined(self):
+        """超时不能只说「没回复」：要提示可能是主人故意不通过，且文案要短。
+
+        模型看到「超时」容易理解成「没人在」，于是立刻重试；实际常常是主人
+        看到后选择不批准。文案必须点出这一层，同时保持简短（2026-11-13）。
+        """
+        manager = self.manager()
+        self.auto_reply(manager, None)
+        verdict = await manager._request_master_approval("测试正文")
+
+        self.assertEqual(verdict["result"], "timeout")
+        reason = verdict["reason"]
+        self.assertIn("不通过", reason, reason)
+        self.assertIn("不想发", reason, reason)
+        self.assertLessEqual(len(reason), 40, f"超时文案过长: {reason!r}")
+
     async def test_approval_requests_are_serialized(self):
         first, second = self.manager(), self.manager("group_999")
         started, release = asyncio.Event(), asyncio.Event()
@@ -369,27 +385,44 @@ class SocialChainPermissionsAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertIn("【发送模式：自由】", text)
         self.assertNotIn("【发送模式：审批】", text)
 
-    async def test_master_history_excludes_system_approval_prompts(self):
-        """审批请求/知会是发给主人的出站提示（user_id='system'），
-        不能被渲染进模型上下文（2026-11-13）。"""
+    async def test_master_history_excludes_approval_prompts_but_keeps_own_speech(self):
+        """审批/知会提示不能进模型上下文，但 AI 自己的历史发言必须保留。
+
+        user_id 区分不了这两者（都记在 system 名下），只能按正文特征过滤（2026-11-13）。
+        """
+        prompt_lines = [
+            "[新] 已拔牙:【单次发送审批】\n收件会话：group_123\n请在 60 秒内回复「同意」...",
+            "[新] 已拔牙:│ 转手卖算力，中间商赚个差价",
+            "[新] 已拔牙:【知会】已在 group_123 发送：\n内容",
+            "[新] 已拔牙:AI 想在group_123发送消息：\n「测试」",
+        ]
+        own_lines = [
+            "[新] 已拔牙:在",
+            "[新] 已拔牙:记录是纸，删了也就是纸没了，我这边没掉东西",
+            "[新] 主人:你好",
+        ]
         captured = {}
 
         async def fake_fetch(session_id, sess_name, consumer_id, options,
                              advance_cursor=True, max_unread=20, min_messages=10):
             captured["options"] = options
-            return SimpleNamespace(formatted_lines=[], messages=[])
+            return SimpleNamespace(formatted_lines=prompt_lines + own_lines, messages=[])
 
         fake_history = SimpleNamespace(fetch_unread=fake_fetch)
         inputs = imod.SocialChatInputManager()
-        with patch.object(imod, "get_global_session_history", create=True,
-                          return_value=fake_history, side_effect=None):
-            with patch("memory.session_history.get_global_session_history",
-                       return_value=fake_history):
-                await inputs._fetch_one_history("private_888", "主人", 20, 0)
+        with patch("memory.session_history.get_global_session_history",
+                   return_value=fake_history):
+            text = await inputs._fetch_one_history("private_888", "主人", 20, 0)
 
-        fmt = captured["options"].message_format
-        self.assertTrue(fmt.exclude_system, "主人历史必须过滤 user_id='system' 的审批提示")
-        self.assertTrue(fmt.show_new_marker)
+        # 提示类全部剔除
+        for marker in ("【单次发送审批】", "【知会】", "AI 想在"):
+            self.assertNotIn(marker, text)
+        # 自己的发言与主人消息必须还在
+        self.assertIn("在", text)
+        self.assertIn("记录是纸，删了也就是纸没了", text)
+        self.assertIn("你好", text)
+        # exclude_system 不能被重新打开，否则会连自己的发言一起删
+        self.assertFalse(captured["options"].message_format.exclude_system)
 
     async def test_station_cancellation_closes_chain(self):
         import brain.att.station as smod
