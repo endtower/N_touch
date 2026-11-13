@@ -369,6 +369,28 @@ class SocialChainPermissionsAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertIn("【发送模式：自由】", text)
         self.assertNotIn("【发送模式：审批】", text)
 
+    async def test_master_history_excludes_system_approval_prompts(self):
+        """审批请求/知会是发给主人的出站提示（user_id='system'），
+        不能被渲染进模型上下文（2026-11-13）。"""
+        captured = {}
+
+        async def fake_fetch(session_id, sess_name, consumer_id, options,
+                             advance_cursor=True, max_unread=20, min_messages=10):
+            captured["options"] = options
+            return SimpleNamespace(formatted_lines=[], messages=[])
+
+        fake_history = SimpleNamespace(fetch_unread=fake_fetch)
+        inputs = imod.SocialChatInputManager()
+        with patch.object(imod, "get_global_session_history", create=True,
+                          return_value=fake_history, side_effect=None):
+            with patch("memory.session_history.get_global_session_history",
+                       return_value=fake_history):
+                await inputs._fetch_one_history("private_888", "主人", 20, 0)
+
+        fmt = captured["options"].message_format
+        self.assertTrue(fmt.exclude_system, "主人历史必须过滤 user_id='system' 的审批提示")
+        self.assertTrue(fmt.show_new_marker)
+
     async def test_station_cancellation_closes_chain(self):
         import brain.att.station as smod
         import brain.pfc.core as pmod

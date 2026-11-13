@@ -299,6 +299,11 @@ class SocialChatInputManager:
 
         首次（游标 -1）会拉取该会话最近的 max_unread 条；之后只拉游标之后的新消息。
         关键路径（fetch）失败一律直接 raise，符合 user_rules 关键方法失败应崩溃阻断。
+
+        exclude_system=True（2026-11-13）：审批请求/知会这类由系统发给主人的
+        出站提示也落在主人会话里（user_id='system'），此前会被当成聊天内容注入
+        模型上下文，既占篇幅又让它误以为这些话是自己说过的。这类提示只有主人
+        需要看，模型不需要；过滤只影响渲染，游标照常按未读推进。
         """
         from memory.session_history import (
             get_global_session_history,
@@ -315,7 +320,7 @@ class SocialChatInputManager:
                 message_format=MessageFormatOptions(
                     show_new_marker=True,
                     show_timestamp=True,
-                    exclude_system=False,
+                    exclude_system=True,
                 ),
             ),
             advance_cursor=True,
