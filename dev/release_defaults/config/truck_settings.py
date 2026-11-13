@@ -34,7 +34,7 @@ class AtMentionTruckConfig:
     检测范围：群聊。pfca 游标未读消息里含指向助手本人（role_settings.ASSISTANT_QQ）
     的 at 段即触发，直接把该会话交给 PFCA（与私聊卡车同风格：命中即唤起，不经过判断层）。
     """
-    ENABLED = False  # 是否启用此truck（默认关闭，由控制面板显式启用）
+    ENABLED = True  # 是否启用此truck（默认开启，与当前运行状态一致）
     CYCLE_TIME = 5.0  # 检测周期（秒）
 
 # ==================== ReflectionTruck配置 ====================
@@ -46,13 +46,13 @@ class ReflectionCharTruckConfig:
 
 class ReflectionTimeTruckConfig:
     """反思定时触发 truck 配置：距上次反思满间隔时触发反思"""
-    ENABLED = True  # 是否启用此truck（反思系统定时巡检入口）
+    ENABLED = False  # 是否启用此truck（默认关闭，由控制面板显式启用）
     CHECK_CYCLE_TIME = 60.0  # 触发条件检查周期（秒）
     REFLECTION_INTERVAL = 10800.0  # 反思间隔（秒，3小时）
 
 class ReflectionFeedbackTruckConfig:
     """决策情感自发入口：同一开关控制低值反思和达到100的高值行动。"""
-    ENABLED = True
+    ENABLED = False
     CHECK_CYCLE_TIME = 1.0  # 秒；忙碌时由 station 暂停
     LOW_THRESHOLD = 0
 
@@ -66,10 +66,10 @@ class ReflectionBelongingTruckConfig(ReflectionFeedbackTruckConfig):
 class TaskTruckConfig:
     """TaskTruck配置类 - 任务到期触发卡车配置
 
-    默认关闭：任务到期直接启动 PFCA 属于会对外产生行为的链路，
-    须由前端 Truck 控制面板显式启用，避免真实环境自动触发。
+    默认开启：与当前运行状态一致。任务到期直接启动 PFCA 属于会对外产生行为的链路，
+    需要时应到前端 Truck 控制面板显式关闭。
     """
-    ENABLED = False  # 是否启用此truck
+    ENABLED = True  # 是否启用此truck
     CYCLE_TIME = 60.0  # 到期任务检查周期（秒）
 
 # ==================== PRE模块配置 ====================
@@ -79,7 +79,7 @@ class PreTruckConfig:
     规则层零 LLM 成本，只有两条：时间到、群聊中主人有新消息。
     命中后交给 proactive 判断层（intent=pre_opportunity），由它决定是否拉起 PFCA。
     """
-    ENABLED = False  # 是否启用此truck（默认关闭，由控制面板显式启用）
+    ENABLED = True  # 是否启用此truck（默认开启，与当前运行状态一致；需关闭时由控制面板显式停用）
     CYCLE_TIME = 3600.0  # 契机巡检周期（秒）：距上次命中满 1 小时触发「时间到」
     CHECK_CYCLE_TIME = 60.0  # 规则扫描周期（秒）：群聊主人新消息的检测频率
     # 整辆 PRE 的全局触发冷却（秒）：命中一次后，距下次规则判定需满该时长。

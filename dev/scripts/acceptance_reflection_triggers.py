@@ -42,6 +42,12 @@ class ReflectionTriggerAcceptance(unittest.IsolatedAsyncioTestCase):
         for mock_patch in self.patches:
             mock_patch.start()
             self.addCleanup(mock_patch.stop)
+        # 两辆 truck 出厂默认关闭；此处显式启用，用例结束复原。
+        for key in ("reflection_efficacy_truck", "reflection_belonging_truck"):
+            config = get_all_truck_configs()[key]
+            previous = config.ENABLED
+            config.ENABLED = True
+            self.addCleanup(setattr, config, "ENABLED", previous)
 
     async def test_strict_boundary_and_independent_axes(self):
         config = self.efficacy._get_config()
@@ -91,7 +97,6 @@ class ReflectionTriggerAcceptance(unittest.IsolatedAsyncioTestCase):
         for truck in (self.efficacy, self.belonging):
             self.assertIn(truck.truck_id, get_available_trucks())
             self.assertIn(truck.truck_id, get_all_truck_configs())
-            self.assertIn(truck.truck_id, get_enabled_trucks())
             self.assertIs(station._get_truck(truck.truck_id), truck)
             truck.state = "running"
         self.assertEqual(len(station._all_running_trucks()), 2)
@@ -133,6 +138,43 @@ class ReflectionTriggerAcceptance(unittest.IsolatedAsyncioTestCase):
             finally:
                 self.efficacy.stop()
                 await asyncio.gather(self.efficacy._task, return_exceptions=True)
+
+
+class TruckDefaultAcceptance(unittest.IsolatedAsyncioTestCase):
+    """启动默认值必须等于当前运行状态；管理页与 Core 共用同一份默认值。"""
+
+    EXPECTED = {
+        "private_truck": True,
+        "at_mention_truck": True,
+        "pre_truck": True,
+        "reflection_char_truck": True,
+        "reflection_time_truck": False,
+        "reflection_efficacy_truck": False,
+        "reflection_belonging_truck": False,
+        "task_truck": True,
+    }
+
+    async def test_fresh_install_defaults_match_current_running_state(self):
+        from truck_settings_store import TRUCKS, read_settings
+        # 沙箱数据目录里没有 trucks.json，读到的是出厂默认值。
+        self.assertFalse((Path(_sandbox.name) / "manager" / "trucks.json").exists())
+        self.assertEqual({key: meta[3] for key, meta in TRUCKS.items()}, self.EXPECTED)
+        self.assertEqual(read_settings()["enabled"], self.EXPECTED)
+
+    async def test_config_class_defaults_match_store_defaults(self):
+        # 未落盘 trucks.json 时 station 直接用类默认值启动，两套默认值必须一致。
+        self.assertEqual(
+            {key: config.ENABLED for key, config in get_all_truck_configs().items()},
+            self.EXPECTED)
+
+    async def test_saved_config_overrides_defaults_on_next_start(self):
+        from truck_settings_store import apply_startup_settings, update_settings
+        configs = get_all_truck_configs()
+        update_settings({"enabled": {key: not value for key, value in self.EXPECTED.items()}})
+        self.addCleanup(lambda: update_settings({"enabled": dict(self.EXPECTED)}))
+        apply_startup_settings(configs)
+        self.assertEqual({key: cfg.ENABLED for key, cfg in configs.items()},
+                         {key: not value for key, value in self.EXPECTED.items()})
 
 
 if __name__ == "__main__":
