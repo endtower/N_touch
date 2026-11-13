@@ -149,6 +149,20 @@ packages\                    ← 整个文件夹：*.zip 与同名 *.json 必须
 
 **API 地址写法**：填供应商文档里给 OpenAI SDK 的 base URL（通常以 `/v1` 结尾）。系统会在其后拼 `/chat/completions`（embed 组会拼 `/embeddings` 或火山的多模态接口）。地址多了或少了一层 `/v1` 是最常见的 404 原因。
 
+**费用统计与单价（`token_pricing.json`）**
+
+程序只负责**数 token**，不知道用户实际付多少钱；金额换算靠单价，而单价是**用户自己维护**的，写在 `data\user_settings\token_pricing.json`。
+
+为什么不让程序内置：不知道用户用哪家供应商、什么套餐、有没有折扣，价格本身也会变。写死在源码里既不准，也会让用户一旦改价就被判定「本地修改」而无法更新。
+
+- 文件不存在或没写某个模型 → 用程序里的出厂默认价目（`TOKEN_PRICING_DEFAULTS`，只是占位/参考，不是权威价）。
+- 格式：`{"模型名": {"input_per_million": 数, "output_per_million": 数, "cached_per_million": 数}}`，单位是每百万 token 的人民币单价，值必须 ≥ 0。
+- 只写要覆盖的模型即可；**改完立即生效，不用重启 Core**。
+- 非法值（负数、字符串、布尔）那一项会被忽略并沿用原值；整个文件坏掉则回退出厂默认，不崩溃。
+- 完全不配置也能用，只是费用统计记 0（token 数照常统计）。
+
+> **给接手的 Agent**：用户抱怨费用数字不对时，改 `data\user_settings\token_pricing.json`，**不要去改源码里的 `TOKEN_PRICING_DEFAULTS`**。改源码会触发本地修改检测，用户以后就更新不了 Core。
+
 ---
 
 ## 6. 更新
@@ -266,6 +280,7 @@ packages\                    ← 整个文件夹：*.zip 与同名 *.json 必须
 | 数据根 | `%LOCALAPPDATA%\Abyss\data` |
 | 部署配置（身份/端口/密钥） | `data\.env.dev` |
 | 记忆与会话库 | `data\memory\` |
+| 模型单价配置（费用统计，用户维护） | `data\user_settings\token_pricing.json` |
 | 日志 | `data\logs\`（Core 的 `app_*.log`、启动输出、SnowLuma、消息接入） |
 | 管理令牌 | `data\manager\service_token.txt` |
 | 更新源设置 | `data\manager\update_sources.json` |

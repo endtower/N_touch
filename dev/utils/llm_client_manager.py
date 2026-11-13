@@ -105,7 +105,14 @@ TOKEN_STATS_FILE = _data_root() / "memory" / "token_stats.json"
 TOKEN_TRACE_FILE = _data_root() / "memory" / "token_trace.json"
 
 # 每百万 token 单价（人民币）。key 为归一化后的模型名（去掉 `deepseek/` 等前缀）。
-TOKEN_PRICING = {
+#
+# 这里只是**出厂默认值**，不要当成权威价目表：用户用什么供应商、什么套餐、
+# 什么折扣，程序无从知道，价格也会变。真实单价由用户在
+# `data/user_settings/token_pricing.json` 里覆盖（见 _load_pricing），
+# 程序只负责数 token，金额换算交给用户配置。
+#
+# 未在表里出现的模型一律记 0 花费（宁可显示「未计价」，也不静默按别家价算）。
+TOKEN_PRICING_DEFAULTS = {
     "deepseek-flash": {
         "input_per_million": 1,
         "output_per_million": 2,
@@ -150,6 +157,81 @@ TOKEN_PRICING = {
         "cached_per_million": 0.5
     }
 }
+
+# 用户覆盖文件：按模型名覆盖或新增；未知模型/字段忽略，非法值回退默认。
+TOKEN_PRICING_FILE = _data_root() / "user_settings" / "token_pricing.json"
+
+_PRICING_FIELDS = ("input_per_million", "output_per_million", "cached_per_million")
+
+# 首次运行放出的模板：只给用户看清格式，不预设任何非默认价。
+_PRICING_TEMPLATE = """{
+  "_说明": [
+    "模型单价配置：用户自己维护，程序不会覆盖这个文件。",
+    "程序只数 token，不知道你实际付多少钱，所以金额按这里的单价换算。",
+    "key 是模型名（去掉 deepseek/ 之类前缀），三个字段都是每百万 token 的人民币单价。",
+    "只写想覆盖的模型即可，没写的用程序内置默认值。改完立即生效，不用重启 Core。",
+    "值必须 >= 0；填错的那一项会被忽略。不知道单价就别写（等于只统计 token 数）。"
+  ],
+
+  "示例_照抄改数字": {
+    "input_per_million": 1.0,
+    "output_per_million": 2.0,
+    "cached_per_million": 0.02
+  }
+}
+"""
+
+
+def _ensure_pricing_template() -> None:
+    """首次运行放出模板；文件已存在时绝不覆盖（那是用户数据）。
+
+    只写一次，失败也只记警告——价格配置缺失不影响任何核心功能。
+    """
+    try:
+        if TOKEN_PRICING_FILE.exists():
+            return
+        TOKEN_PRICING_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TOKEN_PRICING_FILE.write_text(_PRICING_TEMPLATE, encoding="utf-8")
+    except OSError:
+        logger.warning("放出 token_pricing.json 模板失败，本次按出厂默认价目计算")
+
+
+def _load_pricing() -> Dict[str, Dict[str, float]]:
+    """默认价目 + 用户覆盖。每次调用都读盘，改完配置无需重启 Core。
+
+    用户文件只认 {模型名: {input_per_million, output_per_million,
+    cached_per_million}}，值必须是 >= 0 的数字；其余键原样忽略，
+    比默认表多出来的模型会被采纳（用户换了别家模型也能自己补）。
+    """
+    pricing = {name: dict(value) for name, value in TOKEN_PRICING_DEFAULTS.items()}
+    _ensure_pricing_template()
+    try:
+        if not TOKEN_PRICING_FILE.is_file():
+            return pricing
+        document = json.loads(TOKEN_PRICING_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("token_pricing.json 读取失败，本次按出厂默认价目计算")
+        return pricing
+    if not isinstance(document, dict):
+        logger.warning("token_pricing.json 顶层必须是 JSON 对象，本次按出厂默认价目计算")
+        return pricing
+
+    for model, entry in document.items():
+        if not isinstance(entry, dict):
+            continue
+        current = pricing.setdefault(model, {field: 0 for field in _PRICING_FIELDS})
+        for field in _PRICING_FIELDS:
+            if field not in entry:
+                continue
+            value = entry[field]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                logger.warning(
+                    "token_pricing.json 中 %s.%s 非法（%r），沿用原值", model, field, value
+                )
+                continue
+            current[field] = float(value)
+    return pricing
+
 
 # 合法模型等级白名单（LLMSettings 上的等级注册名，大写）
 MODEL_LEVELS = ('FLASH', 'CONVERSATION', 'PERSONA', 'PRO', 'VISION', 'EMBEDDING')
@@ -386,11 +468,18 @@ def _write_stats(data: Dict[str, Any]) -> None:
 
 
 def _compute_cost(model: str, *, completion: int, cache_hit: int, cache_miss: int) -> Dict[str, float]:
-    """按归一化模型名查价；未收录模型记 0 花费并告警（不静默按其它模型计价）。"""
+    """按归一化模型名查价；未收录模型记 0 花费并告警（不静默按其它模型计价）。
+
+    价目 = 出厂默认 + 用户 token_pricing.json 覆盖，每次调用读一次盘，
+    用户改完单价立即生效，不必重启 Core。
+    """
     name = model.split("/")[-1] if model and "/" in model else (model or "")
-    pricing = TOKEN_PRICING.get(name)
+    pricing = _load_pricing().get(name)
     if pricing is None:
-        logger.warning(f"未收录定价的模型: {model}，本次花费记 0，请补录 TOKEN_PRICING")
+        logger.warning(
+            f"未收录定价的模型: {model}，本次花费记 0。"
+            f"如需统计金额，请在该文件里补一条：{TOKEN_PRICING_FILE}"
+        )
         return {"cost_cache_miss": 0.0, "cost_cache_hit": 0.0, "cost_output": 0.0, "cost_total": 0.0}
     cost_cache_miss = cache_miss / 1_000_000 * pricing["input_per_million"]
     cost_cache_hit = cache_hit / 1_000_000 * pricing["cached_per_million"]
