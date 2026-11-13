@@ -315,10 +315,12 @@ class ConversationToolManager(ToolManager):
         特殊槽位由 list_notes 直接给全，不经此工具。"""
         return await ToolHC.query_note(title)
 
-    async def query_bequest(self, query: str, top_k: int = 3, category: str = "话术") -> Dict[str, Any]:
+    async def query_bequest(self, query: str, top_k: int = 7, category: str = "话术") -> Dict[str, Any]:
         """查询经验（按语义相似度检索 title），委托通用 ToolBequest.query_bequest。
 
         category 可选「话术」/「风格」；与 reflection 的 query_bequest 同源、
         原始结构化输出（title / summary / similarity），不做激活去重，由 LLM 自行判断取用。
+
+        top_k 默认 7（2026-11-13）：主动检索多给几条候选，由 LLM 自己挑。
         """
         return await ToolBequest.query_bequest(query=query, top_k=top_k, category=category)

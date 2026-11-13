@@ -90,7 +90,7 @@ class ToolBequest:
             },
             "top_k": {
                 "type": "integer",
-                "description": "返回条数上限，默认 3",
+                "description": "返回条数上限，默认 7",
             },
             "category": {
                 "type": "string",
@@ -159,7 +159,7 @@ class ToolBequest:
                         },
                         "top_k": {
                             "type": "integer",
-                            "description": "返回条数上限，默认 3",
+                            "description": "返回条数上限，默认 7",
                         },
                     },
                     "required": ["query"],
@@ -289,6 +289,9 @@ class ToolBequest:
         委托 BequestOperations.search_bequest_by_vector，再补齐每条经验
         的标题与内容。向量嵌入功能禁用或查询向量生成失败时，数据库层
         返回空结果（返回 count=0，不阻断调用方）。
+
+        返回只保留调用方真正会用到的字段：bequest_id 仅供内部定位与去重，
+        增删经验按 title + category 定向，不对外暴露（2026-11-13 精简）。
         """
         from brain.hc.database.bequest import BequestOperations
 
@@ -302,12 +305,11 @@ class ToolBequest:
             bequest = await bequest_ops.get_bequest_by_id(bequest_id)
             if bequest:
                 results.append({
-                    "bequest_id": bequest_id,
                     "title": bequest.get("title", ""),
                     "summary": bequest.get("summary", ""),
                     "similarity": round(sim, 4),
                 })
-        return {"query": query, "count": len(results), "bequests": results}
+        return {"count": len(results), "bequests": results}
 
     @classmethod
     async def _query_by_title(
@@ -330,7 +332,6 @@ class ToolBequest:
             for h in hits
         ]
         result: Dict[str, Any] = {
-            "query": query,
             "mode": "标题",
             "count": len(results),
             "bequests": results,
@@ -345,17 +346,20 @@ class ToolBequest:
 
     @classmethod
     async def query_bequest(
-        cls, query: str, top_k: int = 3, mode: str = "向量", category: str = "话术"
+        cls, query: str, top_k: int = 7, mode: str = "向量", category: str = "话术"
     ) -> Dict[str, Any]:
         """检索话术或风格样本（category 中文枚举「话术」/「风格」，缺省「话术」）。
 
         mode：「向量」（默认）按语义相似度检索（向量比对 title）；
         「标题」按标题关键词比对，命中更少更省 token。
 
+        top_k 默认 7（2026-11-13）：主动检索多给几条候选，让调用方自己挑，
+        比只给 3 条更容易命中真正对症的经验。
+
         Returns:
-            向量: {"query": str, "count": int,
+            向量: {"count": int,
                    "bequests": [{"title": str, "summary": str, "similarity": float}]}
-            标题: {"query": str, "mode": "标题", "count": int,
+            标题: {"mode": "标题", "count": int,
                    "bequests": [{"title": str, "summary": str}],
                    "hint": str}  # hint 仅在未命中时出现
         """
@@ -376,7 +380,7 @@ class ToolBequest:
         return result
 
     @classmethod
-    async def query_decision_bequest(cls, query: str, top_k: int = 3) -> Dict[str, Any]:
+    async def query_decision_bequest(cls, query: str, top_k: int = 7) -> Dict[str, Any]:
         """按语义相似度检索决策经验（category 固定 'decision'，向量比对 title）。
 
         决策经验是一种过往的面对某种情景的广泛思路。
@@ -384,8 +388,10 @@ class ToolBequest:
         学习经验。不设相似度阈值——相似度随结果一并返回，匹配是否够用
         由调用方 LLM 自行判断。
 
+        top_k 默认 7（2026-11-13），与 query_bequest 对齐。
+
         Returns:
-            {"query": str, "count": int, "hint": str,  # hint 仅在检索结果为空时出现
+            {"count": int, "hint": str,  # hint 仅在检索结果为空时出现
              "bequests": [{"title": str, "summary": str, "similarity": float}]}
         """
         result = await cls._query_by_category(query, top_k, "decision")
