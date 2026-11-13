@@ -3,6 +3,7 @@
 双击 **[启动弱链接.cmd](启动弱链接.cmd)**，或打开 `app/AbyssLauncher.exe`。启动器统一管理 Core、消息接入和 SnowLuma，并提供各项目的管理页面。
 
 > **用户下载：[Releases](https://github.com/endtower/weaklink/releases/latest)。**
+> 让 AI 帮你装：把你的助手叫来，让它先读 [dev/docs/AGENT-INSTALL.md](dev/docs/AGENT-INSTALL.md) 再动手。
 > 本仓库同时是源码工程，源码在 [`dev/`](dev/) 下，按组件分目录。
 
 ## 源码在哪
@@ -64,7 +65,9 @@ git checkout n-touch-final 即可回看。
 
 ## 给接手的 Agent
 
-先读 [AGENTS.md](AGENTS.md)。通过 `GET /v1/storage` 确认真实运行位置；管理服务未启动时，检查 `app/abyss-data-dir.txt`、`app/abyss-storage-dir.txt` 和组件目录。
+**帮普通用户装机**（从零装、配模型、可选接 QQ）：读 [dev/docs/AGENT-INSTALL.md](dev/docs/AGENT-INSTALL.md)。
+
+开发和改运行版源码：先读 [AGENTS.md](AGENTS.md)。通过 `GET /v1/storage` 确认真实运行位置；管理服务未启动时，检查 `app/abyss-data-dir.txt`、`app/abyss-storage-dir.txt` 和组件目录。
 
 - 修改用户正在使用的功能：操作 `app/components/<组件>/source/`，先备份，修改后重启对应服务。
 - 开发公开版本与构建安装包：操作 `dev/`，入口见 [dev/README.md](dev/README.md)。开发源码不会自动覆盖运行源码。

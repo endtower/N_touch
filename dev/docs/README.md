@@ -1,6 +1,8 @@
 # 技术文档
 
 - [STORAGE.md](STORAGE.md)：程序、个人数据、第三方安装、缓存、备份的归属与更新规则。
+- [STARTUP.md](STARTUP.md)：一键启动流程、外部 AI 改启动脚本的接口与验收。
+- [AGENT-INSTALL.md](AGENT-INSTALL.md)：给安装方 AI 的逐步引导（装 Core、配模型、可选接 QQ、判断标准）。
 - [../updater/README.md](../updater/README.md)：源码组件安装、构建、更新和恢复。
 - `api/`、`infrastructure.md`、`setup_snowluma.md`：保留的本机技术参考，公开状态仍按既有忽略规则处理。
 

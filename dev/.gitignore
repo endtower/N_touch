@@ -227,3 +227,4 @@ docs/*
 !docs/STORAGE.md
 !docs/README.md
 !docs/STARTUP.md
+!docs/AGENT-INSTALL.md
